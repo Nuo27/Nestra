@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": ["Bash(npm test:*)", "Read(*)"]
+  },
+  "env": {
+    "SOME_USER_VAR": "keep-me"
+  }
+}

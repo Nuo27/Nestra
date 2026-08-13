@@ -1,0 +1,80 @@
+[package]
+name = "nestra"
+version = "0.1.0"
+edition = "2021"
+description = "Unified control center for AI Coding CLIs"
+authors = ["Nestra"]
+license = "MIT"
+
+[lib]
+name = "nestra_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+# Windows autostart Run-key writer — the autostart plugin's auto-launch
+# delegate writes the exe path UNQUOTED, which breaks under install paths
+# with spaces; autostart.rs owns the registry entry instead. Already in the
+# lock (transitive via auto-launch), so no new compile cost.
+winreg = "0.55"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+aes-gcm = "0.10"
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ureq = { version = "2", features = ["json"] }
+dirs = "6"
+thiserror = "2"
+url = "2"
+which = "6"
+jsonc-parser = { version = "0.26", features = ["serde"] }
+# Nestra orchestration identity (task_id / request_id are UUIDs).
+uuid = { version = "1", features = ["v4", "serde"] }
+# Local gateway: an HTTP server the agent points at (via a stable alias
+# base_url) so Nestra can rewrite the model field, observe status/usage/cache
+# tokens, and migrate on quota/rate-limit. Runs on the Tauri async runtime
+# (Tokio under the hood). Loopback-only; never exposes traffic off-device.
+# `tokio` itself is pulled transitively by Tauri; we depend on it directly
+# only for the macros (`tokio::select` for graceful shutdown).
+hyper = { version = "1", features = ["server", "http1", "http2", "client"] }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "http1", "http2", "tokio", "client", "client-legacy"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["native-tokio", "http1", "http2", "ring"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["sync", "macros", "rt", "net", "io-util"] }
+bytes = "1"
+http = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+# Minimal-disk dev profile: deps ship zero debuginfo, the local crate keeps
+# line tables only (enough for panic backtraces). Incremental cache disabled
+# to stop the multi-GB incremental/ dir regrowing — trade-off is slower
+# full rebuilds. Flip `incremental = true` if the dev loop feels sluggish.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 0
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+# `unwind` (the default) keeps `catch_unwind` working: quota_refresh's run_loop,
+# session parsing and Tauri's IPC command layer all rely on it to convert a
+# panic into a recoverable error instead of terminating the whole process.
+panic = "unwind"

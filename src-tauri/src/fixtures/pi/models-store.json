@@ -1,0 +1,11 @@
+{
+  "providers": {
+    "existing": {
+      "baseUrl": "https://api.existing.com/v1",
+      "api": "openai-comp",
+      "models": [
+        { "id": "other-model", "name": "other-model" }
+      ]
+    }
+  }
+}

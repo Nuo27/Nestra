@@ -1,0 +1,33 @@
+{
+  "minimax/MiniMax-M3": {
+    "limit": { "context": 1000000, "output": 128000 }
+  },
+  "z-ai/glm-5.2": {
+    "limit": { "context": 1000000, "output": 131072 }
+  },
+  "opencode-go/deepseek-v4-flash": { "api": "anthropic" },
+  "opencode-go/deepseek-v4-pro": { "api": "openai-comp" },
+  "opencode-go/glm-5.2": { "api": "anthropic" },
+  "opencode-go/glm-5.1": { "api": "anthropic" },
+  "opencode-go/glm-5": { "api": "anthropic" },
+  "opencode-go/kimi-k3": { "api": "openai-comp" },
+  "opencode-go/kimi-k2.7-code": { "api": "openai-comp" },
+  "opencode-go/kimi-k2.6": { "api": "openai-comp" },
+  "opencode-go/kimi-k2.5": { "api": "openai-comp" },
+  "opencode-go/hy3": { "api": "openai-comp" },
+  "opencode-go/hy3-preview": { "api": "openai-comp" },
+  "opencode-go/mimo-v2-pro": { "api": "openai-comp" },
+  "opencode-go/mimo-v2-omni": { "api": "openai-comp" },
+  "opencode-go/mimo-v2.5": { "api": "openai-comp" },
+  "opencode-go/mimo-v2.5-pro": { "api": "openai-comp" },
+  "opencode-go/grok-4.5": { "api": "response-api" },
+  "opencode-go/gpt-5.6-luna": { "api": "response-api" },
+  "opencode-go/minimax-m3": { "api": "anthropic" },
+  "opencode-go/minimax-m2.7": { "api": "anthropic" },
+  "opencode-go/minimax-m2.5": { "api": "anthropic" },
+  "opencode-go/qwen3.8-max": { "api": "anthropic" },
+  "opencode-go/qwen3.7-max": { "api": "anthropic" },
+  "opencode-go/qwen3.7-plus": { "api": "anthropic" },
+  "opencode-go/qwen3.6-plus": { "api": "anthropic" },
+  "opencode-go/qwen3.5-plus": { "api": "anthropic" }
+}

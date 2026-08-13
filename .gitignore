@@ -1,0 +1,46 @@
+# dependencies
+node_modules/
+
+# build artifacts
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# logs / stderr captures
+*.log
+src-tauri/*_stderr.txt
+
+# editor
+.vscode/
+.idea/
+
+# os
+.DS_Store
+Thumbs.db
+
+# env / local secrets
+.env
+.env.*
+!.env.example
+
+# dev-only scripts (icon generator, i18n checker, mock upstream, self-signed
+# builder — all local dev tools, not needed in the public release)
+scripts/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+
+# temp / swap / backup files
+*.bak
+*.tmp
+*.swp
+*~
+*.orig
+
+# agent / developer-only documents (internal, never ship)
+AGENTS.md
+DESIGN.md
+.codegraph/
+.opencode/
+.zcode/
+.claude/
