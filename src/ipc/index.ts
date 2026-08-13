@@ -59,3 +59,4 @@ export * from "./agent";
 export * from "./orchestration";
 export * from "./gateway";
 export * from "./autostart";
+export * from "./updates";

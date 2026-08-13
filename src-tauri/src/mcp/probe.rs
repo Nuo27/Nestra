@@ -19,6 +19,15 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// `CREATE_NO_WINDOW` — this app is `windows_subsystem = "windows"` (no parent
+/// console), so a console child (e.g. an `npx`/`.cmd` MCP server) spawned
+/// without this flag flashes its own console. Keeps the "Test" probe silent.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// How long any single probe attempt is allowed to take before we kill it.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -98,6 +107,10 @@ fn probe_stdio(t: &crate::mcp::McpTransport) -> AppResult<ProbeResult> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // Hide the console window a `.cmd`/console child would otherwise flash
+    // while the user clicks "Test".
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
 
     let started = Instant::now();
     let mut child = match command.spawn() {

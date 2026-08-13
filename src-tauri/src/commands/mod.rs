@@ -22,6 +22,7 @@ pub mod quota;
 pub mod sessions;
 pub mod settings;
 pub mod skills;
+pub mod updates;
 
 use crate::error::{AppError, AppResult};
 use std::sync::{Arc, Mutex};

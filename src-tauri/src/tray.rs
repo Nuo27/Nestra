@@ -161,8 +161,11 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<Wry>, CheckMenuItem<Wr
         app,
         ID_AUTOSTART,
         "Launch at startup",
-        crate::commands::autostart::is_enabled(app).unwrap_or(false),
         true,
+        // NOTE: Tauri 2's arg order is (text, enabled, checked, accelerator)
+        // — easy to swap. `enabled` must always be true (the item is always
+        // interactive); `checked` reflects the live OS autostart entry.
+        crate::commands::autostart::is_enabled(app).unwrap_or(false),
         None::<&str>,
     )?;
     menu.append(&autostart)?;

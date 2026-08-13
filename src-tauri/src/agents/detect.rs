@@ -8,6 +8,16 @@ use crate::db::{self, PlatformDirs};
 use crate::error::AppResult;
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// `CREATE_NO_WINDOW` — this app is `windows_subsystem = "windows"` (no parent
+/// console), so a console child (`claude.cmd` → `cmd.exe`, `powershell.exe`,
+/// …) spawned without this flag allocates and flashes its own console window.
+/// Applied to every detection subprocess so on-launch probing stays silent.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// How long a single `--version` probe may run before we kill it. Real CLIs
 /// answer in well under a second; a hung one must never stall the UI or DB.
 const VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -214,8 +224,13 @@ fn appx_install_location(prefix: &str) -> Option<PathBuf> {
     // helper thread with the same deadline as version probing.
     let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
     std::thread::spawn(move || {
-        let out = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        let mut cmd = std::process::Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+        // Hide the PowerShell console window (same silent-subprocess rule as
+        // version probing).
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let out = cmd
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -248,13 +263,16 @@ fn capture_version(path: &Path) -> Option<String> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = (|| -> Option<String> {
-            let mut child = std::process::Command::new(&path)
-                .arg("--version")
+            let mut cmd = std::process::Command::new(&path);
+            cmd.arg("--version")
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
-                .stdin(std::process::Stdio::null())
-                .spawn()
-                .ok()?;
+                .stdin(std::process::Stdio::null());
+            // Hide the console window a `.cmd`/console child would otherwise
+            // flash (this probe runs on launch while the DB lock is held).
+            #[cfg(windows)]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            let mut child = cmd.spawn().ok()?;
             let started = Instant::now();
             // Poll `try_wait` so a hung binary can't block the helper thread
             // (or, via `recv_timeout`, the caller holding the DB lock) forever.

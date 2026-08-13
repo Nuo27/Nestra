@@ -1,6 +1,6 @@
 [package]
 name = "nestra"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Unified control center for AI Coding CLIs"
 authors = ["Nestra"]
@@ -19,6 +19,7 @@ tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
+tauri-plugin-opener = "2"
 # Windows autostart Run-key writer — the autostart plugin's auto-launch
 # delegate writes the exe path UNQUOTED, which breaks under install paths
 # with spaces; autostart.rs owns the registry entry instead. Already in the
@@ -26,6 +27,9 @@ tauri-plugin-window-state = "2"
 winreg = "0.55"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Update-check version comparison. Already in the dependency tree
+# transitively, so declaring it directly adds no real compile cost.
+semver = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 aes-gcm = "0.10"
 rand = "0.8"

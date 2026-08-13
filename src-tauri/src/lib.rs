@@ -122,6 +122,9 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_window_state::Builder::new().build())
+        // Open URLs/files in the user's default handler. Used by the
+        // update-check card to open the GitHub release page for download.
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // Launch-at-login (Windows HKCU Run key / macOS LaunchAgent / Linux
         // XDG). The extra arg lands in the autostart entry so the app can tell
@@ -321,6 +324,8 @@ pub fn run() {
             commands::diagnostics::diag_export_logs,
             commands::diagnostics::diag_health,
             commands::diagnostics::diag_open_data_dir,
+            // Updates — GitHub Release version check (manual trigger)
+            commands::updates::updates_check,
             // Autostart (launch at login)
             commands::autostart::autostart_is_enabled,
             commands::autostart::autostart_set,
