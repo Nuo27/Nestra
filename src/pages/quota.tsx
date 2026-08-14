@@ -75,9 +75,14 @@ function QuotaCard({ endpoint }: { endpoint: EndpointInfo }) {
     staleTime: 60_000,
     gcTime: 30 * 60_000,
     refetchInterval: auto ? intervalSec * 1000 : false,
-    refetchIntervalInBackground: false,
+    // Keep polling while the window is hidden (minimized / occluded /
+    // closed-to-tray): quota freshness is the whole point of auto-refresh.
+    refetchIntervalInBackground: true,
     refetchOnMount: false,
-    refetchOnWindowFocus: false,
+    // Catch up the moment the user returns — covers OS suspend/wake and any
+    // timer throttling during long hidden periods. Skips when data is fresh
+    // (staleTime).
+    refetchOnWindowFocus: true,
   });
   const data = q.data;
   const qc = useQueryClient();
@@ -126,9 +131,9 @@ function QuotaCard({ endpoint }: { endpoint: EndpointInfo }) {
     setNow(Date.now());
   }, [q.dataUpdatedAt]);
   const secsLeft = nextRefreshMs > 0 ? Math.max(0, Math.floor((nextRefreshMs - now) / 1000)) : 0;
-  // "sending request" covers both the brief window after the countdown hits 0
-  // and the whole in-flight fetch. One label, no flicker between states.
-  const sending = auto && shown && (q.isFetching || secsLeft === 0);
+  // "sending request" only while a fetch is genuinely in flight — a due-but-
+  // not-yet-fired tick or a paused interval must not stick the label on.
+  const sending = auto && shown && q.isFetching;
 
   const [settingsOpen, setSettingsOpen] = useState(false);
 

@@ -40,6 +40,7 @@ scripts/
 # agent / developer-only documents (internal, never ship)
 AGENTS.md
 DESIGN.md
+docs/features/
 .codegraph/
 .opencode/
 .zcode/
