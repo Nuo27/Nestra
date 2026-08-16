@@ -22,6 +22,17 @@ export default defineConfig({
   },
   build: {
     target: "es2022",
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return;
+          if (id.includes("@tanstack")) return "tanstack";
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id))
+            return "react";
+          return "vendor";
+        },
+      },
+    },
     // Source maps are excluded from production builds: Tauri embeds `dist/`
     // into the native binary, so a 3 MB `.map` would ship in every installer
     // and exe for no end-user benefit (the source is local during development).
