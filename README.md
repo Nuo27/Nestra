@@ -5,7 +5,7 @@
 ![Mode](https://img.shields.io/badge/local--only-127.0.0.1-success)
 
 > A local-only desktop control center for AI coding agents — **Claude Code**,
-> **OpenCode Desktop**, and **Pi**.
+> **OpenCode Desktop**, **Pi**, and **ZCode**.
 
 Nestra is one place to manage providers, bind agents, switch between direct and
 routed traffic, watch quotas, and browse session history — without a cloud
@@ -23,7 +23,7 @@ leaves the device.
   validated on save and encrypted at rest (AES-256-GCM). Pick models and
   override their advertised abilities per endpoint.
 - **Agent detection & binding** — Nestra auto-detects Claude Code, OpenCode
-  Desktop, and Pi and binds each to a provider, writing the agent's config
+  Desktop, Pi, and ZCode and binds each to a provider, writing the agent's config
   after backing up the original. Detect-on-launch plus on-demand re-detect,
   enable/disable, and config backup / restore / factory-reset.
 - **Direct / Routed modes** — Per-agent switch. *Direct*: the agent talks
@@ -37,10 +37,18 @@ leaves the device.
 - **Quota dashboard** — Real-time quota monitoring with keep-alive support for
   z.ai and MiniMax 5-hour windows, plus reactive detection of real 429/quota
   responses from any provider.
-- **Sessions** — Browse and search session history imported from each agent's
-  local logs, then resume any session via a copied command.
+- **Sessions & context lifecycle** — Browse and search session history
+  imported from each agent's local logs, then resume any session via a copied
+  command. Long sessions show context pressure, and one click generates an
+  editable **handoff** (goal/decisions/modified files/failed attempts) that
+  injects into a fresh agent session; durable decisions become knowledge files
+  the agent reads natively.
 - **Skills & MCP** — Scan, install, and manage skills per agent. Configure MCP
   servers (stdio or HTTP) with per-agent enable/disable control.
+- **Review runtime (Pi)** — Spawn an isolated Pi review session on finished
+  work; it routes through the gateway as the `pi:reviewer` role to a stronger
+  model, streams its events live, and returns a structured verdict — without
+  touching the main context.
 - **Command palette & polish** — A ⌘K palette for fast navigation, light/dark
   themes, and a full English + 中文 interface.
 
@@ -51,6 +59,7 @@ leaves the device.
 | Claude Code      | `claude`       | `~/.claude/settings.json`                           |
 | OpenCode Desktop | `OpenCode.exe` | `~/.config/opencode/opencode.json`                  |
 | Pi               | `pi`           | `~/.pi/agent/models.json` + `~/.pi/agent/auth.json` |
+| ZCode            | `zcode`        | `~/.zcode/cli/` (SQLite)                            |
 
 ## Direct vs Routed
 
