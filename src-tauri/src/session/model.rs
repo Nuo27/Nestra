@@ -18,7 +18,7 @@ use super::semantic::SemanticEvent;
 pub struct Session {
     /// Canonical conversation id, provider-native (Claude `sessionId`, etc.).
     pub id: String,
-    /// Provider kind: `claude-code`, `pi`, `opencode-desktop`.
+    /// Provider kind: `claude-code-cli`, `pi-cli`, `opencode-desktop`.
     pub provider: String,
     pub title: String,
     /// Short preview — typically the last assistant reply.

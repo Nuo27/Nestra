@@ -75,7 +75,7 @@ fn apply_targets_fake_home_and_round_trips() {
     // later test in the same process never inherits a stale override.
     let _guard = FakeHome::new();
 
-    let adapter = agents::adapter_for("claude-code").expect("claude-code adapter");
+    let adapter = agents::adapter_for("claude-code-cli").expect("claude-code adapter");
 
     // 1. Resolved path must live under the FAKE home, not the real one.
     let home = std::env::var("NESTRA_HOME_DIR").unwrap();

@@ -76,6 +76,18 @@ fn opencode_desktop_dirs() -> Vec<PathBuf> {
         // canonical merge).
         out.push(app_data.join("opencode").join("sessions"));
     }
+    // OpenCode resolves its own data dir XDG-style even on Windows, where
+    // `local_app_data` above points at `%LOCALAPPDATA%` — probe the
+    // `~/.local/share` spelling too (same path as `local_app_data` on Linux;
+    // deduped below).
+    if let Ok(home) = db::home_dir() {
+        out.push(
+            home.join(".local")
+                .join("share")
+                .join("opencode")
+                .join("sessions"),
+        );
+    }
     // Dedupe identical paths, then keep only real directories.
     let mut seen = std::collections::HashSet::new();
     out.retain(|p| seen.insert(p.clone()) && p.is_dir());

@@ -236,37 +236,6 @@ CREATE TABLE IF NOT EXISTS routing_policy (
   PRIMARY KEY (agent_id, role)
 );
 
--- Logical session identity (one row per agent-native session id the gateway
--- has observed). This is the stable handle across provider migration; it is
--- distinct from the derived `session` table (which is a read-only log cache).
-CREATE TABLE IF NOT EXISTS logical_session (
-  agent_id           TEXT NOT NULL,
-  logical_session_id TEXT NOT NULL,
-  first_seen         INTEGER NOT NULL,
-  last_seen          INTEGER NOT NULL,
-  PRIMARY KEY (agent_id, logical_session_id)
-);
-
--- A run = one top-level AgentRun OR one ChildSession spawned by a parent run.
--- `parent_run_id` is NULL for top-level runs. This generalizes the
--- sidechain model (session/model.rs parent_session_id / is_subagent) to all
--- agents.
-CREATE TABLE IF NOT EXISTS run (
-  id              TEXT PRIMARY KEY,            -- Nestra UUID
-  agent_id        TEXT NOT NULL,
-  logical_session TEXT NOT NULL,               -- agent-native session id
-  parent_run_id   TEXT,                         -- NULL = top-level run
-  is_child        INTEGER NOT NULL DEFAULT 0,
-  subagent_role   TEXT,                         -- Native subagent role name, when known
-  role_source     TEXT NOT NULL DEFAULT 'native', -- 'native' | 'heuristic'
-  started_at      INTEGER NOT NULL,
-  ended_at        INTEGER,
-  FOREIGN KEY (parent_run_id) REFERENCES run(id) ON DELETE SET NULL
-);
-CREATE INDEX IF NOT EXISTS idx_run_logical_session
-  ON run(agent_id, logical_session);
-CREATE INDEX IF NOT EXISTS idx_run_parent ON run(parent_run_id);
-
 -- A Task = one Nestra-owned unit of routing/work. `task_id` is Nestra's own
 -- identity; `native_task_ref` optionally carries an agent-native task handle
 -- (Claude Task tool, OpenCode task, Pi task) for UI correlation and is NEVER
@@ -274,16 +243,13 @@ CREATE INDEX IF NOT EXISTS idx_run_parent ON run(parent_run_id);
 -- orchestration concept".
 CREATE TABLE IF NOT EXISTS task (
   id              TEXT PRIMARY KEY,            -- Nestra UUID (task_id)
-  run_id          TEXT NOT NULL,
   parent_task_id  TEXT,                         -- NULL for top-level tasks
   lifecycle       TEXT NOT NULL DEFAULT 'born', -- born|routed|inflight|migrating|generationbroken|done|failed
   native_task_ref TEXT,                         -- JSON {agent,kind,ref_id}, or NULL
   started_at      INTEGER NOT NULL,
   ended_at        INTEGER,
-  FOREIGN KEY (run_id)         REFERENCES run(id) ON DELETE CASCADE,
   FOREIGN KEY (parent_task_id) REFERENCES task(id) ON DELETE SET NULL
 );
-CREATE INDEX IF NOT EXISTS idx_task_run ON task(run_id);
 CREATE INDEX IF NOT EXISTS idx_task_parent ON task(parent_task_id);
 
 -- One row per proxied HTTP request through the Nestra gateway. The credential
@@ -588,8 +554,6 @@ mod tests {
         let forbidden_substrings = ["key", "secret", "credential", "token", "password", "passwd"];
         let orchestration_tables = [
             "routing_policy",
-            "logical_session",
-            "run",
             "task",
             "route_request",
             "route_migration",

@@ -790,7 +790,7 @@ fn ensure_compatible(spec: &crate::agents::AgentSpec, adapter: &dyn crate::confi
 /// setup when it's false — flipping it true after a Nestra-managed switch
 /// keeps the agent quiet. Other agents don't need this. Failure is non-fatal.
 fn mark_onboarding_if_needed(agent_id: &str) {
-    if agent_id != "claude-code" {
+    if agent_id != "claude-code-cli" {
         return;
     }
     if let Ok(home) = db::home_dir() {
@@ -1371,12 +1371,12 @@ mod tests {
         // bumped last_detected_at, so this proves no re-scan happened. Seeded on
         // a registry id (claude-code) because list_agent_infos only surfaces
         // agents from the closed AGENTS registry.
-        crate::db::upsert_agent(&conn, "claude-code", "claude-code", "Claude Code", None, None, "missing", None)
+        crate::db::upsert_agent(&conn, "claude-code-cli", "claude-code-cli", "Claude Code", None, None, "missing", None)
             .unwrap();
         let infos = list_agent_infos(&conn).unwrap();
         let row = infos
             .iter()
-            .find(|i| i.id == "claude-code")
+            .find(|i| i.id == "claude-code-cli")
             .expect("seeded claude-code row present");
         assert_eq!(row.status, "missing");
         assert_eq!(row.agent_path, None);
@@ -1395,12 +1395,12 @@ mod tests {
             crate::db::upsert_agent(&conn, id, kind, display, None, None, "missing", None)
                 .unwrap();
         }
-        crate::db::upsert_agent(&conn, "pi", "pi", "Pi", None, None, "ok", None).unwrap();
+        crate::db::upsert_agent(&conn, "pi-cli", "pi-cli", "Pi", None, None, "ok", None).unwrap();
         let infos = list_agent_infos(&conn).unwrap();
         let ids: Vec<&str> = infos.iter().map(|i| i.id.as_str()).collect();
         for ghost in ["copilot-cli", "opencode", "qwen-code"] {
             assert!(!ids.contains(&ghost), "{ghost} must be filtered out");
         }
-        assert!(ids.contains(&"pi"), "registry agent stays visible");
+        assert!(ids.contains(&"pi-cli"), "registry agent stays visible");
     }
 }

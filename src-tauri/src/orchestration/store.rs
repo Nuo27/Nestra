@@ -171,98 +171,12 @@ pub fn delete_routing_policy(conn: &Connection, agent_id: &str, role: &str) -> A
 }
 
 // ===========================================================================
-// logical_session
-// ===========================================================================
-
-/// Identity-only row for an agent-native session the gateway has observed.
-/// Distinct from the derived `session` table (a read-only log cache): this
-/// table holds the stable handle that survives provider migration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogicalSessionRow {
-    pub agent_id: String,
-    pub logical_session_id: String,
-    pub first_seen: i64,
-    pub last_seen: i64,
-}
-
-// ===========================================================================
-// run (AgentRun / ChildSession)
-// ===========================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunRow {
-    pub id: String,
-    pub agent_id: String,
-    pub logical_session: String,
-    pub parent_run_id: Option<String>,
-    pub is_child: bool,
-    pub subagent_role: Option<String>,
-    /// `"native"` | `"heuristic"`.
-    pub role_source: String,
-    pub started_at: i64,
-    pub ended_at: Option<i64>,
-}
-
-pub fn insert_run(conn: &Connection, row: &RunRow) -> AppResult<()> {
-    conn.execute(
-        "INSERT INTO run
-           (id, agent_id, logical_session, parent_run_id, is_child, subagent_role,
-            role_source, started_at, ended_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        rusqlite::params![
-            row.id,
-            row.agent_id,
-            row.logical_session,
-            row.parent_run_id,
-            row.is_child as i64,
-            row.subagent_role,
-            row.role_source,
-            row.started_at,
-            row.ended_at,
-        ],
-    )?;
-    Ok(())
-}
-
-pub fn get_run(conn: &Connection, id: &str) -> AppResult<Option<RunRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, agent_id, logical_session, parent_run_id, is_child, subagent_role,
-                role_source, started_at, ended_at
-         FROM run WHERE id = ?1",
-    )?;
-    let mut rows = stmt.query(rusqlite::params![id])?;
-    match rows.next()? {
-        Some(r) => Ok(Some(RunRow {
-            id: r.get(0)?,
-            agent_id: r.get(1)?,
-            logical_session: r.get(2)?,
-            parent_run_id: r.get(3)?,
-            is_child: r.get::<_, i64>(4)? != 0,
-            subagent_role: r.get(5)?,
-            role_source: r.get(6)?,
-            started_at: r.get(7)?,
-            ended_at: r.get(8)?,
-        })),
-        None => Ok(None),
-    }
-}
-
-pub fn finish_run(conn: &Connection, id: &str, ended_at: i64) -> AppResult<bool> {
-    let n = conn.execute(
-        "UPDATE run SET ended_at = ?1 WHERE id = ?2 AND ended_at IS NULL",
-        rusqlite::params![ended_at, id],
-    )?;
-    Ok(n > 0)
-}
-
-// ===========================================================================
 // task
 // ===========================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRow {
     pub id: String,
-    pub run_id: String,
     pub parent_task_id: Option<String>,
     /// One of [`TaskLifecycle::as_str`].
     pub lifecycle: String,
@@ -274,11 +188,10 @@ pub struct TaskRow {
 
 pub fn insert_task(conn: &Connection, row: &TaskRow) -> AppResult<()> {
     conn.execute(
-        "INSERT INTO task (id, run_id, parent_task_id, lifecycle, native_task_ref, started_at, ended_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO task (id, parent_task_id, lifecycle, native_task_ref, started_at, ended_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![
             row.id,
-            row.run_id,
             row.parent_task_id,
             row.lifecycle,
             row.native_task_ref,
@@ -312,19 +225,18 @@ pub fn set_task_lifecycle(
 
 pub fn get_task(conn: &Connection, id: &str) -> AppResult<Option<TaskRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, run_id, parent_task_id, lifecycle, native_task_ref, started_at, ended_at
+        "SELECT id, parent_task_id, lifecycle, native_task_ref, started_at, ended_at
          FROM task WHERE id = ?1",
     )?;
     let mut rows = stmt.query(rusqlite::params![id])?;
     match rows.next()? {
         Some(r) => Ok(Some(TaskRow {
             id: r.get(0)?,
-            run_id: r.get(1)?,
-            parent_task_id: r.get(2)?,
-            lifecycle: r.get(3)?,
-            native_task_ref: r.get(4)?,
-            started_at: r.get(5)?,
-            ended_at: r.get(6)?,
+            parent_task_id: r.get(1)?,
+            lifecycle: r.get(2)?,
+            native_task_ref: r.get(3)?,
+            started_at: r.get(4)?,
+            ended_at: r.get(5)?,
         })),
         None => Ok(None),
     }
@@ -807,7 +719,7 @@ mod tests {
         let conn = fresh_db();
         let now = 1_700_000_000;
         // No row → falls back to a synthesized default (task affinity, no injection).
-        let p = routing_policy_for(&conn, "claude-code", "claude:researcher").unwrap();
+        let p = routing_policy_for(&conn, "claude-code-cli", "claude:researcher").unwrap();
         assert_eq!(p.affinity_scope, "task");
         assert!(!p.inject_cache_control);
         assert!(p.migrate_on_quota);
@@ -816,7 +728,7 @@ mod tests {
         upsert_routing_policy(
             &conn,
             &RoutingPolicyRow {
-                agent_id: "claude-code".into(),
+                agent_id: "claude-code-cli".into(),
                 role: "claude:researcher".into(),
                 preferred_endpoints: Some(r#"["ep-1"]"#.into()),
                 fallback_endpoints: Some(r#"["ep-2"]"#.into()),
@@ -831,7 +743,7 @@ mod tests {
         upsert_routing_policy(
             &conn,
             &RoutingPolicyRow {
-                agent_id: "claude-code".into(),
+                agent_id: "claude-code-cli".into(),
                 role: "*".into(),
                 preferred_endpoints: Some(r#"["ep-x"]"#.into()),
                 fallback_endpoints: None,
@@ -845,14 +757,14 @@ mod tests {
         .unwrap();
 
         // Specific role wins.
-        let p = routing_policy_for(&conn, "claude-code", "claude:researcher").unwrap();
+        let p = routing_policy_for(&conn, "claude-code-cli", "claude:researcher").unwrap();
         assert_eq!(p.role, "claude:researcher");
         assert!(p.inject_cache_control);
         assert!(!p.migrate_on_quota);
         assert_eq!(p.affinity_scope, "session");
 
         // Unknown role falls back to the catch-all.
-        let p = routing_policy_for(&conn, "claude-code", "claude:other").unwrap();
+        let p = routing_policy_for(&conn, "claude-code-cli", "claude:other").unwrap();
         assert_eq!(p.role, "*");
         assert!(!p.inject_cache_control);
         assert_eq!(p.preferred_endpoints.as_deref(), Some(r#"["ep-x"]"#));
@@ -861,27 +773,10 @@ mod tests {
     #[test]
     fn task_lifecycle_sets_ended_at_only_on_terminal() {
         let conn = fresh_db();
-        // Seed a run + task.
-        insert_run(
-            &conn,
-            &RunRow {
-                id: "run-1".into(),
-                agent_id: "claude-code".into(),
-                logical_session: "sess-1".into(),
-                parent_run_id: None,
-                is_child: false,
-                subagent_role: None,
-                role_source: "native".into(),
-                started_at: 100,
-                ended_at: None,
-            },
-        )
-        .unwrap();
         insert_task(
             &conn,
             &TaskRow {
                 id: "task-1".into(),
-                run_id: "run-1".into(),
                 parent_task_id: None,
                 lifecycle: "born".into(),
                 native_task_ref: None,
@@ -904,8 +799,8 @@ mod tests {
         assert_eq!(t.ended_at, Some(300));
     }
 
-    /// Seed the parent identity chain a route_request row needs to satisfy its
-    /// FKs (task → run, and optionally resolved_endpoint_id → provider_endpoint).
+    /// Seed the task row a route_request row needs to satisfy its FKs
+    /// (optionally resolved_endpoint_id → provider_endpoint).
     fn seed_task_chain(conn: &Connection, task_id: &str, with_endpoint: bool) {
         if with_endpoint {
             conn.execute(
@@ -915,26 +810,10 @@ mod tests {
             )
             .unwrap();
         }
-        insert_run(
-            conn,
-            &RunRow {
-                id: "run-1".into(),
-                agent_id: "claude-code".into(),
-                logical_session: "sess-1".into(),
-                parent_run_id: None,
-                is_child: false,
-                subagent_role: None,
-                role_source: "native".into(),
-                started_at: 0,
-                ended_at: None,
-            },
-        )
-        .unwrap();
         insert_task(
             conn,
             &TaskRow {
                 id: task_id.into(),
-                run_id: "run-1".into(),
                 parent_task_id: None,
                 lifecycle: "inflight".into(),
                 native_task_ref: None,
@@ -954,7 +833,7 @@ mod tests {
         let rec = RouteRecord {
             request_id: uuid::Uuid::new_v4(),
             task_id,
-            agent_id: "claude-code".into(),
+            agent_id: "claude-code-cli".into(),
             logical_session: Some("sess-1".into()),
             subagent_role: Some("main".into()),
             role_source: Some("native".into()),
@@ -1003,24 +882,8 @@ mod tests {
     #[test]
     fn task_summaries_aggregate_requests_per_task() {
         let conn = fresh_db();
-        // Seed ONE run + the two task rows (seed_task_chain uses a fixed
-        // run-1 id, so it can't be called twice), then record three requests:
+        // Seed two task rows, then record three requests:
         // t-1 gets two attempts (one generation-broken), t-2 one.
-        insert_run(
-            &conn,
-            &RunRow {
-                id: "run-1".into(),
-                agent_id: "claude-code".into(),
-                logical_session: "sess-1".into(),
-                parent_run_id: None,
-                is_child: false,
-                subagent_role: None,
-                role_source: "native".into(),
-                started_at: 0,
-                ended_at: None,
-            },
-        )
-        .unwrap();
         // Task ids are Nestra UUIDs (the store serializes RouteRecord.task_id
         // to string); use real UUIDs so the FK + round-trip stay valid.
         let t1 = uuid::Uuid::new_v4();
@@ -1030,7 +893,6 @@ mod tests {
                 &conn,
                 &TaskRow {
                     id: task_id.to_string(),
-                    run_id: "run-1".into(),
                     parent_task_id: None,
                     lifecycle: "inflight".into(),
                     native_task_ref: None,
@@ -1044,7 +906,7 @@ mod tests {
             let rec = RouteRecord {
                 request_id: uuid::Uuid::new_v4(),
                 task_id,
-                agent_id: "claude-code".into(),
+                agent_id: "claude-code-cli".into(),
                 logical_session: Some("sess-1".into()),
                 subagent_role: Some("main".into()),
                 role_source: Some("native".into()),
@@ -1085,21 +947,6 @@ mod tests {
     #[test]
     fn detected_roles_aggregates_by_role_and_filters_main() {
         let conn = fresh_db();
-        insert_run(
-            &conn,
-            &RunRow {
-                id: "run-1".into(),
-                agent_id: "opencode-desktop".into(),
-                logical_session: "sess-1".into(),
-                parent_run_id: None,
-                is_child: false,
-                subagent_role: None,
-                role_source: "native".into(),
-                started_at: 0,
-                ended_at: None,
-            },
-        )
-        .unwrap();
         let t1 = uuid::Uuid::new_v4();
         let t2 = uuid::Uuid::new_v4();
         for task_id in [t1, t2] {
@@ -1107,7 +954,6 @@ mod tests {
                 &conn,
                 &TaskRow {
                     id: task_id.to_string(),
-                    run_id: "run-1".into(),
                     parent_task_id: None,
                     lifecycle: "inflight".into(),
                     native_task_ref: None,
@@ -1160,7 +1006,7 @@ mod tests {
         assert_eq!(roles[1].role, "claude:researcher");
         assert_eq!(roles[1].request_count, 2);
         // Another agent sees nothing.
-        assert!(detected_roles(&conn, "claude-code", 20).unwrap().is_empty());
+        assert!(detected_roles(&conn, "claude-code-cli", 20).unwrap().is_empty());
         // Limit applies.
         assert_eq!(detected_roles(&conn, "opencode-desktop", 1).unwrap().len(), 1);
     }
@@ -1180,7 +1026,7 @@ mod tests {
             &RouteRecord {
                 request_id,
                 task_id,
-                agent_id: "claude-code".into(),
+                agent_id: "claude-code-cli".into(),
                 logical_session: Some("sess-1".into()),
                 subagent_role: Some("main".into()),
                 role_source: Some("native".into()),
@@ -1242,35 +1088,9 @@ mod tests {
                 serde_json::to_value(RoutingPolicyRow::default_for("a", "main", 0)).unwrap(),
             ),
             (
-                "LogicalSessionRow".into(),
-                serde_json::to_value(LogicalSessionRow {
-                    agent_id: "a".into(),
-                    logical_session_id: "s".into(),
-                    first_seen: 0,
-                    last_seen: 0,
-                })
-                .unwrap(),
-            ),
-            (
-                "RunRow".into(),
-                serde_json::to_value(RunRow {
-                    id: "r".into(),
-                    agent_id: "a".into(),
-                    logical_session: "s".into(),
-                    parent_run_id: None,
-                    is_child: false,
-                    subagent_role: None,
-                    role_source: "native".into(),
-                    started_at: 0,
-                    ended_at: None,
-                })
-                .unwrap(),
-            ),
-            (
                 "TaskRow".into(),
                 serde_json::to_value(TaskRow {
                     id: "t".into(),
-                    run_id: "r".into(),
                     parent_task_id: None,
                     lifecycle: "born".into(),
                     native_task_ref: None,

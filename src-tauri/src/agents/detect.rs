@@ -431,11 +431,12 @@ mod tests {
     }
 
     #[test]
-    fn detector_registry_has_three_entries() {
-        assert_eq!(agents().len(), 3);
+    fn detector_registry_has_four_entries() {
+        assert_eq!(agents().len(), 4);
         let ids: Vec<&str> = agents().iter().map(|d| d.id).collect();
-        assert!(ids.contains(&"claude-code"));
+        assert!(ids.contains(&"claude-code-cli"));
         assert!(ids.contains(&"opencode-desktop"));
-        assert!(ids.contains(&"pi"));
+        assert!(ids.contains(&"pi-cli"));
+        assert!(ids.contains(&"zcode-desktop"));
     }
 }

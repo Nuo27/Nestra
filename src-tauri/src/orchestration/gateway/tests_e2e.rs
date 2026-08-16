@@ -161,7 +161,7 @@ async fn anthropic_inbound_to_responses_upstream() {
 
     let conn = seed_conn(
         addr,
-        "claude-code",
+        "claude-code-cli",
         r#"{"available":["grok-4.5"],"default":"grok-4.5"}"#,
     );
     let state = state_for(conn);
@@ -171,7 +171,7 @@ async fn anthropic_inbound_to_responses_upstream() {
         headers(),
         Bytes::from_static(body),
         state,
-        "claude-code",
+        "claude-code-cli",
     )
     .await
     .unwrap();
@@ -237,50 +237,4 @@ async fn chat_inbound_to_responses_upstream() {
     assert_eq!(out["object"], "chat.completion");
     assert_eq!(out["choices"][0]["message"]["content"], "ok");
     assert_eq!(out["choices"][0]["finish_reason"], "stop");
-}
-
-/// Responses inbound → chat upstream: a Responses-speaking client's request
-/// is converted to Chat Completions for a chat-capable model and the chat
-/// response is converted back to the Responses format.
-#[tokio::test]
-async fn responses_inbound_to_chat_upstream() {
-    let payload = r#"{"id":"chatcmpl-1","object":"chat.completion","model":"kimi-k3","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}"#;
-    let (addr, upstream) = mock_upstream(format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-        payload.len(),
-        payload
-    ))
-    .await;
-
-    let conn = seed_conn(
-        addr,
-        "opencode-desktop",
-        r#"{"available":["kimi-k3"],"default":"kimi-k3"}"#,
-    );
-    let state = state_for(conn);
-
-    // Responses request for kimi-k3 (openai-class → chat wire).
-    let body = br#"{"model":"nestra","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"max_output_tokens":64}"#;
-    let resp = super::protocol_responses::handle_bytes(
-        headers(),
-        Bytes::from_static(body),
-        state,
-        "opencode-desktop",
-    )
-    .await
-    .unwrap();
-    assert_eq!(resp.status(), hyper::StatusCode::OK);
-
-    let (path, req_body) = upstream.await.unwrap();
-    assert_eq!(path, "/v1/chat/completions");
-    assert_eq!(req_body["model"], "kimi-k3");
-    assert_eq!(req_body["messages"][0]["role"], "user");
-
-    // Response converted back to the Responses format.
-    let out = body_json(resp.into_body()).await;
-    assert_eq!(out["object"], "response");
-    assert_eq!(out["status"], "completed");
-    let output = out["output"].as_array().unwrap();
-    assert_eq!(output[0]["type"], "message");
-    assert_eq!(output[0]["content"][0]["text"], "ok");
 }

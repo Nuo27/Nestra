@@ -34,9 +34,9 @@ pub fn config_ref_for(id: &str) -> Option<&'static ConfigRef> {
 
 pub static AGENTS: &[AgentSpec] = &[
     AgentSpec {
-        id: "claude-code",
+        id: "claude-code-cli",
         display_name: "Claude Code",
-        kind: "claude-code",
+        kind: "claude-code-cli",
         agent_kind: AgentKind::Cli,
         detect: DetectSpec {
             binary_candidates: &["claude"],
@@ -57,11 +57,11 @@ pub static AGENTS: &[AgentSpec] = &[
             supports_gateway: true,
         },
         config: ConfigRef {
-            writer: "claude-code",
+            writer: "claude-code-cli",
             relative_path: ".claude/settings.json",
         },
         session: Some(SessionRef {
-            reader: "claude-code",
+            reader: "claude-code-cli",
             resume_command: Some("claude --resume {id}"),
             unsupported_reason: None,
         }),
@@ -116,9 +116,9 @@ pub static AGENTS: &[AgentSpec] = &[
         skill_name_matches_dir: true,
     },
     AgentSpec {
-        id: "pi",
+        id: "pi-cli",
         display_name: "Pi",
-        kind: "pi",
+        kind: "pi-cli",
         agent_kind: AgentKind::Cli,
         detect: DetectSpec {
             binary_candidates: &["pi"],
@@ -139,15 +139,62 @@ pub static AGENTS: &[AgentSpec] = &[
             supports_gateway: true,
         },
         config: ConfigRef {
-            writer: "pi",
+            writer: "pi-cli",
             relative_path: ".pi/agent/models.json",
         },
         session: Some(SessionRef {
-            reader: "pi",
+            reader: "pi-cli",
             resume_command: Some("pi --session {id}"),
             unsupported_reason: None,
         }),
         skill_dir: Some(".agents/skills"),
+        skill_name_matches_dir: false,
+    },
+    AgentSpec {
+        id: "zcode-desktop",
+        display_name: "ZCode",
+        kind: "zcode-desktop",
+        agent_kind: AgentKind::Desktop,
+        detect: DetectSpec {
+            // The agent CLI ships bundled inside the Electron app
+            // (`resources/glm/zcode.cjs`) and is not on PATH — detection is by
+            // install location, like OpenCode Desktop.
+            binary_candidates: &[],
+            install_paths: &[
+                DetectorPath::PlatformLocalAppData("Programs/ZCode/ZCode.exe"),
+                DetectorPath::PlatformAppData("ZCode"),
+                DetectorPath::HomeRelative("Applications/ZCode.app"),
+            ],
+            config_relative: Some(".zcode"),
+            skip_version_probe: true,
+        },
+        capability: Capability {
+            manageable: true,
+            supports_provider_configuration: true,
+            supports_multiple_providers: false,
+            supports_provider_injection: true,
+            supports_factory_restore: true,
+            supports_sessions: true,
+            supports_mcp: true,
+            // `~/.zcode/cli/config.json` MCP servers carry a per-server
+            // `enabled` field, so the written-but-disabled state is expressible.
+            supports_mcp_enabled: true,
+            supports_skills: true,
+            supports_gateway: true,
+        },
+        config: ConfigRef {
+            writer: "zcode",
+            relative_path: ".zcode/v2/config.json",
+        },
+        session: Some(SessionRef {
+            reader: "zcode-desktop",
+            // The resumable CLI is bundled inside the app and not on PATH, so
+            // a copied `zcode --resume <id>` wouldn't run — sessions are
+            // read-only, resumed from within the ZCode app.
+            resume_command: None,
+            unsupported_reason: Some("ZCode sessions are read-only — resume from within the ZCode app"),
+        }),
+        skill_dir: Some(".zcode/skills"),
         skill_name_matches_dir: false,
     },
 ];
@@ -287,8 +334,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_three_agents() {
-        assert_eq!(agents().len(), 3);
+    fn registry_has_four_agents() {
+        assert_eq!(agents().len(), 4);
     }
 
     #[test]
@@ -323,8 +370,25 @@ mod tests {
     #[test]
     fn known_agents_present() {
         let ids: Vec<&str> = agents().iter().map(|a| a.id).collect();
-        for expected in ["claude-code", "opencode-desktop", "pi"] {
+        for expected in ["claude-code-cli", "opencode-desktop", "pi-cli", "zcode-desktop"] {
             assert!(ids.contains(&expected), "missing {expected}");
+        }
+    }
+
+    /// Agent ids follow the naming convention: CLI agents end in `-cli`,
+    /// desktop agents in `-desktop`.
+    #[test]
+    fn agent_ids_follow_kind_suffix_convention() {
+        for a in agents() {
+            let expected_suffix = match a.agent_kind {
+                AgentKind::Cli => "-cli",
+                AgentKind::Desktop => "-desktop",
+            };
+            assert!(
+                a.id.ends_with(expected_suffix),
+                "{} violates the agent-id naming convention (expected {expected_suffix} suffix)",
+                a.id
+            );
         }
     }
 }

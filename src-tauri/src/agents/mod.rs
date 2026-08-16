@@ -9,7 +9,7 @@
 //! Layout:
 //! - `spec`     — the `AGENTS` static registry + describing data types
 //! - `detect`   — auto-detection algorithm (PATH, install paths, soft signals)
-//! - `claude_code`, `opencode`, `pi` — per-agent `ConfigAdapter` impls
+//! - `claude_code`, `opencode`, `pi`, `zcode` — per-agent `ConfigAdapter` impls
 //!
 //! The detection *data* types (`DetectSpec`, `DetectorPath`) live in `spec`
 //! so the dependency graph is one-way: `agents` → `config_writer` (leaf).
@@ -19,6 +19,7 @@ pub mod detect;
 pub mod claude_code;
 pub mod opencode;
 pub mod pi;
+pub mod zcode;
 
 pub use spec::{
     agent_spec, capability_for, agents, config_ref_for, detect_spec_for, AgentKind, AgentSpec,
@@ -42,9 +43,10 @@ pub(crate) fn internal<E: std::fmt::Display>(e: E) -> AppError {
 pub fn adapter_for(writer_key: &str) -> Option<Box<dyn ConfigAdapter>> {
     // Keep this match in sync with the writer keys in spec.rs AGENTS.
     match writer_key {
-        "claude-code" => Some(Box::new(claude_code::ClaudeCode)),
+        "claude-code-cli" => Some(Box::new(claude_code::ClaudeCode)),
         "opencode" => Some(Box::new(opencode::OpenCode)),
-        "pi" => Some(Box::new(pi::Pi)),
+        "pi-cli" => Some(Box::new(pi::Pi)),
+        "zcode" => Some(Box::new(zcode::ZCode)),
         _ => None,
     }
 }

@@ -1,10 +1,12 @@
 mod claude;
 mod desktop;
 mod model;
+mod partdb;
 pub mod provider;
 mod pi;
 pub mod semantic;
 pub mod store;
+mod zcode;
 
 pub use model::{Message, MessageWindow, RawFile, Session};
 pub use semantic::{Attachment, McpProvenance, Part, PartPayload, SemanticEvent};
@@ -19,9 +21,10 @@ use std::path::{Path, PathBuf};
 /// a strict subset: only providers with a resumable CLI appear there.
 /// Here we index every provider whose session files Nestra can locate.
 pub const ALL_PROVIDERS: &[&str] = &[
-    "claude-code",
-    "pi",
+    "claude-code-cli",
+    "pi-cli",
     "opencode-desktop",
+    "zcode-desktop",
 ];
 
 // ============================================================================
@@ -50,9 +53,10 @@ pub trait SessionImporter: Send + Sync {
 /// Resolve the importer for a provider id. Adding a new provider = one arm here.
 fn importer_for(provider_id: &str) -> Option<Box<dyn SessionImporter>> {
     match provider_id {
-        "claude-code" => Some(Box::new(claude::ClaudeImporter)),
-        "pi" => Some(Box::new(pi::PiImporter)),
+        "claude-code-cli" => Some(Box::new(claude::ClaudeImporter)),
+        "pi-cli" => Some(Box::new(pi::PiImporter)),
         "opencode-desktop" => Some(Box::new(desktop::OpenCodeDesktopImporter)),
+        "zcode-desktop" => Some(Box::new(zcode::ZCodeImporter)),
         _ => None,
     }
 }
@@ -757,245 +761,51 @@ fn rawfile_from_jsonl(path: &Path, p: JsonlParse) -> RawFile {
 }
 
 // --- OpenCode (Desktop) --------------------------------------------------
-// SQLite at the XDG data dir; schema column names probed at runtime. The
-// Desktop importer (session::desktop) also scans JSONL session dirs and calls
+// SQLite at the OpenCode data dir (probed in `opencode_db_path`). The Desktop
+// importer (session::desktop) also scans JSONL session dirs and calls
 // `collect_opencode_raw` below for the SQLite path, so both layouts surface
 // under the single `opencode-desktop` provider.
 
 pub(super) fn opencode_db_path() -> PathBuf {
-    let xdg = dirs::data_local_dir()
+    if let Some(xdg) = dirs::data_local_dir()
         .map(|d| d.join("opencode").join("opencode.db"))
-        .unwrap_or_else(|| PathBuf::from(".opencode/opencode.db"));
-    if xdg.exists() {
+        .filter(|p| p.is_file())
+    {
         return xdg;
+    }
+    // OpenCode resolves its own data dir XDG-style (`~/.local/share/opencode`)
+    // even on Windows, where `data_local_dir()` above points at
+    // `%LOCALAPPDATA%` — probe that location too.
+    if let Some(home_share) = crate::db::home_dir()
+        .ok()
+        .map(|h| h.join(".local").join("share").join("opencode").join("opencode.db"))
+        .filter(|p| p.is_file())
+    {
+        return home_share;
     }
     // Legacy fallback: `~/.opencode/opencode.db` — the FILE, not the
     // directory. Callers `is_file()` this path; returning the dir made the
     // fallback permanently unusable (and the snapshot counted the dir).
-    let home = crate::db::home_dir().unwrap_or_else(|_| PathBuf::from("."));
-    home.join(".opencode").join("opencode.db")
+    crate::db::home_dir()
+        .map(|h| h.join(".opencode").join("opencode.db"))
+        .unwrap_or_else(|_| PathBuf::from(".opencode/opencode.db"))
 }
 
-fn opencode_table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
-    conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-        [name],
-        |r| r.get::<_, i64>(0),
-    )
-    .map(|n| n > 0)
-    .unwrap_or(false)
-}
-
-fn opencode_pick_table(conn: &rusqlite::Connection, candidates: &[&str]) -> Option<String> {
-    for c in candidates {
-        if opencode_table_exists(conn, c) {
-            return Some((*c).to_string());
-        }
-    }
-    None
-}
-
-fn opencode_pick_column(conn: &rusqlite::Connection, table: &str, candidates: &[&str]) -> Option<String> {
-    let mut stmt = match conn.prepare(&format!("PRAGMA table_info({table})")) {
-        Ok(s) => s,
-        Err(_) => return None,
-    };
-    let names: Vec<String> = stmt
-        .query_map([], |r| r.get::<_, String>(1))
-        .ok()?
-        .flatten()
-        .collect();
-    candidates
-        .iter()
-        .find(|c| names.iter().any(|n| n.eq_ignore_ascii_case(c)))
-        .map(|c| (*c).to_string())
-}
-
-/// OpenCode: read sessions + messages straight from its SQLite store. Each
-/// session row → one `RawFile` (path is the db file itself).
+/// session row → one `RawFile` (path is the db file itself). Current OpenCode
+/// stores sessions in the same session/message/part + JSON-`data` layout as
+/// ZCode (verified against a real `opencode.db`), so this delegates to the
+/// shared [`partdb`] pipeline.
 pub(super) fn collect_opencode_raw() -> AppResult<Vec<RawFile>> {
     let db = opencode_db_path();
     if !db.is_file() {
         return Ok(vec![]);
     }
-    let conn = match rusqlite::Connection::open_with_flags(
-        &db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("opencode db open failed: {e}");
-            return Ok(vec![]);
-        }
-    };
-    if !opencode_table_exists(&conn, "session") {
-        return Ok(vec![]);
-    }
-    let id_col = opencode_pick_column(&conn, "session", &["id"]).unwrap_or_else(|| "id".into());
-    let title_col = opencode_pick_column(&conn, "session", &["title", "summary"])
-        .unwrap_or_else(|| "title".into());
-    let tc_col = opencode_pick_column(&conn, "session", &["time_created", "created_at", "updated_at"])
-        .unwrap_or_else(|| "time_created".into());
-    let mut stmt = match conn.prepare(&format!(
-        "SELECT {id_col}, {title_col}, {tc_col} FROM session"
-    )) {
-        Ok(s) => s,
-        Err(_) => return Ok(vec![]),
-    };
-    let rows: Vec<(String, Option<String>, Option<i64>)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1).ok(), r.get(2).ok())))
-        .ok()
-        .map(|it| it.flatten().collect())
-        .unwrap_or_default();
-    drop(stmt);
-
-    let msg_table = opencode_pick_table(&conn, &["message", "messages"]);
-    let part_table = opencode_pick_table(&conn, &["part", "parts"]);
-    let db_mtime = mtime_millis(&db);
-    let mut out = Vec::new();
-    for (id, title, ts) in rows {
-        let mut events: Vec<SemanticEvent> = Vec::new();
-        // Prefer the normalized `part` table (OpenCode's structured parts) when
-        // present; fall back to the flat `message` table.
-        if let Some(table) = &part_table {
-            events.extend(opencode_read_parts(&conn, table, &id));
-        }
-        if events.is_empty() {
-            if let Some(table) = &msg_table {
-                events.extend(opencode_read_messages(&conn, table, &id));
-            }
-        }
-        let title = title.unwrap_or_else(|| "(untitled)".into());
-        let updated = ts.unwrap_or(db_mtime);
-        out.push(RawFile {
-            path: db.clone(),
-            canonical_id: id,
-            is_sidechain: false,
-            parent_session_id: None,
-            agent_id: None,
-            title,
-            summary: String::new(),
-            project: None,
-            cwd: None,
-            started_at: updated,
-            updated_at: updated,
-            ended_at: Some(updated),
-            events,
-            mtime: db_mtime,
-        });
-    }
-    Ok(out)
-}
-
-/// Read OpenCode's normalized `part` table for a session. Each part row has a
-/// `type` discriminator (text/tool/reason/etc.); map known types to payloads
-/// and preserve unknown ones verbatim.
-fn opencode_read_parts(
-    conn: &rusqlite::Connection,
-    table: &str,
-    session_id: &str,
-) -> Vec<SemanticEvent> {
-    // Probe for the columns we use; tolerate drift by falling back.
-    let text_col = opencode_pick_column(conn, table, &["text", "content"]).unwrap_or_else(|| "text".into());
-    let type_col = opencode_pick_column(conn, table, &["type", "kind"]).unwrap_or_else(|| "type".into());
-    let time_col = opencode_pick_column(conn, table, &["time_created", "created_at", "at"])
-        .unwrap_or_else(|| "time_created".into());
-    // The session-id column is probed the same way and used ALONE: SQLite
-    // `prepare` fails on a WHERE referencing a column that doesn't exist, and
-    // OpenCode's schema has `session_id` in some tables and `sessionID` in
-    // others — an `OR` of both would prepare-fail when only one exists.
-    let id_col =
-        opencode_pick_column(conn, table, &["session_id", "sessionID"]).unwrap_or("session_id".into());
-    let sql = format!(
-        "SELECT {type_col}, {text_col}, {time_col} FROM {table} WHERE {id_col} = ?1 ORDER BY {time_col} ASC"
-    );
-    let Ok(mut stmt) = conn.prepare(&sql) else {
-        return vec![];
-    };
-    let rows = match stmt.query_map([session_id], |r| {
-        Ok((
-            r.get::<_, String>(0).unwrap_or_default(),
-            r.get::<_, Option<String>>(1).ok().flatten(),
-            r.get::<_, Option<i64>>(2).ok().flatten(),
-        ))
-    }) {
-        Ok(it) => it,
-        Err(_) => return vec![],
-    };
-    let mut out = Vec::new();
-    for row in rows.flatten() {
-        let (ty, content, ts) = row;
-        let text = content.unwrap_or_default();
-        let payload = match ty.as_str() {
-            "text" if text.is_empty() => continue,
-            "text" => PartPayload::AssistantMessage { text },
-            "reason" | "reasoning" => PartPayload::Thinking { text, signature: None },
-            "tool" => PartPayload::ToolResult {
-                output: text,
-                is_error: None,
-                mcp: None,
-            },
-            _ => PartPayload::Unknown { raw_json: format!("{{\"type\":\"{ty}\",\"text\":{}}}", serde_json::Value::String(text)) },
-        };
-        let mut ev = SemanticEvent::new(payload);
-        ev.ts = ts;
-        out.push(ev);
-    }
-    out
-}
-
-/// Read OpenCode's flat `message` table for a session (older schema).
-fn opencode_read_messages(
-    conn: &rusqlite::Connection,
-    table: &str,
-    session_id: &str,
-) -> Vec<SemanticEvent> {
-    // Single probed session-id column (see opencode_read_parts: an `OR` of
-    // `session_id`/`sessionID` fails `prepare` when only one exists).
-    let id_col =
-        opencode_pick_column(conn, table, &["session_id", "sessionID"]).unwrap_or("session_id".into());
-    let sql = format!(
-        "SELECT role, content, time_created FROM {table} WHERE {id_col} = ?1 ORDER BY time_created ASC"
-    );
-    let Ok(mut stmt) = conn.prepare(&sql) else {
-        return vec![];
-    };
-    let rows = match stmt.query_map([session_id], |r| {
-        Ok((
-            r.get::<_, String>(0).unwrap_or_default(),
-            r.get::<_, Option<String>>(1).ok().flatten(),
-            r.get::<_, Option<i64>>(2).ok().flatten(),
-        ))
-    }) {
-        Ok(it) => it,
-        Err(_) => return vec![],
-    };
-    let mut out = Vec::new();
-    for row in rows.flatten() {
-        let (role, content, mts) = row;
-        let Some(c) = content else { continue };
-        if c.is_empty() {
-            continue;
-        }
-        let payload = match role.as_str() {
-            "user" | "human" => PartPayload::UserMessage { text: c },
-            "assistant" | "model" => PartPayload::AssistantMessage { text: c },
-            _ => PartPayload::SystemEvent {
-                kind: role,
-                text: c,
-                model: None,
-            },
-        };
-        let mut ev = SemanticEvent::new(payload);
-        ev.ts = mts;
-        out.push(ev);
-    }
-    out
+    partdb::collect(&db)
 }
 
 // --- shared dir helpers ---------------------------------------------------
 
-fn self_dir(dot: &str, rest: &[&str]) -> AppResult<PathBuf> {
+pub(super) fn self_dir(dot: &str, rest: &[&str]) -> AppResult<PathBuf> {
     let home = crate::db::home_dir()?;
     let mut p = home.join(dot);
     for r in rest {
@@ -1311,8 +1121,8 @@ fn derive_header(
 /// (Pi/OpenCode use `--session`, not the older `--resume`/`--resume-id`.)
 fn resume_command_for(provider: &str) -> Option<&'static str> {
     match provider {
-        "claude-code" => Some("claude --resume {id}"),
-        "pi" => Some("pi --session {id}"),
+        "claude-code-cli" => Some("claude --resume {id}"),
+        "pi-cli" => Some("pi --session {id}"),
         _ => None,
     }
 }
@@ -1421,7 +1231,7 @@ mod tests {
             r#"{"type":"message","id":"d","message":{"role":"assistant","content":[{"type":"text","text":"final answer"}]},"timestamp":"2026-08-05T02:25:33.000Z"}"#,
         ]);
 
-        let built = with_home(&home, || build_sessions("pi", collect_raw_files("pi").unwrap()));
+        let built = with_home(&home, || build_sessions("pi-cli", collect_raw_files("pi-cli").unwrap()));
         assert_eq!(built.len(), 1);
         let (s, msgs) = &built[0];
         assert_eq!(s.id, "019fcfbd-7954-7f25-b526-9a289ccda14c");
@@ -1467,7 +1277,7 @@ mod tests {
             ],
         );
 
-        let sessions = with_home(&home, || normalize("claude-code", collect_raw_files("claude-code").unwrap()));
+        let sessions = with_home(&home, || normalize("claude-code-cli", collect_raw_files("claude-code-cli").unwrap()));
         let top: Vec<&Session> = sessions.iter().filter(|s| !s.is_subagent).collect();
         let subs: Vec<&Session> = sessions.iter().filter(|s| s.is_subagent).collect();
         assert_eq!(top.len(), 1);
@@ -1491,7 +1301,7 @@ mod tests {
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"call_42","name":"Bash","input":{"command":"echo hi"}}]},"sessionId":"tp","timestamp":"2026-08-06T10:00:01.000Z"}"#,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_42","content":"hi"}]},"sessionId":"tp","timestamp":"2026-08-06T10:00:02.000Z"}"#,
         ]);
-        let built = with_home(&home, || build_sessions("claude-code", collect_raw_files("claude-code").unwrap()));
+        let built = with_home(&home, || build_sessions("claude-code-cli", collect_raw_files("claude-code-cli").unwrap()));
         let (_, msgs) = &built[0];
         let invocations: Vec<&Message> = msgs.iter().filter(|m| m.tool_name.is_some()).collect();
         let results: Vec<&Message> = msgs.iter().filter(|m| m.tool_output.is_some()).collect();
@@ -1514,7 +1324,7 @@ mod tests {
         write_jsonl(&p, &[
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"},{"type":"server_tool_use","id":"x","name":"web","input":{"q":"r"}}]},"sessionId":"u","timestamp":"2026-08-06T10:00:00.000Z"}"#,
         ]);
-        let built = with_home(&home, || build_sessions("claude-code", collect_raw_files("claude-code").unwrap()));
+        let built = with_home(&home, || build_sessions("claude-code-cli", collect_raw_files("claude-code-cli").unwrap()));
         let (_, msgs) = &built[0];
         // The recognized text becomes an assistant message; the unrecognized
         // server_tool_use becomes a provider_event carrying the raw json.
@@ -1533,7 +1343,7 @@ mod tests {
         write_jsonl(&p, &[
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"mcp__filesystem__read_file","input":{"path":"x"}}]},"sessionId":"m","timestamp":"2026-08-06T10:00:00.000Z"}"#,
         ]);
-        let built = with_home(&home, || build_sessions("claude-code", collect_raw_files("claude-code").unwrap()));
+        let built = with_home(&home, || build_sessions("claude-code-cli", collect_raw_files("claude-code-cli").unwrap()));
         let (_, msgs) = &built[0];
         let inv = msgs.iter().find(|m| m.tool_name.is_some()).unwrap();
         assert!(inv.provider_metadata_json.contains("\"server\":\"filesystem\""));
@@ -1554,15 +1364,15 @@ mod tests {
         let conn = crate::db::open(&tmpdb).unwrap();
         crate::db::migrate(&conn).unwrap();
 
-        with_home(&home, || crate::session::store::reconcile_provider(&conn, "claude-code").unwrap());
+        with_home(&home, || crate::session::store::reconcile_provider(&conn, "claude-code-cli").unwrap());
         let n1 = crate::session::store::count_sessions(&conn).unwrap();
         assert_eq!(n1, 1);
 
-        with_home(&home, || crate::session::store::reconcile_provider(&conn, "claude-code").unwrap());
+        with_home(&home, || crate::session::store::reconcile_provider(&conn, "claude-code-cli").unwrap());
         let n2 = crate::session::store::count_sessions(&conn).unwrap();
         assert_eq!(n1, n2);
 
-        let win = crate::session::store::read_messages(&conn, "claude-code", "abc", 0, 0).unwrap();
+        let win = crate::session::store::read_messages(&conn, "claude-code-cli", "abc", 0, 0).unwrap();
         assert_eq!(win.total, 1);
         assert_eq!(win.messages[0].role, "user");
         assert_eq!(win.messages[0].content_text, "hey");
@@ -1574,8 +1384,8 @@ mod tests {
     fn real_claude_subagent_grouping() {
         let parent = "f8a01899-e2b1-4d5a-b60b-9ff328e13a4a";
         let agent = "af12ea1840a107df6";
-        let raws = collect_raw_files("claude-code").unwrap();
-        let sessions = normalize("claude-code", raws);
+        let raws = collect_raw_files("claude-code-cli").unwrap();
+        let sessions = normalize("claude-code-cli", raws);
         let top = sessions
             .iter()
             .find(|s| s.id == parent && !s.is_subagent)
@@ -1613,7 +1423,7 @@ mod tests {
             // a real assistant turn
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi back"}]},"sessionId":"rs","timestamp":"2026-08-06T10:00:01.000Z"}"#,
         ]);
-        let built = with_home(&home, || build_sessions("claude-code", collect_raw_files("claude-code").unwrap()));
+        let built = with_home(&home, || build_sessions("claude-code-cli", collect_raw_files("claude-code-cli").unwrap()));
         assert_eq!(built.len(), 1);
         let (s, msgs) = &built[0];
         // Only the two real turns — no bookkeeping, no attachment provider_events.

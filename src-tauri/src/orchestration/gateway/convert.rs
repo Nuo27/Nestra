@@ -30,7 +30,6 @@ use super::stream_convert::OpenAiToAnthropicStream;
 ///   anthropic inbound + openai upstream → openai_to_anthropic (existing)
 ///   anthropic inbound + responses upstream → responses_to_anthropic
 ///   openai inbound + responses upstream → responses_to_chat
-///   responses inbound + openai/anthropic upstream → chat/anthropic → responses
 /// Same-format pairs pass through untouched.
 ///
 /// Buffered bodies are shape-sniffed as a fallback: upstreams sometimes
@@ -42,8 +41,7 @@ pub async fn convert_relay_body(
     upstream: ProviderKind,
 ) -> GatewayBody {
     use super::convert_responses::{
-        anthropic_resp_to_responses, chat_resp_to_responses, responses_to_anthropic,
-        responses_to_chat, sniff_chat, sniff_responses,
+        responses_to_anthropic, responses_to_chat, sniff_chat, sniff_responses,
     };
     let target: (ProviderKind, ProviderKind) = (inbound, upstream);
     match body {
@@ -74,10 +72,6 @@ pub async fn convert_relay_body(
                     }
                 }
                 (ProviderKind::Openai, ProviderKind::Responses) => responses_to_chat(&bytes),
-                (ProviderKind::Responses, ProviderKind::Openai) => chat_resp_to_responses(&bytes),
-                (ProviderKind::Responses, ProviderKind::Anthropic) => {
-                    anthropic_resp_to_responses(&bytes)
-                }
                 _ => Bytes::from(bytes),
             };
             // A conversion that yields non-JSON (HTML/empty/malformed
@@ -101,14 +95,6 @@ pub async fn convert_relay_body(
                 }
                 (ProviderKind::Openai, ProviderKind::Responses) => {
                     GatewayBody::streaming(super::stream_responses::ResponsesToChatStream::new(stream))
-                }
-                (ProviderKind::Responses, ProviderKind::Openai) => {
-                    GatewayBody::streaming(super::stream_responses::ChatToResponsesStream::new(stream))
-                }
-                (ProviderKind::Responses, ProviderKind::Anthropic) => {
-                    GatewayBody::streaming(
-                        super::stream_responses::AnthropicToResponsesStream::new(stream),
-                    )
                 }
                 _ => GatewayBody::streaming(stream),
             };

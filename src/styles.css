@@ -90,6 +90,7 @@
   /* brand dots — per-provider session markers (sessions route). Claude maps
      to the accent token; the others are off-palette hues kept as vars. */
   --brand-pi: #7c9cff;
+  --brand-zcode: #10a37f;
   --brand-opencode: #c79a4b;
   --brand-fallback: #6b6b6b;
 
@@ -181,6 +182,7 @@
   /* brand dots — dark-theme hues (e.g. #7c9cff) sit at ~2.4:1 on the light
      paper and fail WCAG AA (3:1); override with darker equivalents. */
   --brand-pi: #4a6fe0;
+  --brand-zcode: #0c7f63;
   --brand-opencode: #8a6420;
   --brand-fallback: #55524c;
 

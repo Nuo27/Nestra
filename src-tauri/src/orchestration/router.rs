@@ -654,7 +654,7 @@ mod tests {
         seed_endpoint(&env.conn, "ep-1", "anthropic", "https://api.anthropic.com", "claude-sonnet");
         capability_registry::rebuild(&env.conn).unwrap();
 
-        let mut ctx = TaskContext::new_task("claude-code", None);
+        let mut ctx = TaskContext::new_task("claude-code-cli", None);
         ctx.requested_provider = Some("ep-1".into());
         ctx.requested_model = Some("claude-sonnet".into());
 
@@ -668,7 +668,7 @@ mod tests {
     fn explicit_pin_falls_through_when_degraded() {
         let env = TestEnv::new();
         seed_endpoint(&env.conn, "ep-1", "anthropic", "https://x", "m-1");
-        seed_binding(&env.conn, "claude-code", "ep-1");
+        seed_binding(&env.conn, "claude-code-cli", "ep-1");
         capability_registry::rebuild(&env.conn).unwrap();
 
         // Degrade ep-1 with 3 migratable failures.
@@ -682,7 +682,7 @@ mod tests {
             );
         }
 
-        let mut ctx = TaskContext::new_task("claude-code", None);
+        let mut ctx = TaskContext::new_task("claude-code-cli", None);
         ctx.requested_provider = Some("ep-1".into());
         ctx.requested_model = Some("m-1".into());
         // ep-1 is degraded AND it's the only candidate → fail closed.
@@ -695,17 +695,17 @@ mod tests {
     fn affinity_reuses_previous_route_for_same_task() {
         let env = TestEnv::new();
         seed_endpoint(&env.conn, "ep-1", "anthropic", "https://x", "m-1");
-        seed_binding(&env.conn, "claude-code", "ep-1");
+        seed_binding(&env.conn, "claude-code-cli", "ep-1");
         capability_registry::rebuild(&env.conn).unwrap();
 
         // First request: capability pick records affinity.
-        let ctx1 = TaskContext::new_task("claude-code", None);
+        let ctx1 = TaskContext::new_task("claude-code-cli", None);
         let r1 = resolve(&ctx1, &env.inputs()).unwrap();
         assert_eq!(r1.reason, RouteReason::Capability);
         assert_eq!(r1.endpoint_id, "ep-1");
 
         // Second request for the SAME task_id → affinity hit.
-        let mut ctx2 = TaskContext::new_for_request("claude-code", ctx1.task_id, None);
+        let mut ctx2 = TaskContext::new_for_request("claude-code-cli", ctx1.task_id, None);
         ctx2.lifecycle = crate::orchestration::identity::TaskLifecycle::InFlight;
         let r2 = resolve(&ctx2, &env.inputs()).unwrap();
         assert_eq!(r2.reason, RouteReason::Affinity, "same task_id must hit affinity");
@@ -716,7 +716,7 @@ mod tests {
     fn allowed_models_glob_filters_capability_pick() {
         let env = TestEnv::new();
         seed_endpoint(&env.conn, "ep-1", "openai-comp", "https://x", "gpt-4o");
-        seed_binding(&env.conn, "claude-code", "ep-1");
+        seed_binding(&env.conn, "claude-code-cli", "ep-1");
         capability_registry::rebuild(&env.conn).unwrap();
 
         // Policy: only allow `claude-*`. ep-1 only has `gpt-4o` → no match.
@@ -724,7 +724,7 @@ mod tests {
         store::upsert_routing_policy(
             &env.conn,
             &store::RoutingPolicyRow {
-                agent_id: "claude-code".into(),
+                agent_id: "claude-code-cli".into(),
                 role: "*".into(),
                 preferred_endpoints: None,
                 fallback_endpoints: None,
@@ -737,7 +737,7 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = TaskContext::new_task("claude-code", None);
+        let ctx = TaskContext::new_task("claude-code-cli", None);
         let r = resolve(&ctx, &env.inputs()).unwrap();
         assert_eq!(r.reason, RouteReason::NoEligible, "gpt-4o blocked by claude-* glob");
     }
@@ -747,13 +747,13 @@ mod tests {
         let env = TestEnv::new();
         seed_endpoint(&env.conn, "ep-1", "openai-comp", "https://x", "m-1");
         seed_endpoint(&env.conn, "ep-2", "openai-comp", "https://y", "m-2");
-        seed_binding(&env.conn, "claude-code", "ep-1");
-        seed_binding(&env.conn, "claude-code", "ep-2");
+        seed_binding(&env.conn, "claude-code-cli", "ep-1");
+        seed_binding(&env.conn, "claude-code-cli", "ep-2");
         capability_registry::rebuild(&env.conn).unwrap();
 
         env.quota.mark_exhausted("ep-1", Some("5h window elapsed".into()));
 
-        let ctx = TaskContext::new_task("claude-code", None);
+        let ctx = TaskContext::new_task("claude-code-cli", None);
         let r = resolve(&ctx, &env.inputs()).unwrap();
         // ep-1 exhausted → router skips to ep-2.
         assert_eq!(r.endpoint_id, "ep-2");
@@ -900,7 +900,7 @@ mod tests {
         let env = TestEnv::new();
         seed_endpoint(&env.conn, "opencode-go", "anthropic", "https://opencode.ai/zen/go/v1", "deepseek-v4-flash");
         add_protocol_row(&env.conn, "opencode-go", "openai-comp", "https://opencode.ai/zen/go/v1");
-        seed_binding(&env.conn, "claude-code", "opencode-go");
+        seed_binding(&env.conn, "claude-code-cli", "opencode-go");
         seed_binding(&env.conn, "opencode-desktop", "opencode-go");
         seed_endpoint_models(
             &env.conn,
@@ -908,7 +908,7 @@ mod tests {
             r#"{"available":["deepseek-v4-flash"],"default":"deepseek-v4-flash"}"#,
         );
 
-        let mut anthropic_ctx = TaskContext::new_task("claude-code", None);
+        let mut anthropic_ctx = TaskContext::new_task("claude-code-cli", None);
         anthropic_ctx.protocol_hint = Some(ProviderKind::Anthropic);
         let route = resolve(&anthropic_ctx, &env.inputs()).unwrap();
         assert_eq!(
@@ -933,14 +933,14 @@ mod tests {
         let env = TestEnv::new();
         seed_endpoint(&env.conn, "deepseek", "anthropic", "https://api.deepseek.com/anthropic", "deepseek-chat");
         add_protocol_row(&env.conn, "deepseek", "openai-comp", "https://api.deepseek.com/v1");
-        seed_binding(&env.conn, "claude-code", "deepseek");
+        seed_binding(&env.conn, "claude-code-cli", "deepseek");
         seed_endpoint_models(
             &env.conn,
             "deepseek",
             r#"{"available":["deepseek-chat"],"default":"deepseek-chat"}"#,
         );
 
-        let mut anthropic_ctx = TaskContext::new_task("claude-code", None);
+        let mut anthropic_ctx = TaskContext::new_task("claude-code-cli", None);
         anthropic_ctx.protocol_hint = Some(ProviderKind::Anthropic);
         let route = resolve(&anthropic_ctx, &env.inputs()).unwrap();
         assert_eq!(route.protocol, ProviderKind::Anthropic);
@@ -953,14 +953,14 @@ mod tests {
     fn protocol_hint_falls_back_to_first_row_when_no_match() {
         let env = TestEnv::new();
         seed_endpoint(&env.conn, "mock-a", "anthropic", "http://127.0.0.1:8787", "claude-haiku-4-5");
-        seed_binding(&env.conn, "pi", "mock-a");
+        seed_binding(&env.conn, "pi-cli", "mock-a");
         seed_endpoint_models(
             &env.conn,
             "mock-a",
             r#"{"available":["claude-haiku-4-5"],"default":"claude-haiku-4-5"}"#,
         );
 
-        let mut ctx = TaskContext::new_task("pi", None);
+        let mut ctx = TaskContext::new_task("pi-cli", None);
         ctx.protocol_hint = Some(ProviderKind::Openai);
         let route = resolve(&ctx, &env.inputs()).unwrap();
         assert_eq!(route.base_url, "http://127.0.0.1:8787");
@@ -984,7 +984,7 @@ mod tests {
         let env = TestEnv::new();
         seed_endpoint(&env.conn, "opencode-go", "anthropic", "https://opencode.ai/zen/go/v1", "grok-4.5");
         add_protocol_row(&env.conn, "opencode-go", "openai-comp", "https://opencode.ai/zen/go/v1");
-        seed_binding(&env.conn, "claude-code", "opencode-go");
+        seed_binding(&env.conn, "claude-code-cli", "opencode-go");
         seed_endpoint_models(
             &env.conn,
             "opencode-go",
@@ -992,7 +992,7 @@ mod tests {
         );
         set_catalog_api(&env.conn, "opencode-go", "grok-4.5", "response-api");
 
-        let mut ctx = TaskContext::new_task("claude-code", None);
+        let mut ctx = TaskContext::new_task("claude-code-cli", None);
         ctx.protocol_hint = Some(ProviderKind::Anthropic);
         let route = resolve(&ctx, &env.inputs()).unwrap();
         assert_eq!(route.protocol, ProviderKind::Responses);
@@ -1007,7 +1007,7 @@ mod tests {
         let env = TestEnv::new();
         seed_endpoint(&env.conn, "opencode-go", "anthropic", "https://opencode.ai/zen/go/v1", "kimi-k3");
         add_protocol_row(&env.conn, "opencode-go", "openai-comp", "https://opencode.ai/zen/go/v1");
-        seed_binding(&env.conn, "claude-code", "opencode-go");
+        seed_binding(&env.conn, "claude-code-cli", "opencode-go");
         seed_endpoint_models(
             &env.conn,
             "opencode-go",
@@ -1015,7 +1015,7 @@ mod tests {
         );
         set_catalog_api(&env.conn, "opencode-go", "kimi-k3", "openai-comp");
 
-        let mut ctx = TaskContext::new_task("claude-code", None);
+        let mut ctx = TaskContext::new_task("claude-code-cli", None);
         ctx.protocol_hint = Some(ProviderKind::Anthropic);
         let route = resolve(&ctx, &env.inputs()).unwrap();
         assert_eq!(route.protocol, ProviderKind::Openai);
@@ -1060,11 +1060,11 @@ mod tests {
         let env = TestEnv::new();
         seed_endpoint(&env.conn, "ep-1", "anthropic", "https://api.example.com", "m-1");
         add_protocol_row(&env.conn, "ep-1", "openai-comp", "https://api.example.com/v1");
-        seed_binding(&env.conn, "claude-code", "ep-1");
+        seed_binding(&env.conn, "claude-code-cli", "ep-1");
         seed_endpoint_models(&env.conn, "ep-1", r#"{"available":["m-1"],"default":"m-1"}"#);
 
         // Distinct base_urls → direction-matched anthropic row → Anthropic wire.
-        let mut a_ctx = TaskContext::new_task("claude-code", None);
+        let mut a_ctx = TaskContext::new_task("claude-code-cli", None);
         a_ctx.protocol_hint = Some(ProviderKind::Anthropic);
         let r = resolve(&a_ctx, &env.inputs()).unwrap();
         assert_eq!(r.protocol, ProviderKind::Anthropic);

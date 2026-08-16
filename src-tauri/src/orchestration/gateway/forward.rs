@@ -345,12 +345,11 @@ pub async fn run_with_migration(
 
 /// Rotate `request_id` for the next attempt while preserving the task's
 /// continuity handle (`task_id`) and the request's routing-relevant fields.
-/// Carries run/parent/native identity through: `new_for_request` zeroes
-/// them, and dropping them here would silently orphan this attempt from its
-/// run row and sub-agent chain.
+/// Carries parent/native identity through: `new_for_request` zeroes them,
+/// and dropping them here would silently orphan this attempt from its
+/// parent task and sub-agent chain.
 fn rotate_ctx(ctx: &TaskContext, agent_id: &str) -> TaskContext {
     let mut next = TaskContext::new_for_request(agent_id, ctx.task_id, ctx.logical_session_id.clone());
-    next.run_id = ctx.run_id;
     next.parent_task_id = ctx.parent_task_id;
     next.native_task_ref = ctx.native_task_ref.clone();
     next.requested_model = ctx.requested_model.clone();
@@ -367,17 +366,14 @@ fn rotate_ctx(ctx: &TaskContext, agent_id: &str) -> TaskContext {
     next
 }
 
-/// Ensure the `run` + `task` rows a route_request FK-references exist.
-/// Idempotent: if the task already exists, nothing happens. The run is a
-/// stable Nestra UUID per (agent, logical-session) — derived from the task's
-/// session so retries of the same task reuse the same run row. Synchronous
-/// (all rusqlite); the caller holds the DB lock.
-/// Record the "attempt started" bookkeeping in ONE transaction: the task-chain
-/// seeds (run + task rows, only when missing) plus the `route_request` insert.
-/// Previously 3-4 separate auto-commit transactions per proxied request; now
-/// one commit. Best-effort (observability data — failures are logged, never
-/// fatal), so a transaction failure skips the bookkeeping rather than
-/// erroring the request.
+/// Ensure the `task` row a route_request FK-references exists. Idempotent:
+/// if the task already exists, nothing happens. Synchronous (all rusqlite);
+/// the caller holds the DB lock.
+/// Record the "attempt started" bookkeeping in ONE transaction: the task seed
+/// (only when missing) plus the `route_request` insert. Previously 3-4
+/// separate auto-commit transactions per proxied request; now one commit.
+/// Best-effort (observability data — failures are logged, never fatal), so a
+/// transaction failure skips the bookkeeping rather than erroring the request.
 fn record_attempt_start(
     conn: &rusqlite::Connection,
     ctx: &TaskContext,
@@ -401,38 +397,10 @@ fn ensure_task_chain(conn: &rusqlite::Connection, ctx: &TaskContext) -> AppResul
     if store::get_task(conn, &task_id)?.is_some() {
         return Ok(());
     }
-    // Derive a stable run id from the task (same session → same run). The
-    // run id only needs to be unique + FK-valid; use the task's own id for
-    // simplicity (a top-level task IS its run's first task).
-    let run_id = task_id.clone();
-    if store::get_run(conn, &run_id)?.is_none() {
-        store::insert_run(
-            conn,
-            &store::RunRow {
-                id: run_id.clone(),
-                agent_id: ctx.agent_id.clone(),
-                logical_session: ctx
-                    .logical_session_id
-                    .clone()
-                    .unwrap_or_else(|| format!("run-{}", ctx.task_id)),
-                parent_run_id: None,
-                is_child: false,
-                subagent_role: Some(ctx.subagent_role.to_string()),
-                role_source: match ctx.role_source {
-                    crate::orchestration::identity::RoleSource::Native => "native",
-                    crate::orchestration::identity::RoleSource::Heuristic => "heuristic",
-                }
-                .to_string(),
-                started_at: chrono::Utc::now().timestamp_millis(),
-                ended_at: None,
-            },
-        )?;
-    }
     store::insert_task(
         conn,
         &store::TaskRow {
             id: task_id,
-            run_id,
             parent_task_id: ctx.parent_task_id.map(|p| p.to_string()),
             lifecycle: "born".to_string(),
             native_task_ref: None,
@@ -629,7 +597,7 @@ mod tests {
             let conn = state.db.lock().await;
             crate::db::create_endpoint(&conn, "ep-1", "anthropic", "Test").unwrap();
         }
-        let ctx = TaskContext::new_task("claude-code", Some("sess-1".to_string()));
+        let ctx = TaskContext::new_task("claude-code-cli", Some("sess-1".to_string()));
 
         let resolve = |_ctx: &TaskContext| -> ResolveFuture {
             let route = ok_route("ep-1", _ctx);
@@ -661,7 +629,7 @@ mod tests {
         let resp = run_with_migration(
             &state,
             ctx,
-            "claude-code".to_string(),
+            "claude-code-cli".to_string(),
             chrono::Utc::now().timestamp_millis(),
             false, // no side-effect risk
             resolve,
@@ -678,7 +646,7 @@ mod tests {
         let summaries = store::task_summaries(&conn, 10).unwrap();
         assert_eq!(summaries.len(), 1, "task_summaries must surface the routed task");
         let s = &summaries[0];
-        assert_eq!(s.agent_id, "claude-code");
+        assert_eq!(s.agent_id, "claude-code-cli");
         assert_eq!(s.latest_status, Some(200));
         // Lifecycle transitioned to a terminal state by the success path.
         let lc: String = conn
@@ -706,7 +674,7 @@ mod tests {
             let conn = state.db.lock().await;
             crate::db::create_endpoint(&conn, "ep-1", "anthropic", "Test").unwrap();
         }
-        let ctx = TaskContext::new_task("claude-code", Some("sess-1".to_string()));
+        let ctx = TaskContext::new_task("claude-code-cli", Some("sess-1".to_string()));
 
         let resolve = |_ctx: &TaskContext| -> ResolveFuture {
             let route = ok_route("ep-1", _ctx);
@@ -736,7 +704,7 @@ mod tests {
         let resp = run_with_migration(
             &state,
             ctx,
-            "claude-code".to_string(),
+            "claude-code-cli".to_string(),
             chrono::Utc::now().timestamp_millis(),
             true, // side-effect risk — never blind-retry
             resolve,

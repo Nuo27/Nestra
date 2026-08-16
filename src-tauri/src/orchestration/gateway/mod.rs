@@ -28,7 +28,6 @@ pub mod convert_responses;
 pub mod forward;
 pub mod protocol_anthropic;
 pub mod protocol_openai;
-pub mod protocol_responses;
 pub mod stream;
 pub mod stream_convert;
 pub mod stream_responses;
@@ -216,8 +215,8 @@ pub async fn spawn(
 /// and hands off to the right protocol handler.
 ///
 /// Protocol mapping:
-///   - `claude-code` → Anthropic Messages (`/v1/messages`)
-///   - `opencode-desktop`, `pi` → OpenAI Chat Completions (`/v1/chat/completions`)
+///   - `claude-code-cli`, `zcode-desktop` → Anthropic Messages (`/v1/messages`)
+///   - `opencode-desktop`, `pi-cli` → OpenAI Chat Completions (`/v1/chat/completions`)
 ///
 /// Requests without a recognized agent prefix fall through to the Anthropic
 /// handler (backward-compat with prefix-less Claude Code config — the
@@ -237,22 +236,15 @@ async fn dispatch(
 
     let path = req.uri().path().to_string();
     let agent_id = extract_agent_id(&path);
-    // A Responses path (e.g. `/v1/responses`) is served by the Responses
-    // handler regardless of the agent prefix — clients that speak Responses
-    // (future) hit it directly.
-    if path.ends_with("/v1/responses") {
-        return protocol_responses::handle(req, state, agent_id.as_deref().unwrap_or("claude-code"))
-            .await;
-    }
     match agent_id.as_deref() {
-        Some("opencode-desktop") | Some("pi") => {
+        Some("opencode-desktop") | Some("pi-cli") => {
             protocol_openai::handle(req, state, agent_id.unwrap().as_str()).await
         }
-        // claude-code (explicit prefix) or None (prefix-less request
+        // claude-code-cli (explicit prefix) or None (prefix-less request
         // to /v1/messages) → Anthropic path. Default the agent id to
-        // "claude-code" when no prefix was present.
+        // "claude-code-cli" when no prefix was present.
         _ => {
-            protocol_anthropic::handle(req, state, agent_id.as_deref().unwrap_or("claude-code"))
+            protocol_anthropic::handle(req, state, agent_id.as_deref().unwrap_or("claude-code-cli"))
                 .await
         }
     }
@@ -293,13 +285,19 @@ fn unauthorized() -> hyper::Response<stream::GatewayBody> {
 
 /// Extract the agent id from a `/<agent-id>/v1/...` path prefix. Returns
 /// `None` when the path doesn't start with a known agent id (e.g. a prefix-less
-/// request to `/v1/messages`). Known agent ids are the three in the registry;
-/// anything else is treated as no prefix (Anthropic fallback).
+/// request to `/v1/messages`). Known agent ids are the registry ids; the
+/// pre-rename ids (`claude-code`, `pi`) are aliased so gateway base_urls
+/// written into agent configs before the `-cli` rename keep routing — route
+/// attribution only, not a data migration.
 fn extract_agent_id(path: &str) -> Option<String> {
     let trimmed = path.strip_prefix('/')?;
     let first = trimmed.split('/').next()?;
     match first {
-        "claude-code" | "opencode-desktop" | "pi" => Some(first.to_string()),
+        "claude-code-cli" | "opencode-desktop" | "pi-cli" | "zcode-desktop" => {
+            Some(first.to_string())
+        }
+        "claude-code" => Some("claude-code-cli".to_string()),
+        "pi" => Some("pi-cli".to_string()),
         _ => None,
     }
 }
@@ -353,6 +351,47 @@ mod auth_tests {
     fn case_sensitive_prefix() {
         // "bearer" (lowercase) is NOT the Bearer scheme; must not match.
         assert!(!request_token_matches(&hdr("authorization", "bearer sekret"), "sekret"));
+    }
+}
+
+#[cfg(test)]
+mod agent_prefix_tests {
+    use super::extract_agent_id;
+
+    #[test]
+    fn known_prefixes_resolve() {
+        assert_eq!(
+            extract_agent_id("/zcode-desktop/v1/messages").as_deref(),
+            Some("zcode-desktop")
+        );
+        assert_eq!(
+            extract_agent_id("/claude-code-cli/v1/messages").as_deref(),
+            Some("claude-code-cli")
+        );
+        assert_eq!(
+            extract_agent_id("/pi-cli/v1/chat/completions").as_deref(),
+            Some("pi-cli")
+        );
+    }
+
+    #[test]
+    fn pre_rename_prefixes_alias_to_new_ids() {
+        // Gateway base_urls written into agent configs before the `-cli` rename
+        // must keep routing (and attribute to the new registry id).
+        assert_eq!(
+            extract_agent_id("/claude-code/v1/messages").as_deref(),
+            Some("claude-code-cli")
+        );
+        assert_eq!(
+            extract_agent_id("/pi/v1/chat/completions").as_deref(),
+            Some("pi-cli")
+        );
+    }
+
+    #[test]
+    fn prefix_less_and_unknown_are_none() {
+        assert_eq!(extract_agent_id("/v1/messages"), None);
+        assert_eq!(extract_agent_id("/unknown-agent/v1/messages"), None);
     }
 }
 

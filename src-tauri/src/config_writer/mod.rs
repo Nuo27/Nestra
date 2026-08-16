@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn gateway_alias_debug_redacts_sentinel_key() {
         let alias = GatewayAlias {
-            gateway_base_url: "http://127.0.0.1:18777/claude-code".into(),
+            gateway_base_url: "http://127.0.0.1:18777/claude-code-cli".into(),
             model_alias: "claude-haiku-4-5".into(),
             sentinel_key: "super-secret-token-value".into(),
         };

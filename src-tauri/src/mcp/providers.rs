@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub trait Provider: Send + Sync {
-    /// Registry agent id ("claude-code", "pi", ...) — matches the agents ids.
+    /// Registry agent id ("claude-code-cli", "pi-cli", ...) — matches the agents ids.
     fn agent_id(&self) -> &'static str;
     /// Absolute path to the agent's MCP config file under a home dir.
     fn config_path(&self, home: &Path) -> PathBuf;
@@ -389,7 +389,7 @@ fn remove_entry(obj: &mut Map<String, Value>, name: &str) {
 pub struct ClaudeCode;
 impl Provider for ClaudeCode {
     fn agent_id(&self) -> &'static str {
-        "claude-code"
+        "claude-code-cli"
     }
     fn config_path(&self, home: &Path) -> PathBuf {
         home.join(".claude.json")
@@ -504,7 +504,7 @@ impl Provider for OpenCode {
 pub struct Pi;
 impl Provider for Pi {
     fn agent_id(&self) -> &'static str {
-        "pi"
+        "pi-cli"
     }
     fn config_path(&self, home: &Path) -> PathBuf {
         home.join(".pi").join("agent").join("mcp.json")
@@ -532,12 +532,61 @@ impl Provider for Pi {
     }
 }
 
+/// ==== zcode ====  `~/.zcode/cli/config.json` -> `mcp.servers` object.
+/// The schema is strict (an unknown key silently drops the server), so
+/// `to_native` writes only fields ZCode itself writes: `type`, the transport
+/// fields, `enabled`, and `timeoutMs` on stdio servers.
+pub struct ZCode;
+impl Provider for ZCode {
+    fn agent_id(&self) -> &'static str {
+        "zcode-desktop"
+    }
+    fn supports_enabled(&self) -> bool {
+        true
+    }
+    fn config_path(&self, home: &Path) -> PathBuf {
+        home.join(".zcode").join("cli").join("config.json")
+    }
+    fn read_raw(&self, raw: &str) -> Vec<(String, Value)> {
+        read_map(raw, |o| {
+            o.get("mcp")
+                .and_then(|m| m.get("servers"))
+                .and_then(|s| s.as_object())
+        })
+    }
+    fn to_native(&self, s: &McpTransport, enabled: bool) -> Value {
+        match s.kind {
+            McpKind::Stdio => json!({
+                "type": "stdio",
+                "command": s.command.clone(),
+                "args": s.args.clone(),
+                "env": s.env.clone(),
+                "enabled": enabled,
+                "timeoutMs": 30_000,
+            }),
+            McpKind::Http | McpKind::Sse => json!({
+                "type": "http",
+                "url": s.url.clone(),
+                "enabled": enabled,
+            }),
+        }
+    }
+    fn apply(
+        &self,
+        raw: &str,
+        enabled: &BTreeMap<String, Value>,
+        disabled: &[String],
+    ) -> AppResult<String> {
+        apply_at_path(raw, &["mcp", "servers"], enabled, disabled)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
 pub fn all() -> Vec<&'static dyn Provider> {
-    vec![&ClaudeCode, &OpenCode, &Pi]
+    vec![&ClaudeCode, &OpenCode, &Pi, &ZCode]
 }
 
 pub fn for_agent(id: &str) -> Option<&'static dyn Provider> {
@@ -1067,5 +1116,58 @@ mod tests {
         let raw = r#"["not", "an", "object"]"#;
         assert!(ClaudeCode.apply(raw, &k(), &[] as &[String]).is_err());
         assert!(OpenCode.apply(raw, &k(), &[] as &[String]).is_err());
+    }
+
+    /// zcode round-trip: a native `mcp.servers` entry decodes through
+    /// `from_native`, and `to_native` writes the strict-schema shape (typed
+    /// stdio/http, `enabled`, `timeoutMs`) at the right path — while `apply`
+    /// preserves the hooks/plugins keys that share the file.
+    #[test]
+    fn zcode_native_round_trip_and_apply() {
+        let s = crate::mcp::McpTransport {
+            kind: crate::mcp::McpKind::Stdio,
+            command: Some("npx".into()),
+            args: vec!["-y".into(), "@mcps/fs".into()],
+            env: Default::default(),
+            url: None,
+        };
+        let v = ZCode.to_native(&s, true);
+        assert_eq!(v["type"], "stdio");
+        assert_eq!(v["enabled"], true);
+        assert_eq!(v["timeoutMs"], 30_000);
+        let back = crate::mcp::from_native(&v).unwrap();
+        assert_eq!(back.kind, crate::mcp::McpKind::Stdio);
+        assert_eq!(back.command.as_deref(), Some("npx"));
+        assert_eq!(back.args, vec!["-y".to_string(), "@mcps/fs".to_string()]);
+
+        // disabled state stays written but off
+        let off = ZCode.to_native(&s, false);
+        assert_eq!(off["enabled"], false);
+
+        // http shape
+        let http = crate::mcp::McpTransport {
+            kind: crate::mcp::McpKind::Http,
+            command: None,
+            args: vec![],
+            env: Default::default(),
+            url: Some("https://x.test/mcp".into()),
+        };
+        let hv = ZCode.to_native(&http, true);
+        assert_eq!(hv["type"], "http");
+        assert_eq!(hv["url"], "https://x.test/mcp");
+
+        // apply writes under mcp.servers and preserves sibling keys
+        let mut enabled = BTreeMap::new();
+        enabled.insert("fs".into(), v);
+        let raw = r#"{ "hooks": { "enabled": true }, "mcp": { "servers": { "old": { "type": "stdio", "command": "x", "enabled": true } } } }"#;
+        let out = ZCode.apply(raw, &enabled, &["old".to_string()]).unwrap();
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["hooks"]["enabled"], true, "sibling keys preserved");
+        assert!(parsed["mcp"]["servers"].get("old").is_none(), "disabled name dropped");
+        assert_eq!(parsed["mcp"]["servers"]["fs"]["command"], "npx");
+
+        // read_raw finds the nested map
+        let entries = ZCode.read_raw(&out);
+        assert_eq!(entries[0].0, "fs");
     }
 }

@@ -22,7 +22,7 @@ pub struct SkillMeta {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
-    pub source: String, // "claude-code" | "pi" | "local" | "imported"
+    pub source: String, // "claude-code-cli" | "pi-cli" | "local" | "imported"
     pub path: String,   // SSOT dir (managed) or agent-dir path (unmanaged)
     pub skill_type: String,
     pub managed: bool,
@@ -614,7 +614,7 @@ fn is_claudekit(path: &Path) -> bool {
 
 /// Is a scanned skill one the CLI ships itself?
 fn is_builtin(cli_id: &str, path: &Path, from_system: bool) -> bool {
-    from_system || (cli_id == "claude-code" && is_claudekit(path))
+    from_system || (cli_id == "claude-code-cli" && is_claudekit(path))
 }
 
 /// Parse `name:`, `description:`, and `metadata.author:` from YAML-ish
@@ -679,19 +679,19 @@ mod tests {
         .unwrap();
 
         // install → enabled for claude-code
-        let meta = install(&conn, src.to_str().unwrap(), &["claude-code".into()]).unwrap();
+        let meta = install(&conn, src.to_str().unwrap(), &["claude-code-cli".into()]).unwrap();
         assert_eq!(meta.name, "My Skill");
         assert!(meta.managed);
-        assert!(meta.enabled_agents.contains(&"claude-code".to_string()));
+        assert!(meta.enabled_agents.contains(&"claude-code-cli".to_string()));
         assert!(ssot_root().unwrap().join(&meta.id).exists());
         assert!(home.join(".claude").join("skills").join(&meta.id).exists());
 
         // enable pi too, then disable claude
-        let m2 = toggle(&conn, &meta.id, "pi", true).unwrap();
-        assert!(m2.enabled_agents.contains(&"pi".to_string()));
+        let m2 = toggle(&conn, &meta.id, "pi-cli", true).unwrap();
+        assert!(m2.enabled_agents.contains(&"pi-cli".to_string()));
         assert!(home.join(".agents").join("skills").join(&meta.id).exists());
-        let m3 = toggle(&conn, &meta.id, "claude-code", false).unwrap();
-        assert!(!m3.enabled_agents.contains(&"claude-code".to_string()));
+        let m3 = toggle(&conn, &meta.id, "claude-code-cli", false).unwrap();
+        assert!(!m3.enabled_agents.contains(&"claude-code-cli".to_string()));
         assert!(!home.join(".claude").join("skills").join(&meta.id).exists());
 
         // list includes the managed skill
@@ -725,8 +725,8 @@ mod tests {
         .unwrap();
 
         // install → enabled for claude-code + pi, so copies exist in both dirs
-        let meta = install(&conn, src.to_str().unwrap(), &["claude-code".into()]).unwrap();
-        toggle(&conn, &meta.id, "pi", true).unwrap();
+        let meta = install(&conn, src.to_str().unwrap(), &["claude-code-cli".into()]).unwrap();
+        toggle(&conn, &meta.id, "pi-cli", true).unwrap();
         assert!(ssot_root().unwrap().join(&meta.id).exists());
         let claude_copy = home.join(".claude").join("skills").join(&meta.id);
         let pi_copy = home.join(".agents").join("skills").join(&meta.id);
@@ -790,14 +790,14 @@ mod tests {
         )
         .unwrap();
         assert!(is_claudekit(&bundled));
-        assert!(is_builtin("claude-code", &bundled, false));
+        assert!(is_builtin("claude-code-cli", &bundled, false));
 
         let user = dir.join("my-skill");
         std::fs::create_dir_all(&user).unwrap();
         std::fs::write(user.join("SKILL.md"), "---\nname: my-skill\ndescription: hi\n---\n").unwrap();
         assert!(!is_claudekit(&user));
-        assert!(!is_builtin("claude-code", &user, false));
-        assert!(!is_builtin("pi", &user, false));
+        assert!(!is_builtin("claude-code-cli", &user, false));
+        assert!(!is_builtin("pi-cli", &user, false));
     }
 
     /// OpenCode requires the copied frontmatter `name` to equal the dir (= id).
@@ -819,7 +819,7 @@ mod tests {
         )
         .unwrap();
 
-        let meta = install(&conn, src.to_str().unwrap(), &["opencode-desktop".into(), "claude-code".into()]).unwrap();
+        let meta = install(&conn, src.to_str().unwrap(), &["opencode-desktop".into(), "claude-code-cli".into()]).unwrap();
         assert_eq!(meta.id, "my-skill");
 
         let oc = std::fs::read_to_string(home.join(".config").join("opencode").join("skills").join("my-skill").join("SKILL.md")).unwrap();

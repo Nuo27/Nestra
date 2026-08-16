@@ -461,7 +461,7 @@ mod tests {
         assert!(path_is_chat_completions("/opencode-desktop/chat/completions/"));
         assert!(!path_is_chat_completions("/v1/messages"));
         assert!(!path_is_chat_completions("/v1/chat/completions/extra"));
-        assert!(!path_is_chat_completions("/claude-code/v1/messages"));
+        assert!(!path_is_chat_completions("/claude-code-cli/v1/messages"));
         assert!(!path_is_chat_completions("/opencode-desktop/v1/messages"));
     }
 

@@ -137,18 +137,18 @@ export function SessionDetail({ id, provider }: { id: string; provider: string }
         </div>
         <ButtonGroup className="mt-3" justify="end" space="loose" wrap>
           {/* Icon-only compact cluster (DESIGN.md §4 rule 2): the label lives
-              in the Tip, never as a second text element. */}
-          <Tip
-            content={
-              session?.resume_command
-                ? t("sessions.openTipCmd", { cwd: session.cwd ?? ".", cmd: session.resume_command })
-                : t("sessions.openTip")
-            }
-          >
-            <Button size="sm" variant="ghost" onClick={handleOpen} aria-label={t("sessions.openAria")}>
-              <ExternalLink data-icon size={12} />
-            </Button>
-          </Tip>
+              in the Tip, never as a second text element. Open only renders
+              for resumable sessions — desktop providers (opencode/zcode)
+              have no on-PATH CLI to launch, so the button would dead-end. */}
+          {session && session.resume_command && (
+            <Tip
+              content={t("sessions.openTipCmd", { cwd: session.cwd ?? ".", cmd: session.resume_command })}
+            >
+              <Button size="sm" variant="ghost" onClick={handleOpen} aria-label={t("sessions.openAria")}>
+                <ExternalLink data-icon size={12} />
+              </Button>
+            </Tip>
+          )}
           <Tip content={t("sessions.revealTip")}>
             <Button size="sm" variant="ghost" onClick={handleReveal} aria-label={t("sessions.revealSourceAria")}>
               <FolderOpen data-icon size={12} />

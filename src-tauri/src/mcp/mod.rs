@@ -438,7 +438,7 @@ pub fn set_state(
         }
         AgentMcpState::Disabled => {
             // Only formats with a per-server `enabled` field can express
-            // "written but disabled". For everyone else (claude-code, pi) the
+            // "written but disabled". For everyone else (claude-code-cli, pi-cli) the
             // flag would be silently DROPPED by to_native — the DB would say
             // disabled while the agent loads the server enabled. Degrade to
             // absent instead: the entry leaves the agent's file entirely.
@@ -915,7 +915,7 @@ mod tests {
                 env: Default::default(),
                 url: None,
             },
-            enabled_agents: vec!["claude-code".into()],
+            enabled_agents: vec!["claude-code-cli".into()],
             disabled_agents: vec![],
             managed: true,
             env_overrides: BTreeMap::new(),
@@ -927,7 +927,7 @@ mod tests {
         assert!(written.contains("\"filesystem\""), "must add server");
 
         // toggle off removes from the file
-        toggle(&conn, "filesystem", "claude-code", false).unwrap();
+        toggle(&conn, "filesystem", "claude-code-cli", false).unwrap();
         let written = std::fs::read_to_string(&config).unwrap();
         assert!(!written.contains("\"filesystem\""));
         assert!(written.contains("\"theme\": \"dark\""));
@@ -970,12 +970,12 @@ mod tests {
         assert_eq!(s.id, "codegraph");
         assert_eq!(s.name, "codegraph");
         assert!(
-            s.enabled_agents.iter().any(|c| c == "claude-code"),
+            s.enabled_agents.iter().any(|c| c == "claude-code-cli"),
             "claude-code should be enabled: {:?}",
             s.enabled_agents
         );
         assert!(
-            s.enabled_agents.iter().any(|c| c == "pi"),
+            s.enabled_agents.iter().any(|c| c == "pi-cli"),
             "pi should be enabled: {:?}",
             s.enabled_agents
         );
@@ -1013,7 +1013,7 @@ mod tests {
         assert_eq!(rows.len(), 2, "stdio+http conflict should keep 2 rows");
         assert!(rows.iter().any(|r| r.id == "dual"), "canonical stdio row");
         assert!(
-            rows.iter().any(|r| r.id == "dual-pi"),
+            rows.iter().any(|r| r.id == "dual-pi-cli"),
             "suffixed http row, got ids: {:?}",
             rows.iter().map(|r| &r.id).collect::<Vec<_>>()
         );
@@ -1048,8 +1048,8 @@ mod tests {
         assert_eq!(cands.len(), 1, "one aggregated candidate");
         let c = &cands[0];
         assert_eq!(c.name, "shared");
-        assert!(c.agent_ids.contains(&"claude-code".to_string()));
-        assert!(c.agent_ids.contains(&"pi".to_string()));
+        assert!(c.agent_ids.contains(&"claude-code-cli".to_string()));
+        assert!(c.agent_ids.contains(&"pi-cli".to_string()));
         assert!(!c.transports_conflict, "same kind → no conflict");
     }
 
@@ -1077,7 +1077,7 @@ mod tests {
                 env: BTreeMap::new(),
                 url: None,
             },
-            enabled_agents: vec!["claude-code".into()],
+            enabled_agents: vec!["claude-code-cli".into()],
             disabled_agents: vec![],
             managed: true,
             env_overrides: BTreeMap::new(),
@@ -1114,7 +1114,7 @@ mod tests {
         pi_ov.insert("SHARED".into(), "pi".into());
         pi_ov.insert("B".into(), "2".into());
         let mut overrides = BTreeMap::new();
-        overrides.insert("pi".into(), pi_ov);
+        overrides.insert("pi-cli".into(), pi_ov);
 
         let srv = McpServer {
             id: "envtest".into(),
@@ -1126,7 +1126,7 @@ mod tests {
                 env: base_env,
                 url: None,
             },
-            enabled_agents: vec!["claude-code".into(), "pi".into()],
+            enabled_agents: vec!["claude-code-cli".into(), "pi-cli".into()],
             disabled_agents: vec![],
             managed: true,
             env_overrides: overrides,
@@ -1180,7 +1180,7 @@ mod tests {
                 env: BTreeMap::new(),
                 url: None,
             },
-            enabled_agents: vec!["claude-code".into(), "opencode-desktop".into()],
+            enabled_agents: vec!["claude-code-cli".into(), "opencode-desktop".into()],
             disabled_agents: vec![],
             managed: true,
             env_overrides: BTreeMap::new(),
@@ -1243,7 +1243,7 @@ mod tests {
                 env: BTreeMap::new(),
                 url: None,
             },
-            enabled_agents: vec!["claude-code".into()],
+            enabled_agents: vec!["claude-code-cli".into()],
             disabled_agents: vec![],
             managed: true,
             env_overrides: BTreeMap::new(),
@@ -1290,7 +1290,7 @@ mod tests {
                 env: BTreeMap::new(),
                 url: None,
             },
-            enabled_agents: vec!["claude-code".into()],
+            enabled_agents: vec!["claude-code-cli".into()],
             disabled_agents: vec![],
             managed: true,
             env_overrides: BTreeMap::new(),
@@ -1390,7 +1390,7 @@ mod tests {
                 env: BTreeMap::new(),
                 url: None,
             },
-            enabled_agents: vec!["claude-code".into()],
+            enabled_agents: vec!["claude-code-cli".into()],
             disabled_agents: vec!["opencode-desktop".into()],
             managed: true,
             env_overrides: BTreeMap::new(),
@@ -1516,7 +1516,7 @@ mod tests {
                 env: BTreeMap::new(),
                 url: None,
             },
-            enabled_agents: vec!["claude-code".into()],
+            enabled_agents: vec!["claude-code-cli".into()],
             disabled_agents: vec![],
             managed: true,
             env_overrides: BTreeMap::new(),

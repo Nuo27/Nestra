@@ -526,7 +526,7 @@
     "autoDetectRestored": "Auto-detection restored for {{name}}",
     "none": {
       "title": "No agents detected",
-      "hint": "Install Claude Code, OpenCode, or Pi, then click Re-detect."
+      "hint": "Install Claude Code, OpenCode, Pi, or ZCode, then click Re-detect."
     },
     "notFound": "Agent not found",
     "configureBinary": "configure binary…",

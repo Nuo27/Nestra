@@ -290,12 +290,12 @@ mod tests {
         let reg = default_provider_registry();
         // Each provider's native CLI accepts its own id.
         assert_eq!(
-            build_resume_command(&reg, "claude-code", "claude-code", "abc").unwrap(),
+            build_resume_command(&reg, "claude-code-cli", "claude-code-cli", "abc").unwrap(),
             "claude --resume abc"
         );
         // Pi uses the corrected flag.
         assert_eq!(
-            build_resume_command(&reg, "pi", "pi", "uuid-pi").unwrap(),
+            build_resume_command(&reg, "pi-cli", "pi-cli", "uuid-pi").unwrap(),
             "pi --session uuid-pi"
         );
         // opencode-desktop is intentionally non-resumable (no resume_command),
@@ -310,9 +310,9 @@ mod tests {
         };
         let reg = default_provider_registry();
         // Claude session cannot be opened in Pi's CLI (cross-provider refused).
-        let err = build_resume_command(&reg, "claude-code", "pi", "x").unwrap_err();
+        let err = build_resume_command(&reg, "claude-code-cli", "pi-cli", "x").unwrap_err();
         let msg = format!("{err:?}");
-        assert!(msg.contains("source 'claude-code'"), "{msg}");
+        assert!(msg.contains("source 'claude-code-cli'"), "{msg}");
     }
 
     #[test]

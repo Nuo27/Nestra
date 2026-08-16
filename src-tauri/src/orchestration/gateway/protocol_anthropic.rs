@@ -9,7 +9,7 @@
 //! ```
 //!
 //! What the handler does:
-//!   1. Build a [`TaskContext`] from the request (agent = claude-code, session
+//!   1. Build a [`TaskContext`] from the request (agent = claude-code-cli, session
 //!      id from the `session_id` header Claude Code sends, requested model from
 //!      the body, role = Main with Heuristic source — adapter refines
 //!      subagent-role extraction).
@@ -74,7 +74,7 @@ pub(super) fn upstream_client() -> Client<HttpsConnector<HttpConnector>, Gateway
 
 /// Handle one Anthropic Messages request end-to-end. `agent_id` is supplied
 /// by the dispatcher (extracted from the path prefix, or defaulted to
-/// "claude-code" for prefix-less requests).
+/// "claude-code-cli" for prefix-less requests).
 pub async fn handle(
     req: Request<Incoming>,
     state: GatewayState,
@@ -657,9 +657,9 @@ mod tests {
         assert!(path_is_messages("/v1/messages"));
         assert!(path_is_messages("/v1/messages/"));
         assert!(path_is_messages("/v1/messages?foo=bar"));
-        assert!(path_is_messages("/claude-code/v1/messages"));
+        assert!(path_is_messages("/claude-code-cli/v1/messages"));
         assert!(path_is_messages("/pi/v1/messages"), "any agent prefix is accepted here");
         assert!(!path_is_messages("/v1/chat/completions"));
-        assert!(!path_is_messages("/claude-code/v1/messages/extra"));
+        assert!(!path_is_messages("/claude-code-cli/v1/messages/extra"));
     }
 }

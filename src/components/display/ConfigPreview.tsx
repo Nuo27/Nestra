@@ -94,6 +94,8 @@ function buildPreviews(e: EndpointInfo): Preview[] {
   );
 
   if (hasAnthropic) out.push(claudeCodePreview(e, m, adv));
+  // ZCode binds both wire families (anthropic / openai-compatible).
+  if (hasAnthropic || hasOpenaiComp) out.push(zcodePreview(e, m, hasAnthropic));
   if (hasOpenaiComp) {
     out.push(openCodePreview(e, m, hasAnthropic));
     out.push(piPreview(e, m, hasAnthropic));
@@ -140,10 +142,43 @@ function claudeCodePreview(e: EndpointInfo, m: Models, adv: Record<string, strin
     if (!reserved.has(k)) env[k] = v;
   }
   return {
-    id: "claude-code",
+    id: "claude-code-cli",
     label: "Claude Code", // i18n: agent display names come from the registry
     path: "~/.claude/settings.json",
     body: JSON.stringify({ env }, null, 2),
+  };
+}
+
+/** Mirrors agents/zcode.rs — one `nestra-<endpoint>` entry in ZCode's
+ * `~/.zcode/v2/config.json` top-level `provider` map. ZCode supports both
+ * wire families: `anthropic` (base + `/v1/messages`) and
+ * `openai-compatible` (base + `/chat/completions`, base keeps its `/v1`).
+ * Model limits mirror the adapter's models.dev fallback. */
+function zcodePreview(e: EndpointInfo, m: Models, hasAnthropic: boolean): Preview {
+  const key = `nestra-${e.id}`;
+  const kind = hasAnthropic ? "anthropic" : "openai-compatible";
+  const baseURL = hasAnthropic ? pickUrl(e, "anthropic") : pickUrl(e, "openai-comp", "custom");
+  const ids = (m.available?.length ? m.available : m.default ? [m.default] : []).filter(Boolean);
+  const models: Record<string, { limit: { context: number; output: number }; modalities: { input: string[]; output: string[] } }> = {};
+  for (const id of ids) {
+    models[id] = {
+      limit: { context: 200_000, output: 128_000 },
+      modalities: { input: ["text"], output: ["text"] },
+    };
+  }
+  const entry = {
+    name: `${e.display_name} (via Nestra)`,
+    kind,
+    options: { baseURL, apiKey: KEY_PLACEHOLDER },
+    enabled: true,
+    source: "custom",
+    models,
+  };
+  return {
+    id: "zcode-desktop",
+    label: "ZCode", // i18n: agent display names come from the registry
+    path: "~/.zcode/v2/config.json",
+    body: JSON.stringify({ provider: { [key]: entry } }, null, 2),
   };
 }
 
@@ -187,7 +222,7 @@ function piPreview(e: EndpointInfo, m: Models, hasAnthropic: boolean): Preview {
           : [];
   const models = ids.map((id) => ({ id: `${key}:${id}`, provider: key, name: id }));
   return {
-    id: "pi",
+    id: "pi-cli",
     label: "Pi",
     path: "~/.pi/agent/models-store.json",
     body: JSON.stringify(

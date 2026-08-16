@@ -520,7 +520,7 @@
     "autoDetectRestored": "{{name}} 已恢复自动检测",
     "none": {
       "title": "未检测到智能体",
-      "hint": "安装 Claude Code、OpenCode 或 Pi，然后点击重新检测。"
+      "hint": "安装 Claude Code、OpenCode、Pi 或 ZCode，然后点击重新检测。"
     },
     "notFound": "未找到智能体",
     "configureBinary": "配置二进制文件…",

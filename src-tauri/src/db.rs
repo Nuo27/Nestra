@@ -995,12 +995,12 @@ pub fn clear_active_binding(
 
 /// Prune observability data older than the configured retention window.
 ///
-/// Deletes `run` rows — and their cascaded children `task`, `route_request`,
-/// `route_migration` (all `ON DELETE CASCADE` in the v1 schema) — plus
-/// `logical_session` rows whose timestamps predate the `log_retention_days`
-/// setting (default 30). This is the backing implementation for the
-/// "log retention" UI setting, which promises "older entries are pruned
-/// automatically" but was previously orphaned — the backend never read it.
+/// Deletes `task` rows — and their cascaded children `route_request`,
+/// `route_migration` (all `ON DELETE CASCADE` in the v1 schema) — whose
+/// timestamps predate the `log_retention_days` setting (default 30). This is
+/// the backing implementation for the "log retention" UI setting, which
+/// promises "older entries are pruned automatically" but was previously
+/// orphaned — the backend never read it.
 ///
 /// Called once per launch from [`crate::commands::run_launch_reconcile`] on
 /// the dedicated `reconcile_db` connection (off the UI locks). SQLite reuses
@@ -1016,26 +1016,16 @@ pub fn prune_observability_data(conn: &Connection) -> AppResult<u64> {
     let now = chrono::Utc::now().timestamp_millis();
     let cutoff = now - (days as i64 * 86_400_000);
 
-    // Deleting `run` rows cascades to task → route_request → route_migration.
-    let runs = conn.execute(
-        "DELETE FROM run WHERE started_at < ?1",
-        rusqlite::params![cutoff],
-    )? as u64;
-    // `logical_session` is denormalized into `run` as a TEXT column (not a FK),
-    // so it must be pruned independently by its own `last_seen` timestamp.
-    let sessions = conn.execute(
-        "DELETE FROM logical_session WHERE last_seen < ?1",
+    // Deleting `task` rows cascades to route_request → route_migration.
+    let tasks = conn.execute(
+        "DELETE FROM task WHERE started_at < ?1",
         rusqlite::params![cutoff],
     )? as u64;
 
-    let total = runs + sessions;
-    if total > 0 {
-        tracing::info!(
-            days, runs, sessions, total,
-            "pruned observability data older than retention window"
-        );
+    if tasks > 0 {
+        tracing::info!(days, tasks, "pruned observability data older than retention window");
     }
-    Ok(total)
+    Ok(tasks)
 }
 
 #[cfg(test)]
@@ -1102,7 +1092,7 @@ mod tests {
         migrate(&conn).unwrap();
         seed_two_endpoints(&conn);
         // The registry seeds the agent row for claude-code at migrate time.
-        const A: &str = "claude-code";
+        const A: &str = "claude-code-cli";
 
         // (a) no active binding: both empty.
         assert_active_invariant(&conn, A);
@@ -1197,9 +1187,9 @@ mod tests {
         migrate(&conn).unwrap();
         create_endpoint(&conn, "ep-1", "anthropic", "Anthropic main").unwrap();
         upsert_endpoint_protocol(&conn, "ep-1", "anthropic", "https://api.example.com").unwrap();
-        upsert_binding(&conn, "claude-code", "ep-1").unwrap();
+        upsert_binding(&conn, "claude-code-cli", "ep-1").unwrap();
 
-        let rows = list_bindings(&conn, "claude-code").unwrap();
+        let rows = list_bindings(&conn, "claude-code-cli").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].resolved_protocol.as_deref(), Some("anthropic"));
         assert_eq!(
@@ -1248,22 +1238,16 @@ mod tests {
         let old = now - 40 * 86_400_000; // 40 days ago
         let recent = now - 86_400_000; // 1 day ago
 
-        // Old run + cascaded children.
+        // Old task + cascaded children.
         conn.execute(
-            "INSERT INTO run (id, agent_id, logical_session, started_at, ended_at)
-             VALUES ('run-old', 'claude-code', 'sess-old', ?1, ?1)",
-            rusqlite::params![old],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task (id, run_id, started_at, ended_at)
-             VALUES ('task-old', 'run-old', ?1, ?1)",
+            "INSERT INTO task (id, started_at, ended_at)
+             VALUES ('task-old', ?1, ?1)",
             rusqlite::params![old],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO route_request (request_id, task_id, agent_id, route_reason, started_at, ended_at)
-             VALUES ('req-old', 'task-old', 'claude-code', 'test', ?1, ?1)",
+             VALUES ('req-old', 'task-old', 'claude-code-cli', 'test', ?1, ?1)",
             rusqlite::params![old],
         )
         .unwrap();
@@ -1273,35 +1257,17 @@ mod tests {
             rusqlite::params![old],
         )
         .unwrap();
-        conn.execute(
-            "INSERT INTO logical_session (agent_id, logical_session_id, first_seen, last_seen)
-             VALUES ('claude-code', 'sess-old', ?1, ?1)",
-            rusqlite::params![old],
-        )
-        .unwrap();
 
-        // Recent run + task + route_request (no migration — not every request migrates).
+        // Recent task + route_request (no migration — not every request migrates).
         conn.execute(
-            "INSERT INTO run (id, agent_id, logical_session, started_at)
-             VALUES ('run-recent', 'claude-code', 'sess-recent', ?1)",
-            rusqlite::params![recent],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task (id, run_id, started_at)
-             VALUES ('task-recent', 'run-recent', ?1)",
+            "INSERT INTO task (id, started_at)
+             VALUES ('task-recent', ?1)",
             rusqlite::params![recent],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO route_request (request_id, task_id, agent_id, route_reason, started_at)
-             VALUES ('req-recent', 'task-recent', 'claude-code', 'test', ?1)",
-            rusqlite::params![recent],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO logical_session (agent_id, logical_session_id, first_seen, last_seen)
-             VALUES ('claude-code', 'sess-recent', ?1, ?1)",
+             VALUES ('req-recent', 'task-recent', 'claude-code-cli', 'test', ?1)",
             rusqlite::params![recent],
         )
         .unwrap();
@@ -1310,24 +1276,17 @@ mod tests {
         set_setting(&conn, "log_retention_days", &serde_json::json!(7)).unwrap();
 
         let pruned = prune_observability_data(&conn).unwrap();
-        // 1 old run + 1 old logical_session = 2 direct deletes (cascades are extra).
-        assert_eq!(pruned, 2);
+        // 1 old task = 1 direct delete (cascades are extra).
+        assert_eq!(pruned, 1);
 
-        // Old rows gone — cascade cleaned task / route_request / route_migration.
-        assert_eq!(count(&conn, "run", "id = 'run-old'"), 0);
+        // Old rows gone — cascade cleaned route_request / route_migration.
         assert_eq!(count(&conn, "task", "id = 'task-old'"), 0);
         assert_eq!(count(&conn, "route_request", "request_id = 'req-old'"), 0);
         assert_eq!(count(&conn, "route_migration", "id = 'mig-old'"), 0);
-        assert_eq!(count(&conn, "logical_session", "logical_session_id = 'sess-old'"), 0);
 
         // Recent rows survive.
-        assert_eq!(count(&conn, "run", "id = 'run-recent'"), 1);
         assert_eq!(count(&conn, "task", "id = 'task-recent'"), 1);
         assert_eq!(count(&conn, "route_request", "request_id = 'req-recent'"), 1);
-        assert_eq!(
-            count(&conn, "logical_session", "logical_session_id = 'sess-recent'"),
-            1
-        );
     }
 
     /// When `log_retention_days` is unset, the default (30 days) applies.
@@ -1341,8 +1300,8 @@ mod tests {
         // 31 days old — just outside the 30-day default window.
         let old = now - 31 * 86_400_000;
         conn.execute(
-            "INSERT INTO run (id, agent_id, logical_session, started_at)
-             VALUES ('r', 'claude-code', 's', ?1)",
+            "INSERT INTO task (id, started_at)
+             VALUES ('t', ?1)",
             rusqlite::params![old],
         )
         .unwrap();
@@ -1350,7 +1309,7 @@ mod tests {
         let pruned = prune_observability_data(&conn).unwrap();
         assert_eq!(
             pruned, 1,
-            "31-day-old run should be pruned by the default 30-day window"
+            "31-day-old task should be pruned by the default 30-day window"
         );
     }
 

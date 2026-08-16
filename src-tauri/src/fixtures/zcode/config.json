@@ -1,0 +1,26 @@
+{
+  "provider": {
+    "builtin:zai-coding-plan": {
+      "name": "Z.ai - Coding Plan",
+      "kind": "anthropic",
+      "options": {
+        "apiKey": "sk-user-zai",
+        "baseURL": "https://api.z.ai/api/anthropic"
+      },
+      "enabled": true,
+      "source": "custom",
+      "models": {
+        "GLM-5.3": {
+          "reasoning": {
+            "enabled": true,
+            "variants": ["low", "high", "max"],
+            "defaultVariant": "max"
+          },
+          "limit": { "context": 1000000, "output": 128000 },
+          "modalities": { "input": ["text"], "output": ["text"] }
+        }
+      }
+    }
+  },
+  "unrelated": { "keep": true }
+}

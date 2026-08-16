@@ -105,7 +105,7 @@ fn write_gateway_alias_blocking(
     // Claude Code validates model names; OpenCode/Pi don't. The gateway rewrites
     // the model to the resolved one before hitting upstream in every case.
     let model_alias = match agent_id {
-        "claude-code" => "claude-haiku-4-5".to_string(),
+        "claude-code-cli" => "claude-haiku-4-5".to_string(),
         _ => "nestra".to_string(),
     };
     let alias = crate::config_writer::GatewayAlias {

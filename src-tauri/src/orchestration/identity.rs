@@ -3,11 +3,10 @@
 //! ## Identity hierarchy (correction #1)
 //!
 //! ```text
-//! Agent          — claude-code | opencode-desktop | pi  (stable registry id)
+//! Agent          — claude-code-cli | opencode-desktop | pi-cli  (stable registry id)
 //!  └ LogicalSession — agent-native session id (Claude sessionId, Pi header id, …)
-//!     └ AgentRun / ChildSession — one top-level run, or one sub-agent/child run
-//!        └ Task — one Nestra-owned unit of routing/work
-//!           └ Request — one HTTP request; may retry/migrate without changing Task
+//!     └ Task — one Nestra-owned unit of routing/work
+//!        └ Request — one HTTP request; may retry/migrate without changing Task
 //! ```
 //!
 //! - `Task` is a **Nestra orchestration concept**, not an agent-native one
@@ -238,7 +237,7 @@ impl Default for RoleSource {
 /// `None` otherwise — no adapter is rejected for not supplying it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeTaskRef {
-    /// Agent id this ref belongs to (`claude-code` | `opencode-desktop` | `pi`).
+    /// Agent id this ref belongs to (`claude-code-cli` | `opencode-desktop` | `pi-cli`).
     pub agent: String,
     /// Coarse kind, e.g. `"task_tool_call"`, `"user_turn"`, `"pi_task"`.
     /// Free-form; the router does not interpret it.
@@ -337,20 +336,17 @@ impl TaskLifecycle {
 ///
 /// Every id except `agent_id` is Nestra-assigned at parse time:
 /// - `task_id` / `parent_task_id` / `request_id` are Nestra UUIDs.
-/// - `run_id` is a Nestra UUID (one per AgentRun or ChildSession).
 /// - `logical_session_id` is the agent-native session id, carried verbatim.
 ///
 /// `native_task_ref` is the ONLY agent-native identity here, and it is
 /// optional + non-load-bearing (clarification #2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskContext {
-    /// Stable agent registry id (`claude-code` | `opencode-desktop` | `pi`).
+    /// Stable agent registry id (`claude-code-cli` | `opencode-desktop` | `pi-cli`).
     pub agent_id: String,
     /// Agent-native session id (Claude `sessionId`, Pi header `id`, …), when
     /// known. `None` when the request carries no session.
     pub logical_session_id: Option<String>,
-    /// Nestra UUID for the AgentRun or ChildSession this Task belongs to.
-    pub run_id: Option<Uuid>,
     /// Nestra-owned routing/work identity. Stable across retries/migrations
     /// within one logical unit of work.
     pub task_id: Uuid,
@@ -395,7 +391,6 @@ impl TaskContext {
         Self {
             agent_id: agent_id.into(),
             logical_session_id,
-            run_id: None,
             task_id,
             parent_task_id: None,
             request_id: Uuid::new_v4(),
@@ -835,8 +830,8 @@ You have been invoked to handle a specific task autonomously."
 
     #[test]
     fn task_context_new_assigns_fresh_uuids() {
-        let ctx = TaskContext::new_task("claude-code", Some("sess-1".into()));
-        assert_eq!(ctx.agent_id, "claude-code");
+        let ctx = TaskContext::new_task("claude-code-cli", Some("sess-1".into()));
+        assert_eq!(ctx.agent_id, "claude-code-cli");
         assert_eq!(ctx.logical_session_id.as_deref(), Some("sess-1"));
         assert_eq!(ctx.subagent_role, SubagentRole::Main);
         assert_eq!(ctx.role_source, RoleSource::Heuristic);
@@ -844,7 +839,7 @@ You have been invoked to handle a specific task autonomously."
         assert!(ctx.native_task_ref.is_none());
         assert_eq!(ctx.policy_role_key(), "main");
         // Two contexts get distinct request ids.
-        let other = TaskContext::new_task("claude-code", None);
+        let other = TaskContext::new_task("claude-code-cli", None);
         assert_ne!(ctx.request_id, other.request_id);
         assert_ne!(ctx.task_id, other.task_id);
     }
@@ -853,11 +848,11 @@ You have been invoked to handle a specific task autonomously."
     fn retry_preserves_task_id_rotates_request_id() {
         // The continuity contract: a retry/migration constructs a new context
         // for the SAME task_id with a NEW request_id.
-        let mut first = TaskContext::new_task("pi", Some("s".into()));
+        let mut first = TaskContext::new_task("pi-cli", Some("s".into()));
         first.request_id = Uuid::new_v4();
         let task_id = first.task_id;
 
-        let retry = TaskContext::new_for_request("pi", task_id, Some("s".into()));
+        let retry = TaskContext::new_for_request("pi-cli", task_id, Some("s".into()));
         assert_eq!(retry.task_id, task_id, "task_id must survive retry");
         assert_ne!(
             retry.request_id, first.request_id,
@@ -887,7 +882,7 @@ You have been invoked to handle a specific task autonomously."
         // The persisted projection carries no key field by construction; this
         // is the type-level check. The serialized-payload check lives in
         // store::tests::no_persisted_secret_fields and walks the JSON.
-        let ctx = TaskContext::new_task("claude-code", None);
+        let ctx = TaskContext::new_task("claude-code-cli", None);
         let route = ResolvedRoute {
             endpoint_id: "ep-1".into(),
             provider_kind: ProviderKind::Anthropic,

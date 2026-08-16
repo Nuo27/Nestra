@@ -88,7 +88,7 @@ fn probe_stdio(t: &crate::mcp::McpTransport) -> AppResult<ProbeResult> {
     let home = home_dir().ok();
     // Pick a representative config path for the wrap test (any will do; the
     // check is per-command, not per-target).
-    let cfg_path = providers::for_agent("claude-code")
+    let cfg_path = providers::for_agent("claude-code-cli")
         .map(|p| p.config_path(home.as_deref().unwrap_or_else(|| std::path::Path::new("."))))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let (cmd, args) = providers::wrap_command_for_windows(&Some(cmd_str), &t.args, &cfg_path);

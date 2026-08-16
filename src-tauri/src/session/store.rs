@@ -19,6 +19,23 @@ pub fn reconcile_all(conn: &Connection) -> AppResult<()> {
             tracing::warn!(provider = *p, error = %e, "session reconcile failed");
         }
     }
+    prune_unknown_providers(conn)?;
+    Ok(())
+}
+
+/// Delete rows whose provider is no longer in [`ALL_PROVIDERS`] — e.g. the
+/// pre-rename `claude-code`/`pi` ids linger as duplicate sessions after a
+/// registry rename. There is no data migration by policy; the closed provider
+/// list is the authority.
+fn prune_unknown_providers(conn: &Connection) -> AppResult<()> {
+    let known: Vec<String> = ALL_PROVIDERS.iter().map(|p| p.to_string()).collect();
+    for table in ["session", "session_message", "session_part", "session_source"] {
+        let placeholders = std::iter::repeat("?").take(known.len()).collect::<Vec<_>>().join(",");
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE provider NOT IN ({placeholders})"),
+            rusqlite::params_from_iter(known.iter()),
+        )?;
+    }
     Ok(())
 }
 
@@ -597,8 +614,36 @@ mod tests {
         let (db_path, guard) = temp_home();
         let conn = crate::db::open(&db_path).unwrap();
         crate::db::migrate(&conn).unwrap();
-        with_home(home, || reconcile_provider(&conn, "claude-code").unwrap());
+        with_home(home, || reconcile_provider(&conn, "claude-code-cli").unwrap());
         (guard, db_path, conn)
+    }
+
+    /// Rows for providers no longer in ALL_PROVIDERS (e.g. the pre-rename
+    /// `claude-code`/`pi` ids) are pruned; current providers survive.
+    #[test]
+    fn prune_removes_rows_for_renamed_providers() {
+        let (db_path, _guard) = temp_home();
+        let conn = crate::db::open(&db_path).unwrap();
+        crate::db::migrate(&conn).unwrap();
+        for (provider, id) in [("claude-code", "s1"), ("claude-code-cli", "s2"), ("pi", "s3")] {
+            conn.execute(
+                "INSERT INTO session (provider, id, title, summary, started_at, updated_at,
+                 message_count, source_path, resume_command)
+                 VALUES (?1, ?2, 't', '', 1, 1, 0, 'x', '')",
+                [provider, id],
+            )
+            .unwrap();
+        }
+        prune_unknown_providers(&conn).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT provider, id FROM session ORDER BY provider")
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(rows, vec![("claude-code-cli".to_string(), "s2".to_string())]);
     }
 
     // Claude canonical ids come from the `sessionId` field, not the filename.
@@ -697,7 +742,7 @@ mod tests {
     fn list_children_returns_subagent_ordered_by_started_at() {
         let (home, _home_g) = seed_tree();
         let (_reconcile_g, _db, conn) = reconcile(&home);
-        let kids = list_children(&conn, "claude-code", PARENT).unwrap();
+        let kids = list_children(&conn, "claude-code-cli", PARENT).unwrap();
         assert_eq!(kids.len(), 1);
         assert_eq!(kids[0].id, SUB);
         assert!(kids[0].is_subagent);
@@ -708,12 +753,12 @@ mod tests {
     fn get_session_found_and_not_found() {
         let (home, _home_g) = seed_tree();
         let (_reconcile_g, _db, conn) = reconcile(&home);
-        let s = get_session(&conn, "claude-code", PARENT).unwrap().expect("present");
+        let s = get_session(&conn, "claude-code-cli", PARENT).unwrap().expect("present");
         // Title = first user message text (importer rule).
         assert_eq!(s.title, "what is the prime goal");
         assert_eq!(s.project.as_deref(), Some("goal"));
         assert_eq!(s.message_count, 3);
-        assert!(get_session(&conn, "claude-code", "absent").unwrap().is_none());
+        assert!(get_session(&conn, "claude-code-cli", "absent").unwrap().is_none());
         assert!(get_session(&conn, "wrong-provider", PARENT).unwrap().is_none());
     }
 
@@ -721,16 +766,16 @@ mod tests {
     fn read_messages_offsets_and_limits_window() {
         let (home, _home_g) = seed_tree();
         let (_reconcile_g, _db, conn) = reconcile(&home);
-        let full = read_messages(&conn, "claude-code", PARENT, 0, 0).unwrap();
+        let full = read_messages(&conn, "claude-code-cli", PARENT, 0, 0).unwrap();
         assert_eq!(full.total, 3);
         assert_eq!(full.messages.len(), 3);
         // A 2-message window starting at message 1 (the assistant reply).
-        let win = read_messages(&conn, "claude-code", PARENT, 1, 2).unwrap();
+        let win = read_messages(&conn, "claude-code-cli", PARENT, 1, 2).unwrap();
         assert_eq!(win.total, 3);
         assert_eq!(win.messages.len(), 2);
         assert_eq!(win.messages[0].role, "assistant");
         // Beyond the end => empty window, correct total.
-        let past = read_messages(&conn, "claude-code", PARENT, 10, 5).unwrap();
+        let past = read_messages(&conn, "claude-code-cli", PARENT, 10, 5).unwrap();
         assert!(past.messages.is_empty());
         assert_eq!(past.total, 3);
     }
@@ -739,12 +784,12 @@ mod tests {
     fn export_session_yields_parseable_json_with_messages() {
         let (home, _home_g) = seed_tree();
         let (_reconcile_g, _db, conn) = reconcile(&home);
-        let out = export_session(&conn, "claude-code", PARENT).unwrap();
+        let out = export_session(&conn, "claude-code-cli", PARENT).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["session"]["id"], PARENT);
         assert_eq!(v["messages"].as_array().unwrap().len(), 3);
         // Unknown session -> specific NotFound.
-        let err = export_session(&conn, "claude-code", "nope").unwrap_err();
+        let err = export_session(&conn, "claude-code-cli", "nope").unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)));
     }
 
@@ -756,25 +801,25 @@ mod tests {
         assert_eq!(before, 3); // PARENT + OTHER + SUB
 
         // Track the parent's source file so we can prove disk deletion.
-        let parent_src = get_session(&conn, "claude-code", PARENT).unwrap().unwrap().source_path;
+        let parent_src = get_session(&conn, "claude-code-cli", PARENT).unwrap().unwrap().source_path;
         assert!(std::path::Path::new(&parent_src).exists());
 
-        let removed = delete_session(&conn, "claude-code", PARENT).unwrap();
+        let removed = delete_session(&conn, "claude-code-cli", PARENT).unwrap();
         assert!(!removed.is_empty());
         assert!(removed.contains(&parent_src), "removed list {removed:?} missing {parent_src}");
         assert!(!std::path::Path::new(&parent_src).exists(), "file should be gone from disk");
 
-        assert!(get_session(&conn, "claude-code", PARENT).unwrap().is_none());
+        assert!(get_session(&conn, "claude-code-cli", PARENT).unwrap().is_none());
         assert_eq!(count_sessions(&conn).unwrap(), 2);
         // The subagent row is independent and survives the parent delete.
-        assert!(get_session(&conn, "claude-code", SUB).unwrap().is_some());
+        assert!(get_session(&conn, "claude-code-cli", SUB).unwrap().is_some());
     }
 
     #[test]
     fn delete_session_errors_on_missing() {
         let (home, _home_g) = seed_tree();
         let (_reconcile_g, _db, conn) = reconcile(&home);
-        let err = delete_session(&conn, "claude-code", "not-here").unwrap_err();
+        let err = delete_session(&conn, "claude-code-cli", "not-here").unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)));
     }
 
@@ -782,12 +827,12 @@ mod tests {
     fn delete_session_when_source_file_already_deleted() {
         let (home, _home_g) = seed_tree();
         let (_reconcile_g, _db, conn) = reconcile(&home);
-        let s = get_session(&conn, "claude-code", OTHER).unwrap().unwrap();
+        let s = get_session(&conn, "claude-code-cli", OTHER).unwrap().unwrap();
         std::fs::remove_file(&s.source_path).unwrap();
         // File already gone: delete still cleans DB rows without erroring.
-        let removed = delete_session(&conn, "claude-code", OTHER).unwrap();
+        let removed = delete_session(&conn, "claude-code-cli", OTHER).unwrap();
         assert!(removed.contains(&s.source_path));
-        assert!(get_session(&conn, "claude-code", OTHER).unwrap().is_none());
+        assert!(get_session(&conn, "claude-code-cli", OTHER).unwrap().is_none());
     }
 
     /// Pin the `session_part.raw_json` regression: parts persist with a blank
@@ -796,11 +841,11 @@ mod tests {
     fn session_part_rows_persist_with_blank_raw_json() {
         let (home, _home_g) = seed_tree();
         let (_reconcile_g, _db, conn) = reconcile(&home);
-        let spec = get_session(&conn, "claude-code", PARENT).unwrap().unwrap();
+        let spec = get_session(&conn, "claude-code-cli", PARENT).unwrap().unwrap();
         let parts: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM session_part WHERE provider=?1 AND session_id=?2",
-                params!["claude-code", spec.id],
+                params!["claude-code-cli", spec.id],
                 |r| r.get(0),
             )
             .unwrap();
@@ -808,7 +853,7 @@ mod tests {
         let raw: String = conn
             .query_row(
                 "SELECT raw_json FROM session_part WHERE provider=?1 AND session_id=?2 LIMIT 1",
-                params!["claude-code", spec.id],
+                params!["claude-code-cli", spec.id],
                 |r| r.get(0),
             )
             .unwrap();
