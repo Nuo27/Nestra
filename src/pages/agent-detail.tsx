@@ -2,7 +2,8 @@ import { useTranslation } from "react-i18next";
 import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { Workflow, ListTree, ArrowRight, Users } from "lucide-react";
+import { Workflow, ListTree, ArrowRight, Users, ShieldCheck } from "lucide-react";
+import { AgentKindBadge } from "../components/agents/AgentKindBadge";
 import { Page } from "../components/layout/Page";
 import { PageHeader, BackLink } from "../components/layout/PageHeader";
 import { Card } from "../components/controls/Card";
@@ -72,7 +73,12 @@ export function AgentDetailPage({ id }: { id: string }) {
   return (
     <Page width="wide">
       <PageHeader
-        title={agent.display_name}
+        title={
+          <span className="flex items-center gap-2">
+            {agent.display_name}
+            <AgentKindBadge id={agent.id} />
+          </span>
+        }
         info={agent.capability.supports_gateway ? t("agentDetail.helpGateway") : t("agentDetail.helpPlain")}
         back={<BackLink to="/agents">{t("nav.agents")}</BackLink>}
         action={<ModeSwitch agentId={agent.id} supportsGateway={agent.capability.supports_gateway} />}
@@ -108,6 +114,15 @@ function AgentDetailBody({
           title={t("agentDetail.policyTitle")}
           hint={t("agentDetail.policyHint")}
         />
+        {agent.id === "pi-cli" && (
+          <EntryCard
+            to="/agents/$id/review"
+            agentId={agent.id}
+            icon={<ShieldCheck data-icon size={14} />}
+            title={t("agentDetail.reviewTitle")}
+            hint={t("agentDetail.reviewHint")}
+          />
+        )}
       </div>
 
       <DetectedRolesCard agentId={agent.id} />
@@ -205,7 +220,7 @@ function EntryCard({
   icon: React.ReactNode;
   title: string;
   hint: string;
-  to: "/agents/$id/routing";
+  to: "/agents/$id/routing" | "/agents/$id/review";
   agentId: string;
 }) {
   return (

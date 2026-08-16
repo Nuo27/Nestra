@@ -22,6 +22,7 @@ import { QuotaPage } from "./pages/quota";
 import { AgentsPage } from "./pages/agents";
 import { AgentDetailPage } from "./pages/agent-detail";
 import { AgentRoutingPage } from "./pages/agent-routing";
+import { AgentReviewPage } from "./pages/agent-review";
 import { SessionsPage } from "./pages/sessions";
 import { SkillsPage } from "./pages/skills";
 import { McpPage } from "./pages/mcp";
@@ -73,6 +74,16 @@ const agentRoutingRoute = createRoute({
   path: "/agents/$id/routing",
   component: () => <AgentRoutingPage id={useParams({ from: "/agents/$id/routing" }).id} />,
 });
+// Review Runtime (Pi): spawn/supervise isolated review sessions on the
+// reviewed work. Same shape as the routing sub-page.
+const agentReviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/agents/$id/review",
+  component: () => <AgentReviewPage id={useParams({ from: "/agents/$id/review" }).id} />,
+  validateSearch: (search: Record<string, unknown>) => ({
+    session: (search.session as string) || undefined,
+  }),
+});
 const sessionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sessions",
@@ -95,6 +106,7 @@ const routeTree = rootRoute.addChildren([
   agentsRoute,
   agentDetailRoute,
   agentRoutingRoute,
+  agentReviewRoute,
   sessionsRoute,
   skillsRoute,
   mcpRoute,
