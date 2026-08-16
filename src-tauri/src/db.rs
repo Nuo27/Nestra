@@ -625,6 +625,26 @@ pub fn upsert_mcp_server(
     Ok(())
 }
 
+/// Rewrite only the per-agent columns of one managed server (used by the
+/// registry-churn repair in `mcp::sync_all` — the read boundary filters
+/// unknown agent ids; this persists the pruned set).
+pub fn update_mcp_server_agents(
+    conn: &Connection,
+    id: &str,
+    enabled_agents: &[String],
+    disabled_agents: &[String],
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE mcp_server SET enabled_agents = ?2, disabled_agents = ?3 WHERE id = ?1",
+        rusqlite::params![
+            id,
+            serde_json::to_string(enabled_agents)?,
+            serde_json::to_string(disabled_agents)?,
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn delete_mcp_server(conn: &Connection, id: &str) -> AppResult<bool> {
     if conn.is_autocommit() {
         // Both deletes in ONE transaction: two auto-commit statements left

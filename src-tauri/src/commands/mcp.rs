@@ -156,3 +156,173 @@ pub async fn mcp_probe(
     })
     .await
 }
+
+/// Per-server tool-usage summary (P1-1). `total_calls` counts gateway-
+/// OBSERVED invocations attributed to this managed server (via the shared
+/// `mcp__<server>__<tool>` namespace); zero means none were observed —
+/// attribution currently covers that namespace only.
+#[derive(Debug, serde::Serialize)]
+pub struct McpUsageStat {
+    pub server_id: String,
+    pub server_name: String,
+    pub total_calls: u64,
+    pub last_used_at: Option<i64>,
+    pub per_tool: std::collections::BTreeMap<String, u64>,
+}
+
+/// Aggregate gateway-observed tool invocations per managed MCP server.
+/// Read-only (`db_read`), full scan over `tool_names`-bearing route_request
+/// rows — correctness first; the vast majority of rows carry NULL and are
+/// skipped cheaply.
+// ponytail: full-scan per page open; if this ever measures slow on very large
+// route_request tables, add an aggregate cache keyed off started_at.
+/// Pure aggregation over a connection (unit-testable; the command wraps it
+/// with the read connection).
+fn aggregate_usage(conn: &rusqlite::Connection) -> AppResult<Vec<McpUsageStat>> {
+    {
+    // Managed servers (the SSOT the sync writes into agent configs).
+    let mut stmt = conn
+        .prepare("SELECT id, name FROM mcp_server")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let managed: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    drop(stmt);
+
+    let mut stats: std::collections::BTreeMap<String, McpUsageStat> = managed
+        .into_iter()
+        .map(|(server_id, server_name)| {
+            (
+                server_id.clone(),
+                McpUsageStat {
+                    server_id,
+                    server_name,
+                    total_calls: 0,
+                    last_used_at: None,
+                    per_tool: std::collections::BTreeMap::new(),
+                },
+            )
+        })
+        .collect();
+    let name_to_id: std::collections::HashMap<String, String> = stats
+        .iter()
+        .map(|(id, s)| (s.server_name.clone(), id.clone()))
+        .collect();
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT tool_names, started_at FROM route_request
+             WHERE tool_names IS NOT NULL",
+        )
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+            ))
+        })
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    for row in rows {
+        let (json, started_at) = row.map_err(|e| AppError::Internal(e.to_string()))?;
+        let Ok(map) = serde_json::from_str::<std::collections::BTreeMap<String, u64>>(&json)
+        else {
+            continue;
+        };
+        for (tool, count) in map {
+            // Attribution rule = the shared namespace parser. Tools that
+            // don't parse, or whose server segment isn't a managed server,
+            // stay unattributed — never guessed into a server.
+            let Some(prov) = crate::session::parse_mcp_tool_name(&tool) else {
+                continue;
+            };
+            let Some(server) = prov.server.and_then(|s| name_to_id.get(&s).cloned()) else {
+                continue;
+            };
+            let stat = stats.get_mut(&server).expect("managed id exists");
+            stat.total_calls += count;
+            let tool_name = prov.tool_name.unwrap_or_else(|| tool.clone());
+            *stat.per_tool.entry(tool_name).or_insert(0) += count;
+            if let Some(t) = started_at {
+                if stat.last_used_at.map_or(true, |l| t > l) {
+                    stat.last_used_at = Some(t);
+                }
+            }
+        }
+    }
+    Ok(stats.into_values().collect())
+    }
+}
+
+#[tauri::command]
+pub async fn mcp_usage_stats(
+    state: State<'_, crate::AppState>,
+) -> AppResult<Vec<McpUsageStat>> {
+    let db = state.db_read.clone();
+    run_blocking(move || {
+        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        aggregate_usage(&conn)
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed_usage_env(conn: &rusqlite::Connection) {
+        crate::schema::build_v1(conn).unwrap();
+        for (id, name) in [("srv-1", "fs"), ("srv-2", "codegraph")] {
+            conn.execute(
+                "INSERT INTO mcp_server (id, name, transport_json, enabled_agents,
+                                         disabled_agents, created_at)
+                 VALUES (?1, ?2, '{}', '[]', '[]', 0)",
+                rusqlite::params![id, name],
+            )
+            .unwrap();
+        }
+        let mut insert_row = |started: i64, tools: &str| {
+            conn.execute(
+                "INSERT INTO task (id, lifecycle, started_at) VALUES (?1,'done',?2)",
+                rusqlite::params![format!("t-{started}"), started],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO route_request (request_id, task_id, agent_id, route_reason,
+                                            tool_names, started_at)
+                 VALUES (?1,?2,'pi-cli','capability',?3,?4)",
+                rusqlite::params![format!("r-{started}"), format!("t-{started}"), tools, started],
+            )
+            .unwrap();
+        };
+        insert_row(100, r#"{"mcp__fs__read": 2, "Bash": 5}"#);
+        insert_row(200, r#"{"mcp__fs__write": 1, "mcp__unmanaged__read": 3}"#);
+        insert_row(300, r#"{"mcp__codegraph__query": 1}"#);
+        // NULL tool_names rows must be skipped (and not crash).
+        insert_row(400, "{}");
+    }
+
+    #[test]
+    fn aggregate_usage_attributes_by_managed_namespace() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        seed_usage_env(&conn);
+        let stats = aggregate_usage(&conn).unwrap();
+        let by_name: std::collections::HashMap<&str, &McpUsageStat> =
+            stats.iter().map(|s| (s.server_name.as_str(), s)).collect();
+
+        // Managed + attributed: totals, per-tool, last_used max.
+        let fs = by_name["fs"];
+        assert_eq!(fs.total_calls, 3);
+        assert_eq!(fs.per_tool.get("read"), Some(&2));
+        assert_eq!(fs.per_tool.get("write"), Some(&1));
+        assert_eq!(fs.last_used_at, Some(200));
+        assert_eq!(by_name["codegraph"].total_calls, 1);
+        // Never-observed server is present with a zero (the "未观察到" case).
+        assert!(stats.iter().all(|s| s.server_name != "unmanaged"), "only managed servers appear");
+        // Unmanaged-server namespace and plain tools stay unattributed.
+        assert_eq!(by_name["codegraph"].per_tool.get("query"), Some(&1));
+        let _ = &by_name["codegraph"];
+    }
+}

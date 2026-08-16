@@ -11,6 +11,7 @@ import {
   mcpSetState,
   mcpSyncAll,
   mcpUnmanage,
+  mcpUsageStats,
   type McpServer,
   type ProbeResult,
 } from "../ipc";
@@ -62,6 +63,10 @@ export function McpPage() {
   // ("test all"): the first finisher cleared the loading state for everyone.
   const [probing, setProbing] = useState<Set<string>>(new Set());
   const servers = q.data ?? [];
+  const usageQ = useQuery({ queryKey: qk.mcpUsage(), queryFn: mcpUsageStats });
+  const usageByServer = Object.fromEntries(
+    (usageQ.data ?? []).map((u) => [u.server_id, u]),
+  );
   const labelForAgent = useAgentLabels();
   const toast = useUI((s) => s.pushToast);
 
@@ -272,6 +277,7 @@ export function McpPage() {
 
           {servers.length > 0 && (
             <McpServerList
+              usage={usageByServer}
               servers={servers}
               agents={allMcpAgents}
               labelForAgent={labelForAgent}

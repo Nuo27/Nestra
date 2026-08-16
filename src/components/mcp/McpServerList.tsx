@@ -1,4 +1,6 @@
 import { useTranslation } from "react-i18next";
+import { formatRelative } from "../../lib/format";
+import type { McpUsageStat } from "../../ipc";
 import { Activity, Trash2 } from "lucide-react";
 import type { UseMutationResult } from "@tanstack/react-query";
 import type { McpServer, ProbeResult } from "../../ipc";
@@ -20,6 +22,7 @@ export type McpAgentOption = { id: string; connected: boolean; tri: boolean };
  * shares the same `probeMut`/`probing`), so this stays presentational.
  */
 export function McpServerList({
+  usage,
   servers,
   agents,
   labelForAgent,
@@ -33,6 +36,9 @@ export function McpServerList({
   onEdit,
 }: {
   servers: McpServer[];
+  /** Per-server gateway-observed usage (P1-1); servers absent from the map
+   *  simply render no badge. */
+  usage: Record<string, McpUsageStat>;
   agents: McpAgentOption[];
   labelForAgent: (id: string) => string;
   probes: Record<string, ProbeResult>;
@@ -73,6 +79,16 @@ export function McpServerList({
                 </Button>
                 <ProbeDot result={probes[s.id]} />
               </div>
+              {usage[s.id] && (
+                <div className="text-2xs text-subtle tabular">
+                  {usage[s.id].total_calls > 0
+                    ? t("mcp.usageObserved", {
+                        n: usage[s.id].total_calls,
+                        rel: formatRelative(usage[s.id].last_used_at ?? 0),
+                      })
+                    : t("mcp.usageNone")}
+                </div>
+              )}
             </div>
             <div className="flex shrink-0 flex-wrap items-center gap-2">
               {agents.length > 0 && (

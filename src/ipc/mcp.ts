@@ -53,3 +53,16 @@ export interface ProbeResult {
   reason: string | null;
 }
 export const mcpProbe = (id: string) => invoke<ProbeResult>("mcp_probe", { id });
+
+/** Per-server gateway-observed tool usage (P1-1). Zero `total_calls` means
+ *  none were observed — attribution currently covers the Claude-style
+ *  `mcp__<server>__<tool>` namespace only. */
+export interface McpUsageStat {
+  server_id: string;
+  server_name: string;
+  total_calls: number;
+  last_used_at: number | null;
+  per_tool: Record<string, number>;
+}
+
+export const mcpUsageStats = () => invoke<McpUsageStat[]>("mcp_usage_stats");

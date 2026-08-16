@@ -98,7 +98,7 @@ pub enum Modality {
 /// leading `models/` prefix, drop bracket/paren markers (`[1M]`, `(beta)`)
 /// and a trailing `-YYYYMMDD` snapshot date. Mirrors cc-switch's
 /// `resolve_image_input_capability` normalizer.
-fn normalize(id: &str) -> String {
+pub(crate) fn normalize(id: &str) -> String {
     let mut s = id.trim().to_lowercase();
     if let Some(rest) = s.strip_prefix("models/") {
         s = rest.to_string();

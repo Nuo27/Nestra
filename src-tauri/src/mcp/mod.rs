@@ -237,12 +237,25 @@ pub fn row_to_server(conn: &Connection, row: McpServerRow) -> AppResult<McpServe
     let parsed: Value = serde_json::from_str(&row.transport_json).unwrap_or(Value::Null);
     let transport = serde_json::from_value(parsed).unwrap_or_default();
     let env_overrides = db::list_mcp_env_overrides(conn, &row.id)?;
+    // Registry churn guard: agent ids that no MCP provider knows (renamed or
+    // removed registry entries, e.g. the `claude-code` → `claude-code-cli`
+    // rename) must never surface as toggles or be re-synced. Filtered at the
+    // read boundary; `sync_all` persists the pruned set so the DB heals.
+    let known = |a: &str| providers::agent_exists(a);
     Ok(McpServer {
         id: row.id,
         name: row.name,
         transport,
-        enabled_agents: row.enabled_agents,
-        disabled_agents: row.disabled_agents,
+        enabled_agents: row
+            .enabled_agents
+            .into_iter()
+            .filter(|a| known(a))
+            .collect(),
+        disabled_agents: row
+            .disabled_agents
+            .into_iter()
+            .filter(|a| known(a))
+            .collect(),
         managed: true,
         env_overrides,
     })
@@ -815,6 +828,27 @@ pub fn sync_all(conn: &Connection) -> AppResult<()> {
             } else {
                 providers::remove_server(agent, &row.name)?;
             }
+        }
+    }
+    // Registry-churn repair: persist the pruned agent lists so legacy ids
+    // (renamed/removed registry entries) stop accumulating. The read boundary
+    // already filters them (`row_to_server`); this makes the cleanup durable.
+    for row in &rows {
+        let known = |a: &str| providers::agent_exists(a);
+        let kept_enabled: Vec<String> = row
+            .enabled_agents
+            .iter()
+            .filter(|a| known(a))
+            .cloned()
+            .collect();
+        let kept_disabled: Vec<String> = row
+            .disabled_agents
+            .iter()
+            .filter(|a| known(a))
+            .cloned()
+            .collect();
+        if kept_enabled != row.enabled_agents || kept_disabled != row.disabled_agents {
+            db::update_mcp_server_agents(conn, &row.id, &kept_enabled, &kept_disabled)?;
         }
     }
     Ok(())
@@ -1545,5 +1579,42 @@ mod tests {
             after.contains("filesystem"),
             "unmanage must KEEP the config entry, got: {after}"
         );
+    }
+
+    /// Registry-churn guard (the "unknown agent" fix): legacy ids from before
+    /// agent renames (e.g. `claude-code` → `claude-code-cli`) must be dropped
+    /// at the read boundary, and `sync_all` must persist the pruned set.
+    #[test]
+    fn row_to_server_prunes_unknown_agent_ids_and_sync_persists() {
+        // sync_all touches agent config files under the (overridden) home —
+        // serialized through the crate-wide HOME_LOCK like the skills tests.
+        let _home_lock = crate::HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::Builder::new().prefix("").tempdir().unwrap();
+        // SAFETY: confined to this serialized test (HOME_LOCK held).
+        std::env::set_var("NESTRA_HOME_DIR", home.path());
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::schema::build_v1(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO mcp_server (id, name, transport_json, enabled_agents,
+                                     disabled_agents, created_at)
+             VALUES ('s1','codegraph','{}',?1,'[]',0)",
+            rusqlite::params![
+                serde_json::to_string(&vec!["claude-code".to_string(), "pi".to_string(),
+                                            "claude-code-cli".to_string()])
+                    .unwrap()
+            ],
+        )
+        .unwrap();
+
+        // Read boundary: legacy ids never surface.
+        let row = crate::db::get_mcp_server(&conn, "s1").unwrap().unwrap();
+        let server = row_to_server(&conn, row).unwrap();
+        assert_eq!(server.enabled_agents, vec!["claude-code-cli".to_string()]);
+
+        // sync_all persists the pruned set (the DB heals on the next sync).
+        sync_all(&conn).unwrap();
+        let row = crate::db::get_mcp_server(&conn, "s1").unwrap().unwrap();
+        assert_eq!(row.enabled_agents, vec!["claude-code-cli".to_string()]);
     }
 }
