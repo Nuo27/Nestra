@@ -254,14 +254,15 @@ use super::identity::RouteRecord;
 /// nothing it must not (no key/secret/credential/token).
 pub fn insert_route_request(conn: &Connection, rec: &RouteRecord) -> AppResult<()> {
     // prepare_cached: this runs on EVERY proxied request — skip re-parsing the
-    // 20-column SQL each time (statement cached per connection).
+    // 22-column SQL each time (statement cached per connection).
     conn.prepare_cached(
         "INSERT INTO route_request
            (request_id, task_id, agent_id, logical_session, subagent_role, role_source,
             requested_model, requested_provider, resolved_endpoint_id, resolved_model,
             protocol, route_reason, http_status, usage_input, usage_output,
-            cache_creation, cache_read, generation_broken, started_at, ended_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            cache_creation, cache_read, tool_calls, tool_names, generation_broken,
+            started_at, ended_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
     )?
     .execute(rusqlite::params![
         rec.request_id.to_string(),
@@ -281,6 +282,8 @@ pub fn insert_route_request(conn: &Connection, rec: &RouteRecord) -> AppResult<(
         rec.usage_output,
         rec.cache_creation,
         rec.cache_read,
+        rec.tool_calls,
+        rec.tool_names,
         rec.generation_broken as i64,
         rec.started_at,
         rec.ended_at,
@@ -291,6 +294,7 @@ pub fn insert_route_request(conn: &Connection, rec: &RouteRecord) -> AppResult<(
 /// Backfill the observed outcome fields of a request after the upstream
 /// response streams. `generation_broken` is set when the response was produced
 /// by a fresh upstream generation after a mid-stream migration (correction #2).
+#[allow(clippy::too_many_arguments)]
 pub fn update_route_request_outcome(
     conn: &Connection,
     request_id: &str,
@@ -299,10 +303,14 @@ pub fn update_route_request_outcome(
     usage_output: Option<i64>,
     cache_creation: Option<i64>,
     cache_read: Option<i64>,
+    tool_calls: Option<i64>,
+    tool_names: Option<String>,
     generation_broken: bool,
     ended_at: i64,
 ) -> AppResult<bool> {
     // prepare_cached: per-request hot path (same rationale as insert_route_request).
+    // Tool columns overwrite (SSE passes None here; the post-stream backfill
+    // COALESCEs its observation in afterwards).
     let n = conn
         .prepare_cached(
             "UPDATE route_request SET
@@ -311,9 +319,11 @@ pub fn update_route_request_outcome(
                usage_output      = ?3,
                cache_creation    = ?4,
                cache_read        = ?5,
-               generation_broken = ?6,
-               ended_at          = ?7
-             WHERE request_id = ?8",
+               tool_calls        = ?6,
+               tool_names        = ?7,
+               generation_broken = ?8,
+               ended_at          = ?9
+             WHERE request_id = ?10",
         )?
         .execute(rusqlite::params![
             http_status,
@@ -321,8 +331,46 @@ pub fn update_route_request_outcome(
             usage_output,
             cache_creation,
             cache_read,
+            tool_calls,
+            tool_names,
             generation_broken as i64,
             ended_at,
+            request_id,
+        ])?;
+    Ok(n > 0)
+}
+
+/// Backfill the usage + tool-call count observed while an SSE stream was
+/// relayed. The outcome UPDATE that runs when the 2xx stream is handed to the
+/// agent writes NULL usage (the stream hasn't been read yet); this runs once
+/// the stream ends and fills only what was actually observed — COALESCE keeps
+/// any earlier non-NULL value. Best-effort observability, never a continuation
+/// claim.
+pub fn backfill_route_request_usage(
+    conn: &Connection,
+    request_id: &str,
+    usage: &super::gateway::stream::ObservedUsage,
+    tool_calls: Option<i64>,
+    tool_names: Option<String>,
+) -> AppResult<bool> {
+    let n = conn
+        .prepare_cached(
+            "UPDATE route_request SET
+               usage_input    = COALESCE(?1, usage_input),
+               usage_output   = COALESCE(?2, usage_output),
+               cache_creation = COALESCE(?3, cache_creation),
+               cache_read     = COALESCE(?4, cache_read),
+               tool_calls     = COALESCE(?5, tool_calls),
+               tool_names     = COALESCE(?6, tool_names)
+             WHERE request_id = ?7",
+        )?
+        .execute(rusqlite::params![
+            usage.input,
+            usage.output,
+            usage.cache_creation,
+            usage.cache_read,
+            tool_calls,
+            tool_names,
             request_id,
         ])?;
     Ok(n > 0)
@@ -335,7 +383,7 @@ pub fn route_history_for_task(conn: &Connection, task_id: &str) -> AppResult<Vec
         "SELECT request_id, task_id, agent_id, logical_session, subagent_role, role_source,
                 requested_model, requested_provider, resolved_endpoint_id, resolved_model,
                 protocol, route_reason, http_status, usage_input, usage_output,
-                cache_creation, cache_read, generation_broken, started_at, ended_at
+                cache_creation, cache_read, tool_calls, tool_names, generation_broken, started_at, ended_at
          FROM route_request WHERE task_id = ?1 ORDER BY started_at",
     )?;
     let rows = stmt.query_map(rusqlite::params![task_id], |r| {
@@ -359,9 +407,11 @@ pub fn route_history_for_task(conn: &Connection, task_id: &str) -> AppResult<Vec
             usage_output: r.get(14)?,
             cache_creation: r.get(15)?,
             cache_read: r.get(16)?,
-            generation_broken: r.get::<_, i64>(17)? != 0,
-            started_at: r.get(18)?,
-            ended_at: r.get(19)?,
+            tool_calls: r.get(17)?,
+            tool_names: r.get(18)?,
+            generation_broken: r.get::<_, i64>(19)? != 0,
+            started_at: r.get(20)?,
+            ended_at: r.get(21)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -375,7 +425,7 @@ pub fn recent_route_requests(conn: &Connection, limit: i64) -> AppResult<Vec<Rou
         "SELECT request_id, task_id, agent_id, logical_session, subagent_role, role_source,
                 requested_model, requested_provider, resolved_endpoint_id, resolved_model,
                 protocol, route_reason, http_status, usage_input, usage_output,
-                cache_creation, cache_read, generation_broken, started_at, ended_at
+                cache_creation, cache_read, tool_calls, tool_names, generation_broken, started_at, ended_at
          FROM route_request ORDER BY started_at DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(rusqlite::params![limit], |r| {
@@ -399,9 +449,11 @@ pub fn recent_route_requests(conn: &Connection, limit: i64) -> AppResult<Vec<Rou
             usage_output: r.get(14)?,
             cache_creation: r.get(15)?,
             cache_read: r.get(16)?,
-            generation_broken: r.get::<_, i64>(17)? != 0,
-            started_at: r.get(18)?,
-            ended_at: r.get(19)?,
+            tool_calls: r.get(17)?,
+            tool_names: r.get(18)?,
+            generation_broken: r.get::<_, i64>(19)? != 0,
+            started_at: r.get(20)?,
+            ended_at: r.get(21)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -848,13 +900,15 @@ mod tests {
             usage_output: None,
             cache_creation: None,
             cache_read: None,
+            tool_calls: None,
+            tool_names: None,
             generation_broken: false,
             started_at: 100,
             ended_at: None,
         };
         insert_route_request(&conn, &rec).unwrap();
 
-        // Backfill outcome.
+        // Backfill outcome (buffered-path semantics: tools ride the finalize).
         update_route_request_outcome(
             &conn,
             &rec.request_id.to_string(),
@@ -863,6 +917,8 @@ mod tests {
             Some(456),
             Some(0),
             Some(100),
+            Some(3),
+            Some(r#"{"Bash": 3}"#.to_string()),
             false,
             200,
         )
@@ -873,6 +929,8 @@ mod tests {
         let h = &hist[0];
         assert_eq!(h.http_status, Some(200));
         assert_eq!(h.usage_input, Some(123));
+        assert_eq!(h.tool_calls, Some(3));
+        assert_eq!(h.tool_names.as_deref(), Some(r#"{"Bash": 3}"#));
         assert_eq!(h.cache_read, Some(100));
         assert!(!h.generation_broken);
         assert_eq!(h.ended_at, Some(200));
@@ -921,6 +979,8 @@ mod tests {
                 usage_output: None,
                 cache_creation: None,
                 cache_read: None,
+                tool_calls: None,
+            tool_names: None,
                 generation_broken: gen_broken,
                 started_at: 100,
                 ended_at: Some(200),
@@ -991,6 +1051,8 @@ mod tests {
                     usage_output: None,
                     cache_creation: None,
                     cache_read: None,
+                    tool_calls: None,
+            tool_names: None,
                     generation_broken: false,
                     started_at: at,
                     ended_at: Some(at + 10),
@@ -1041,6 +1103,8 @@ mod tests {
                 usage_output: None,
                 cache_creation: None,
                 cache_read: None,
+                tool_calls: None,
+            tool_names: None,
                 generation_broken: false,
                 started_at: 0,
                 ended_at: None,
@@ -1119,6 +1183,8 @@ mod tests {
                     usage_output: None,
                     cache_creation: None,
                     cache_read: None,
+                    tool_calls: None,
+            tool_names: None,
                     generation_broken: false,
                     started_at: 0,
                     ended_at: None,

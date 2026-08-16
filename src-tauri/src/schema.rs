@@ -275,6 +275,8 @@ CREATE TABLE IF NOT EXISTS route_request (
   usage_output      INTEGER,
   cache_creation    INTEGER,
   cache_read        INTEGER,
+  tool_calls        INTEGER,                   -- distinct tool_use/tool_call ids seen in the stream
+  tool_names        TEXT,                      -- JSON {name: count} — gateway-observed tool-call invocations
   generation_broken INTEGER NOT NULL DEFAULT 0,
   started_at        INTEGER NOT NULL,
   ended_at          INTEGER,
@@ -313,6 +315,49 @@ CREATE TABLE IF NOT EXISTS route_migration (
 );
 CREATE INDEX IF NOT EXISTS idx_route_migration_task ON route_migration(task_id);
 
+-- One row per generated context handoff (Context Lifecycle R1). The markdown
+-- artifact on disk is what the agent reads; this row is Nestra's index
+-- (source session, snapshots, artifact path, structured sections for search).
+-- `artifact_path` is absolute. The file is user-editable after creation —
+-- Nestra never rewrites an existing artifact.
+CREATE TABLE IF NOT EXISTS handoff (
+  id                TEXT PRIMARY KEY,           -- Nestra uuid
+  source_provider   TEXT NOT NULL,
+  source_session_id TEXT NOT NULL,              -- the session handed off FROM
+  target_session_id TEXT,                       -- the new session handed off TO (null until known)
+  token_snapshot    INTEGER,                    -- tokens shed (null when usage wasn't recorded)
+  cost_snapshot     REAL,
+  artifact_path     TEXT NOT NULL,              -- the .md file the agent reads
+  sections_json     TEXT NOT NULL,              -- structured extraction (for UI/search)
+  created_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoff_source ON handoff(source_provider, source_session_id);
+
+-- One row per spawned review (Review Runtime). The review itself is a normal
+-- Pi session Nestra spawned (`pi --mode rpc` + the reviewer role marker); this
+-- row tracks its lifecycle and verdict. No credential columns — the review
+-- session talks to the gateway alias, which owns the CredentialHandle.
+CREATE TABLE IF NOT EXISTS review (
+  id                        TEXT PRIMARY KEY,        -- Nestra uuid
+  agent_id                  TEXT NOT NULL,           -- 'pi-cli'
+  reviewed_session_provider TEXT NOT NULL,
+  reviewed_session_id       TEXT NOT NULL,           -- the impl session
+  review_session_id         TEXT,                    -- null until known
+  review_session_provider   TEXT,
+  status                    TEXT NOT NULL,           -- pending|reviewing|verdict|failed|aborted
+  review_role               TEXT,                    -- 'pi:reviewer'
+  reviewer_endpoint_id      TEXT,
+  reviewer_model            TEXT,
+  task_id                   TEXT,                    -- link to orchestration task (later)
+  context_pack_json         TEXT,
+  verdict_summary           TEXT,
+  verdict_status            TEXT,                    -- pass|changes_requested|fail (later)
+  artifact_path             TEXT,                    -- .nestra/reviews/<id>/context.md
+  created_at                INTEGER NOT NULL,
+  finished_at               INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_review_session ON review(reviewed_session_provider, reviewed_session_id);
+
 -- Queryable model index: every (endpoint, model) pair the router can consider,
 -- with its merged `ModelAbilities` payload. Built by
 -- orchestration/capability_registry.rs from `provider_endpoint.model_abilities_json`
@@ -338,6 +383,12 @@ pub fn build_v1(conn: &Connection) -> AppResult<()> {
     ensure_column(conn, "mcp_server", "disabled_agents", "TEXT NOT NULL DEFAULT '[]'")?;
     // Per-binding Direct-wire override added with the protocol picker.
     ensure_column(conn, "agent_provider_binding", "protocol", "TEXT")?;
+    // Streaming-usage capture (Smart Gateway fix 1): tool-call count observed
+    // on the SSE relay, backfilled after the stream ends.
+    ensure_column(conn, "route_request", "tool_calls", "INTEGER")?;
+    // P1-1 tool-usage stats: per-tool-name invocation counts (observed on the
+    // SSE relay AND the buffered path).
+    ensure_column(conn, "route_request", "tool_names", "TEXT")?;
     // The `ProviderKind::Openrouter` variant was removed — OpenRouter now
     // binds through anthropic/openai rows like any OpenAI-compatible provider.
     // Normalize any legacy `openrouter` protocol rows to `openai` (they were
@@ -520,6 +571,175 @@ mod tests {
         assert_eq!(v, "[]");
         // ...and re-running is a no-op (no duplicate column error).
         build_v1(&conn).unwrap();
+    }
+
+    #[test]
+    fn build_v1_backfills_route_request_tool_calls_on_drifted_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Simulate the drifted install: a v1 `route_request` without the
+        // streaming `tool_calls` column (every other column present, so the
+        // canonical DDL's index statements still apply — only `ensure_column`
+        // can add the missing one).
+        conn.execute_batch(
+            "CREATE TABLE route_request (
+                request_id        TEXT PRIMARY KEY,
+                task_id           TEXT NOT NULL,
+                agent_id          TEXT NOT NULL,
+                logical_session   TEXT,
+                subagent_role     TEXT,
+                role_source       TEXT,
+                requested_model   TEXT,
+                requested_provider TEXT,
+                resolved_endpoint_id TEXT,
+                resolved_model    TEXT,
+                protocol          TEXT,
+                route_reason      TEXT NOT NULL,
+                http_status       INTEGER,
+                usage_input       INTEGER,
+                usage_output      INTEGER,
+                cache_creation    INTEGER,
+                cache_read        INTEGER,
+                generation_broken INTEGER NOT NULL DEFAULT 0,
+                started_at        INTEGER NOT NULL,
+                ended_at          INTEGER
+             );",
+        )
+        .unwrap();
+
+        build_v1(&conn).unwrap();
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('route_request') WHERE name='tool_calls'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "tool_calls must be backfilled onto a drifted table");
+        // Re-running is a no-op (no duplicate column error).
+        build_v1(&conn).unwrap();
+    }
+
+    /// P1-1 dual-path verification: `tool_names` round-trips on a FRESH db
+    /// (full canonical schema) and on an EXISTING db upgraded through
+    /// `ensure_column` — insert + read back in both cases.
+    #[test]
+    fn tool_names_round_trips_on_fresh_and_upgraded_dbs() {
+        for upgraded in [false, true] {
+            let conn = Connection::open_in_memory().unwrap();
+            if upgraded {
+                // Existing install: the v1 table WITHOUT the P1-1 columns,
+                // then build_v1's ensure_column upgrades it in place.
+                conn.execute_batch(
+                    "CREATE TABLE route_request (
+                        request_id        TEXT PRIMARY KEY,
+                        task_id           TEXT NOT NULL,
+                        agent_id          TEXT NOT NULL,
+                        logical_session   TEXT,
+                        subagent_role     TEXT,
+                        role_source       TEXT,
+                        requested_model   TEXT,
+                        requested_provider TEXT,
+                        resolved_endpoint_id TEXT,
+                        resolved_model    TEXT,
+                        protocol          TEXT,
+                        route_reason      TEXT NOT NULL,
+                        http_status       INTEGER,
+                        usage_input       INTEGER,
+                        usage_output      INTEGER,
+                        cache_creation    INTEGER,
+                        cache_read        INTEGER,
+                        tool_calls        INTEGER,
+                        generation_broken INTEGER NOT NULL DEFAULT 0,
+                        started_at        INTEGER NOT NULL,
+                        ended_at          INTEGER
+                     );",
+                )
+                .unwrap();
+            }
+            build_v1(&conn).unwrap();
+
+            let rec = crate::orchestration::identity::RouteRecord {
+                request_id: uuid::Uuid::new_v4(),
+                task_id: uuid::Uuid::new_v4(),
+                agent_id: "pi-cli".into(),
+                logical_session: None,
+                subagent_role: None,
+                role_source: None,
+                requested_model: None,
+                requested_provider: None,
+                resolved_endpoint_id: None,
+                resolved_model: None,
+                protocol: None,
+                route_reason: "explicit".into(),
+                http_status: None,
+                usage_input: None,
+                usage_output: None,
+                cache_creation: None,
+                cache_read: None,
+                tool_calls: Some(2),
+                tool_names: Some(r#"{"mcp__fs__read": 2}"#.into()),
+                generation_broken: false,
+                started_at: 1,
+                ended_at: None,
+            };
+            // route_request.task_id has an FK to task(id).
+            conn.execute(
+                "INSERT INTO task (id, lifecycle, started_at) VALUES (?1,'born',0)",
+                rusqlite::params![rec.task_id.to_string()],
+            )
+            .unwrap();
+            crate::orchestration::store::insert_route_request(&conn, &rec).unwrap();
+            let got = crate::orchestration::store::route_history_for_task(
+                &conn,
+                &rec.task_id.to_string(),
+            )
+            .unwrap();
+            assert_eq!(got.len(), 1, "upgraded={upgraded}");
+            assert_eq!(got[0].tool_calls, Some(2));
+            assert_eq!(got[0].tool_names.as_deref(), Some(r#"{"mcp__fs__read": 2}"#));
+        }
+    }
+
+    #[test]
+    fn build_v1_recreates_handoff_table_on_pre_handoff_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        build_v1(&conn).unwrap();
+        // Simulate a pre-handoff install (0.1.1) — no `handoff` table.
+        conn.execute_batch("DROP TABLE handoff;").unwrap();
+        build_v1(&conn).unwrap();
+        // The table is back and accepts a row (patch-release additive backfill;
+        // new tables ride the `CREATE TABLE IF NOT EXISTS` in the batch).
+        conn.execute(
+            "INSERT INTO handoff (id, source_provider, source_session_id, artifact_path,
+                                  sections_json, created_at)
+             VALUES ('h1','pi-cli','s1','/tmp/h1.md','{}',0)",
+            [],
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM handoff", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn build_v1_recreates_review_table_on_pre_review_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        build_v1(&conn).unwrap();
+        conn.execute_batch("DROP TABLE review;").unwrap();
+        build_v1(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO review (id, agent_id, reviewed_session_provider, reviewed_session_id,
+                                 status, created_at)
+             VALUES ('r1','pi-cli','pi-cli','s1','pending',0)",
+            [],
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM review", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     /// Re-running migrate on an already-v1 DB is a no-op (data preserved).

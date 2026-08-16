@@ -223,6 +223,60 @@ fn kind_from_protocols(protocols: &[db::ProtocolEntry]) -> ProviderKind {
 
 // ---- capability matching (consumed by the router) ------------------------
 
+/// Derive the request's capability requirements from its JSON body, keyed to
+/// the inbound wire (Smart Gateway fix 2 — the capability routing stage
+/// existed and filtered nothing because no handler ever set
+/// `TaskContext::required_capabilities`).
+///
+/// Conservative by design: a flag flips to `true` only on a PRESENT
+/// structural signal (non-empty `tools`/`functions`, an image block, a
+/// `thinking` config); a text-only request stays all-`false`, which filters
+/// nothing — the same over-include-on-unknown policy as [`satisfies`]. A body
+/// that isn't a JSON object yields the default (never a routing rejection).
+/// `context_floor` is deferred (it needs tokenization).
+pub fn derive_capability_req(body: &[u8], hint: ProviderKind) -> CapabilityReq {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return CapabilityReq::default();
+    };
+    let Some(obj) = v.as_object() else {
+        return CapabilityReq::default();
+    };
+    let mut req = CapabilityReq::default();
+    // Tool/function declarations ride both wire dialects under these keys.
+    req.tool_call = ["tools", "functions"]
+        .iter()
+        .any(|k| obj.get(*k).and_then(|t| t.as_array()).is_some_and(|a| !a.is_empty()));
+    let image_in_messages = |msgs: &serde_json::Value| -> bool {
+        msgs.as_array().is_some_and(|ms| {
+            ms.iter().any(|m| {
+                m.get("content")
+                    .and_then(|c| c.as_array())
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|b| {
+                            let t = b.get("type").and_then(|t| t.as_str());
+                            // Anthropic content block / OpenAI content part.
+                            t == Some("image") || t == Some("image_url") || t == Some("input_image")
+                        })
+                    })
+            })
+        })
+    };
+    match hint {
+        ProviderKind::Anthropic => {
+            // A top-level thinking config (carrying budget_tokens) asks for a
+            // reasoning-capable model. `null` counts as absent.
+            req.reasoning = obj.get("thinking").is_some_and(|t| !t.is_null());
+            req.vision = image_in_messages(obj.get("messages").unwrap_or(&serde_json::Value::Null));
+        }
+        // OpenAI chat shape (the Responses inbound was removed; a Responses
+        // dialect body would reuse the same `input_image` part check).
+        _ => {
+            req.vision = image_in_messages(obj.get("messages").unwrap_or(&serde_json::Value::Null));
+        }
+    }
+    req
+}
+
 /// `true` when `abilities` satisfies `req`. A `None` ability is treated as
 /// "unknown, don't filter on it" — the router prefers to over-include rather
 /// than reject a model for a capability we have no data on. `context_floor`
@@ -493,5 +547,48 @@ mod tests {
         let rows = store::list_model_catalog(&conn, "ep-1").unwrap();
         let a: ModelAbilities = serde_json::from_str(&rows[0].abilities_json).unwrap();
         assert_eq!(a.reasoning, Some(true), "user override must land in catalog");
+    }
+
+    #[test]
+    fn derive_capability_req_anthropic_full_signal() {
+        let body = br#"{"model":"m","thinking":{"budget_tokens":1024},"tools":[{"name":"bash"}],
+             "messages":[{"role":"user","content":[{"type":"text","text":"see"},
+                                                   {"type":"image","source":{"data":"x"}}]}]}"#;
+        let req = derive_capability_req(body, ProviderKind::Anthropic);
+        assert!(req.tool_call && req.vision && req.reasoning);
+    }
+
+    #[test]
+    fn derive_capability_req_conservative_on_plain_text() {
+        // No tools, string content (not blocks), no thinking → no constraints
+        // on either dialect — a text-only request must never filter.
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
+        assert_eq!(
+            derive_capability_req(body, ProviderKind::Anthropic),
+            CapabilityReq::default()
+        );
+        assert_eq!(
+            derive_capability_req(body, ProviderKind::Openai),
+            CapabilityReq::default()
+        );
+    }
+
+    #[test]
+    fn derive_capability_req_openai_functions_and_image_url() {
+        let body = br#"{"model":"m","functions":[{"name":"f"}],
+             "messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:"}}]}]}"#;
+        let req = derive_capability_req(body, ProviderKind::Openai);
+        assert!(req.tool_call && req.vision && !req.reasoning);
+    }
+
+    #[test]
+    fn derive_capability_req_tolerates_garbage_and_null_thinking() {
+        assert_eq!(
+            derive_capability_req(b"not json", ProviderKind::Anthropic),
+            CapabilityReq::default()
+        );
+        let req =
+            derive_capability_req(br#"{"thinking":null,"messages":[]}"#, ProviderKind::Anthropic);
+        assert!(!req.reasoning, "explicit null thinking counts as absent");
     }
 }

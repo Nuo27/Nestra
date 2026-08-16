@@ -293,6 +293,8 @@ export interface RouteRecord {
   usage_output: number | null;
   cache_creation: number | null;
   cache_read: number | null;
+  tool_calls: number | null; // distinct tool calls seen in the stream
+  tool_names: string | null; // JSON {name: count} of observed invocations
   generation_broken: boolean;
   started_at: number;
   ended_at: number | null;

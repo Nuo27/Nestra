@@ -71,6 +71,10 @@ pub enum ForwardOutcome {
         /// `Some(msg)` when a buffered body read was interrupted mid-stream
         /// (partial bytes lost). The response is NOT usable.
         body_error: Option<String>,
+        /// Buffered-path tool observation (gateway-observed invocations; SSE
+        /// backfills after the stream ends).
+        tool_calls: Option<i64>,
+        tool_names: Option<std::collections::BTreeMap<String, u64>>,
     },
     Unreachable {
         timeout: bool,
@@ -122,7 +126,7 @@ pub async fn run_with_migration(
     started_at: i64,
     side_effect_risk: bool,
     resolve: impl Fn(&TaskContext) -> ResolveFuture,
-    forward: impl Fn(&ResolvedRoute) -> ForwardFuture,
+    forward: impl Fn(&TaskContext, &ResolvedRoute) -> ForwardFuture,
     error_response: impl Fn(StatusCode, &str) -> Response<GatewayBody>,
 ) -> Result<Response<GatewayBody>, AppError> {
     let policy_allows_migrate = read_migrate_policy(state, &ctx).await;
@@ -169,7 +173,7 @@ pub async fn run_with_migration(
             record_attempt_start(&conn, &ctx, &rec);
         }
 
-        let mut outcome = forward(&route).await;
+        let mut outcome = forward(&ctx, &route).await;
         attempts += 1;
 
         // Extract what the failure path needs, by reference. On SUCCESS we
@@ -181,6 +185,8 @@ pub async fn run_with_migration(
                 headers,
                 body,
                 usage,
+                tool_calls,
+                tool_names,
                 body_error: None,
                 ..
             } if status.is_success() => {
@@ -191,6 +197,8 @@ pub async fn run_with_migration(
                     status.as_u16(),
                     None, // Ok — clears quota + resets health
                     usage,
+                    *tool_calls,
+                    tool_names_json(tool_names),
                     generation_broken,
                 )
                 .await;
@@ -267,6 +275,8 @@ pub async fn run_with_migration(
             outcome.record_status(),
             Some(class),
             &usage_opt,
+            None,
+            None,
             generation_broken,
         )
         .await;
@@ -436,8 +446,14 @@ pub async fn read_migrate_policy(state: &GatewayState, ctx: &TaskContext) -> boo
         .unwrap_or(true)
 }
 
+/// Serialize the buffered-path tool-name map for the finalize UPDATE.
+fn tool_names_json(names: &Option<std::collections::BTreeMap<String, u64>>) -> Option<String> {
+    names.as_ref().and_then(|m| serde_json::to_string(m).ok())
+}
+
 /// Record the outcome of one attempt: health + quota update + route_request
-/// row finalize (status, usage, generation_broken, ended_at).
+/// row finalize (status, usage, tools, generation_broken, ended_at).
+#[allow(clippy::too_many_arguments)]
 pub async fn record_attempt_outcome(
     state: &GatewayState,
     endpoint_id: &str,
@@ -445,6 +461,8 @@ pub async fn record_attempt_outcome(
     status: u16,
     class: Option<FailureClass>,
     usage: &Option<ObservedUsage>,
+    tool_calls: Option<i64>,
+    tool_names: Option<String>,
     generation_broken: bool,
 ) {
     // Health + quota.
@@ -500,11 +518,17 @@ pub async fn record_attempt_outcome(
         out,
         cc,
         cr,
+        tool_calls,
+        tool_names,
         generation_broken,
         ended_at,
     ) {
         tracing::warn!("gateway: failed to finalize route_request: {e}");
     }
+    // Persist the degraded-endpoint circuit when it transitioned (Smart
+    // Gateway fix 3). No-op while the set is stable — see
+    // `ProviderHealth::persist_degraded`.
+    state.health.persist_degraded(&conn);
 }
 
 /// Transition the task to its terminal lifecycle state (`done`,
@@ -603,7 +627,7 @@ mod tests {
             let route = ok_route("ep-1", _ctx);
             Box::pin(async move { Ok(route) })
         };
-        let forward = |_route: &ResolvedRoute| -> ForwardFuture {
+        let forward = |_ctx: &TaskContext, _route: &ResolvedRoute| -> ForwardFuture {
             Box::pin(async move {
                 ForwardOutcome::Responded {
                     status: StatusCode::OK,
@@ -611,6 +635,8 @@ mod tests {
                     body: GatewayBody::Full(Full::new(Bytes::from(
                         r#"{"id":"msg-1","content":[]}"#,
                     ))),
+                    tool_calls: None,
+                    tool_names: None,
                     usage: Some(ObservedUsage {
                         input: Some(100),
                         output: Some(50),
@@ -683,7 +709,7 @@ mod tests {
         // A 500 response on a side-effect-risk body must Surface (never blind
         // retry a possibly-executed tool call), so the loop exits via the
         // MigrationDecision::Surface arm and marks the task failed.
-        let forward = |_route: &ResolvedRoute| -> ForwardFuture {
+        let forward = |_ctx: &TaskContext, _route: &ResolvedRoute| -> ForwardFuture {
             Box::pin(async move {
                 ForwardOutcome::Responded {
                     status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -692,6 +718,8 @@ mod tests {
                         r#"{"type":"error","error":{"message":"boom"}}"#,
                     ))),
                     usage: None,
+                    tool_calls: None,
+                    tool_names: None,
                     generation_started: false,
                     body_error: None,
                 }

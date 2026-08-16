@@ -44,7 +44,10 @@ use crate::orchestration::migration;
 use crate::orchestration::router::{self, RouterInputs};
 
 use super::forward::{ForwardFuture, ForwardOutcome};
-use super::stream::{read_request_body, GatewayBody, ObservedUsage};
+use super::stream::{
+    GatewayBody, ObservedUsage, StreamObservation, observe_anthropic_chunk,
+    observe_openai_chat_chunk, observe_responses_chunk, read_request_body,
+};
 use super::GatewayState;
 
 /// The hyper client used to dial upstreams. Cheap to clone (it pools
@@ -136,6 +139,15 @@ pub async fn handle_bytes(
         }
     }
 
+    // Capability requirements derived from the body activate the router's
+    // capability stage (tool/vision/reasoning; Smart Gateway fix 2).
+    // Conservative: absent signals stay false → no filtering.
+    ctx.required_capabilities =
+        crate::orchestration::capability_registry::derive_capability_req(
+            &body_bytes,
+            ProviderKind::Anthropic,
+        );
+
     // State 3: a request declaring tools/functions may have executed a tool
     // upstream — never blind-retry it (the loop surfaces instead).
     let side_effect_risk = migration::body_has_side_effect_risk(&body_bytes);
@@ -176,15 +188,21 @@ pub async fn handle_bytes(
                 router::resolve(&ctx, &inputs)
             })
         },
-        // Forward closure: one protocol-specific dial + relay.
-        move |route: &ResolvedRoute| -> ForwardFuture {
+        // Forward closure: one protocol-specific dial + relay. Receives the
+        // per-attempt ctx so the relay's usage backfill targets the CURRENT
+        // attempt's `route_request` row (the loop rotates request_id on every
+        // retry/migration).
+        move |ctx: &TaskContext, route: &ResolvedRoute| -> ForwardFuture {
             let route = route.clone();
             let st = forward_state.clone();
             let headers = fwd_headers.clone();
             let body = fwd_body.clone();
             let agent_id = fwd_agent_id.clone();
             let subagent_key = fwd_subagent_key.clone();
-            Box::pin(async move { forward_one(&st, route, headers, body, &agent_id, &subagent_key).await })
+            let request_id = ctx.request_id.to_string();
+            Box::pin(async move {
+                forward_one(&st, route, headers, body, &agent_id, &subagent_key, &request_id).await
+            })
         },
         error_response,
     )
@@ -200,6 +218,7 @@ async fn forward_one(
     body: Bytes,
     agent_id: &str,
     subagent_key: &str,
+    request_id: &str,
 ) -> ForwardOutcome {
     // Rewrite the model field to the resolved model.
     let rewritten = rewrite_model(&body, &route.model);
@@ -291,7 +310,14 @@ async fn forward_one(
     };
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();
-    let relay = relay_response(upstream_resp, status).await;
+    let relay = relay_response(
+        state.clone(),
+        request_id.to_string(),
+        route.protocol,
+        upstream_resp,
+        status,
+    )
+    .await;
     // Convert the upstream body back to Anthropic when bridging. The pair
     // (inbound=Anthropic, upstream=route.protocol) picks the converter.
     let body = if bridging {
@@ -312,6 +338,8 @@ async fn forward_one(
         usage: relay.usage,
         generation_started: relay.generation_started,
         body_error: relay.body_error,
+        tool_calls: relay.tool_calls,
+        tool_names: relay.tool_names,
     }
 }
 
@@ -467,6 +495,10 @@ pub(super) struct RelayOutcome {
     /// `Some(msg)` when a buffered body read failed mid-stream (partial
     /// bytes lost — the response is NOT usable and the generation is broken).
     pub body_error: Option<String>,
+    /// Buffered-path tool observation (SSE returns None — its accumulator
+    /// backfills after the stream ends).
+    pub tool_calls: Option<i64>,
+    pub tool_names: Option<std::collections::BTreeMap<String, u64>>,
 }
 
 /// Relay the upstream response back to the agent. For 2xx SSE responses we
@@ -476,13 +508,29 @@ pub(super) struct RelayOutcome {
 /// mid-stream interrupt, and hand the loop an honest
 /// `generation_started`/`body_error` signal.
 ///
-/// Known limitation (deliberate): SSE streams report `usage: None`. Usage
-/// observation on the streaming path was removed — it scanned chunks via a
-/// `Mutex` whose `blocking_lock` panicked on the Tokio worker thread — so
-/// streaming requests record no token usage. Buffered (non-SSE) responses
-/// observe usage from the final JSON body. Reintroducing streaming usage
-/// needs an async-safe accumulator and is tracked as a separate effort.
+/// Streaming usage: the SSE body is wrapped in [`ObservingBody`], which
+/// accumulates usage + tool-call ids while the agent consumes the stream and
+/// backfills the `route_request` row when the stream ends (Smart Gateway
+/// fix 1). `RelayOutcome.usage` is still `None` on this path — at return time
+/// the stream has not been read yet. The accumulator is a `std::sync::Mutex`
+/// held only for brief, non-`.await` sections inside `poll_frame` — the
+/// original streaming-observation code panicked because it used
+/// `tokio::sync::Mutex::blocking_lock` on the worker thread; that pattern
+/// stays out.
+///
+/// `upstream_wire` is the UPSTREAM's protocol (`route.protocol`) — the body
+/// wrapper sees the raw upstream bytes, which for a bridged route (e.g.
+/// Anthropic inbound → Responses upstream) are in the upstream's SSE dialect,
+/// not the inbound one.
+///
+/// Known limitation (documented, not forced): a native OpenAI inbound stream
+/// reports usage only when the agent itself set `stream_options.include_usage`
+/// (the gateway's Anthropic→OpenAI bridge injects it — see
+/// `convert::anthropic_to_openai`).
 pub(super) async fn relay_response(
+    state: GatewayState,
+    request_id: String,
+    upstream_wire: ProviderKind,
     upstream_resp: Response<Incoming>,
     status: StatusCode,
 ) -> RelayOutcome {
@@ -497,12 +545,14 @@ pub(super) async fn relay_response(
     if is_sse && status.is_success() {
         // Committed stream: bytes flow to the agent as they arrive. The loop
         // treats a 2xx SSE response as success; generation is already started.
-        let observing = ObservingBody::new(body);
+        let observing = ObservingBody::new(body, state, request_id, upstream_wire);
         return RelayOutcome {
             body: GatewayBody::streaming(observing),
             usage: None,
             generation_started: true,
             body_error: None,
+            tool_calls: None,
+            tool_names: None,
         };
     }
 
@@ -553,28 +603,165 @@ pub(super) async fn relay_response(
     } else {
         None
     };
+    let (tool_calls, tool_names) = if status.is_success() && body_error.is_none() {
+        super::stream::tools_in_buffered_body(&buf, upstream_wire)
+    } else {
+        (None, None)
+    };
     RelayOutcome {
         body: GatewayBody::Full(Full::new(Bytes::from(buf))),
         usage,
         generation_started: got_any,
         body_error,
+        tool_calls,
+        tool_names,
     }
 }
 
-/// A pass-through streaming body wrapper. (ObservingBody used to scan
-/// SSE chunks for usage via a Mutex — but that `blocking_lock` panics on the
-/// Tokio worker thread, and the accumulated data was never consumed anyway;
-/// the usage observation for non-streaming bodies happens on the buffered
-/// path below, and SSE cache metrics are captured from `message_start` by
-/// `stream::observe_usage_chunk` only when the loop has a buffered body.)
+/// A streaming body wrapper that observes usage + tool calls while relaying
+/// SSE bytes verbatim to the agent (Smart Gateway fix 1).
+///
+/// ## Panic safety (the constraint this design exists to honor)
+///
+/// `poll_frame` runs on the Tokio worker thread, so it must never block.
+/// The accumulator is a `std::sync::Mutex` locked only for a brief,
+/// non-`.await` section per frame. The original streaming-usage code used
+/// `tokio::sync::Mutex::blocking_lock` inside `poll_frame` and panicked —
+/// that pattern must not come back.
+///
+/// ## Backfill
+///
+/// When the stream ends (cleanly or on error), a detached task locks the
+/// gateway DB and fills `route_request.usage_*` / `tool_calls` for the
+/// attempt's `request_id` — `record_attempt_outcome` has already finalized
+/// the row with NULL usage when the 2xx stream was handed over. If the agent
+/// disconnects and the body is dropped without reaching a terminal poll, no
+/// backfill happens (accepted: best-effort observability).
 struct ObservingBody {
     inner: Incoming,
+    /// The upstream's wire dialect — picks the SSE observer.
+    wire: ProviderKind,
+    /// Accumulated usage + tool-call ids. `Arc` so the finish task can read a
+    /// snapshot after the body is gone.
+    obs: std::sync::Arc<std::sync::Mutex<StreamObservation>>,
+    /// Carry buffer for an SSE line split across frames. Only grows to one
+    /// line's length; a single unterminated line above `CARRY_CAP` is dropped
+    /// whole (usage/tool events are nowhere near that size).
+    carry: String,
+    state: GatewayState,
+    request_id: String,
+    /// Backfill fired once (terminal poll already seen).
+    done: bool,
 }
 
+/// Cap on the unterminated-line carry buffer (bytes). Generous on purpose:
+/// only a malformed/hostile stream approaches it.
+const CARRY_CAP: usize = 128 * 1024;
+
 impl ObservingBody {
-    fn new(inner: Incoming) -> Self {
-        Self { inner }
+    fn new(
+        inner: Incoming,
+        state: GatewayState,
+        request_id: String,
+        wire: ProviderKind,
+    ) -> Self {
+        Self {
+            inner,
+            wire,
+            obs: std::sync::Arc::new(std::sync::Mutex::new(StreamObservation::default())),
+            carry: String::new(),
+            state,
+            request_id,
+            done: false,
+        }
     }
+
+    /// Feed one frame's bytes to the observer. Brief, non-`.await` lock.
+    fn observe_frame(&mut self, bytes: &Bytes) {
+        if let Ok(mut obs) = self.obs.lock() {
+            observe_text_window(self.wire, &mut self.carry, bytes, &mut obs);
+        }
+    }
+
+    /// Terminal state (clean end or upstream error): feed any trailing
+    /// unterminated line, then fire the one-shot backfill task.
+    fn finish(&mut self) {
+        if self.done {
+            return;
+        }
+        self.done = true;
+        let rest = std::mem::take(&mut self.carry);
+        if !rest.is_empty() {
+            if let Ok(mut obs) = self.obs.lock() {
+                observe_wire_chunk(self.wire, &rest, &mut obs);
+            }
+        }
+        let state = self.state.clone();
+        let request_id = std::mem::take(&mut self.request_id);
+        let obs = self.obs.clone();
+        tokio::spawn(async move {
+            // Snapshot under a brief lock, then do the DB write without it.
+            let (usage, tool_calls, tool_names) = match obs.lock() {
+                Ok(o) => (
+                    o.usage.clone(),
+                    o.tool_call_ids.len() as i64,
+                    serde_json::to_string(&o.tool_names).ok(),
+                ),
+                Err(_) => return, // poisoned — nothing sane to write
+            };
+            let conn = state.db.lock().await;
+            if let Err(e) = crate::orchestration::store::backfill_route_request_usage(
+                &conn,
+                &request_id,
+                &usage,
+                Some(tool_calls),
+                tool_names,
+            ) {
+                tracing::warn!("gateway: usage backfill failed for {request_id}: {e}");
+            }
+        });
+    }
+}
+
+/// Dispatch one complete-lines text window to the upstream-dialect observer.
+fn observe_wire_chunk(
+    wire: ProviderKind,
+    text: &str,
+    obs: &mut StreamObservation,
+) {
+    match wire {
+        ProviderKind::Anthropic => observe_anthropic_chunk(text, obs),
+        ProviderKind::Openai => observe_openai_chat_chunk(text, obs),
+        ProviderKind::Responses => observe_responses_chunk(text, obs),
+        // A custom upstream never reaches the SSE relay with a recognizable
+        // dialect — no observation rather than a wrong-dialect parse.
+        ProviderKind::Custom => {}
+    }
+}
+
+/// Append one frame's bytes to the carry buffer, feed every COMPLETE line to
+/// the observer, and keep the trailing partial line in `carry` (an SSE event
+/// may split across frames). Pure so the split-frame behavior is unit-testable
+/// without a socket. A single unterminated line above `CARRY_CAP` is dropped
+/// whole (usage/tool events are nowhere near that size).
+fn observe_text_window(
+    wire: ProviderKind,
+    carry: &mut String,
+    bytes: &[u8],
+    obs: &mut StreamObservation,
+) {
+    carry.push_str(&String::from_utf8_lossy(bytes));
+    if carry.len() > CARRY_CAP && !carry.contains('\n') {
+        carry.clear();
+        return;
+    }
+    let Some(last_nl) = carry.rfind('\n') else {
+        return; // no complete line yet
+    };
+    // Split off the trailing partial line; observe the complete prefix.
+    let tail = carry.split_off(last_nl + 1);
+    let complete = std::mem::replace(carry, tail);
+    observe_wire_chunk(wire, &complete, obs);
 }
 
 impl hyper::body::Body for ObservingBody {
@@ -585,20 +772,32 @@ impl hyper::body::Body for ObservingBody {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
-        // SAFETY: `ObservingBody` is a single-field wrapper around `Incoming`,
-        // which is `Unpin` — the manual projection below is the documented
-        // hyper pattern for passing a pinned body field through to the inner
-        // `Body::poll_frame`. (All fields are Unpin, so `Pin::get_mut` would
-        // also be sound; this mirrors the sibling stream wrappers.)
+        // SAFETY: `ObservingBody` wraps `Incoming` (Unpin) plus plain fields
+        // mutated only here under the body's single-consumer contract — the
+        // manual projection below is the documented hyper pattern for passing
+        // a pinned body field through to the inner `Body::poll_frame`.
+        // (All fields are Unpin, so `Pin::get_mut` would also be sound; this
+        // mirrors the sibling stream wrappers.)
         let this = unsafe { self.get_unchecked_mut() };
         let poll = std::pin::Pin::new(&mut this.inner).poll_frame(cx);
         match poll {
             std::task::Poll::Pending => std::task::Poll::Pending,
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Ready(Some(Err(e))) => std::task::Poll::Ready(Some(Err(
-                std::io::Error::other(format!("upstream body: {e}")),
-            ))),
-            std::task::Poll::Ready(Some(Ok(frame))) => std::task::Poll::Ready(Some(Ok(frame))),
+            std::task::Poll::Ready(None) => {
+                this.finish();
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Ready(Some(Err(e))) => {
+                this.finish();
+                std::task::Poll::Ready(Some(Err(std::io::Error::other(format!(
+                    "upstream body: {e}"
+                )))))
+            }
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                if let Some(bytes) = frame.data_ref() {
+                    this.observe_frame(bytes);
+                }
+                std::task::Poll::Ready(Some(Ok(frame)))
+            }
         }
     }
 }
@@ -661,5 +860,33 @@ mod tests {
         assert!(path_is_messages("/pi/v1/messages"), "any agent prefix is accepted here");
         assert!(!path_is_messages("/v1/chat/completions"));
         assert!(!path_is_messages("/claude-code-cli/v1/messages/extra"));
+    }
+
+    #[test]
+    fn observe_text_window_handles_split_frames() {
+        // One SSE data line split mid-JSON across two frames (the boundary
+        // lands inside the JSON payload) must still yield its usage — the
+        // carry buffer holds the partial until the newline arrives.
+        let full = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n";
+        let (a, b) = full.split_at(full.len() / 2);
+        let mut obs = StreamObservation::default();
+        let mut carry = String::new();
+        observe_text_window(ProviderKind::Anthropic, &mut carry, a.as_bytes(), &mut obs);
+        assert_eq!(obs.usage.output, None, "partial line is not parsed yet");
+        observe_text_window(ProviderKind::Anthropic, &mut carry, b.as_bytes(), &mut obs);
+        assert_eq!(obs.usage.output, Some(9));
+        assert!(carry.is_empty(), "complete lines leave no carry");
+
+        // A window whose bytes end exactly on a newline observes immediately;
+        // nothing is held back.
+        let mut obs2 = StreamObservation::default();
+        let mut carry2 = String::new();
+        observe_text_window(
+            ProviderKind::Anthropic,
+            &mut carry2,
+            &b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n"[..],
+            &mut obs2,
+        );
+        assert_eq!(obs2.usage.output, Some(4));
     }
 }

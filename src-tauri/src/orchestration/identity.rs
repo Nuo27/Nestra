@@ -625,6 +625,12 @@ pub struct RouteRecord {
     pub usage_output: Option<i64>,
     pub cache_creation: Option<i64>,
     pub cache_read: Option<i64>,
+    /// Distinct tool calls observed in the response stream (count only —
+    /// names are deferred). Backfilled after a streaming response ends.
+    pub tool_calls: Option<i64>,
+    /// JSON `{name: count}` of gateway-observed tool-call invocations (raw
+    /// JSON passthrough; the MCP usage aggregation parses it).
+    pub tool_names: Option<String>,
     /// `true` when this record's response was produced by a fresh upstream
     /// generation after a mid-stream migration (correction #2 /
     /// clarification #3). The UI uses this to label the response honestly.
@@ -661,6 +667,8 @@ impl RouteRecord {
             usage_output: None,
             cache_creation: None,
             cache_read: None,
+            tool_calls: None,
+            tool_names: None,
             generation_broken: false,
             started_at,
             ended_at: None,

@@ -13,6 +13,7 @@
 //! observation. No body mutation beyond the model-field rewrite (the Anthropic
 //! path also applies policy-gated `cache_control` injection).
 
+use std::collections::{BTreeMap, HashSet};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -20,6 +21,7 @@ use bytes::Bytes;
 use http_body_util::{BodyStream, Full};
 use hyper::body::{Body, Frame};
 
+use crate::config_writer::ProviderKind;
 use crate::error::AppResult;
 
 /// The gateway's response body type. Either a full buffered body (for JSON
@@ -181,9 +183,263 @@ fn merge_usage_obj(u: &serde_json::Map<String, serde_json::Value>, usage: &mut O
         if let Some(n) = u
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
+            // Responses API nests the same number under input_tokens_details.
+            .or_else(|| {
+                u.get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+            })
             .and_then(|x| x.as_i64())
         {
             usage.cache_read = Some(n);
+        }
+    }
+}
+
+/// Tool calls in a buffered (non-SSE) response body, per the upstream wire.
+/// Mirrors the SSE observers' semantics: distinct call ids for the count,
+/// name counts per observed invocation. `(None, None)` when the body carries
+/// no tool calls (or isn't JSON).
+pub fn tools_in_buffered_body(
+    body: &[u8],
+    wire: ProviderKind,
+) -> (Option<i64>, Option<BTreeMap<String, u64>>) {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return (None, None);
+    };
+    let mut ids: HashSet<String> = HashSet::new();
+    let mut names = BTreeMap::new();
+    let mut visit = |id: Option<&str>, name: Option<&str>| {
+        if let Some(id) = id.filter(|s| !s.is_empty()) {
+            ids.insert(id.to_string());
+        }
+        if let Some(name) = name {
+            bump(&mut names, name);
+        }
+    };
+    match wire {
+        ProviderKind::Anthropic => {
+            if let Some(blocks) = v.get("content").and_then(|c| c.as_array()) {
+                for b in blocks {
+                    if b.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                        visit(
+                            b.get("id").and_then(|x| x.as_str()),
+                            b.get("name").and_then(|x| x.as_str()),
+                        );
+                    }
+                }
+            }
+        }
+        ProviderKind::Openai => {
+            if let Some(choices) = v.get("choices").and_then(|c| c.as_array()) {
+                for ch in choices {
+                    let Some(tcs) = ch
+                        .get("message")
+                        .and_then(|m| m.get("tool_calls"))
+                        .and_then(|t| t.as_array())
+                    else {
+                        continue;
+                    };
+                    for tc in tcs {
+                        visit(
+                            tc.get("id").and_then(|x| x.as_str()),
+                            tc.get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|x| x.as_str()),
+                        );
+                    }
+                }
+            }
+        }
+        ProviderKind::Responses => {
+            if let Some(items) = v.get("output").and_then(|o| o.as_array()) {
+                for it in items {
+                    if it.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                        visit(
+                            it.get("call_id").or_else(|| it.get("id")).and_then(|x| x.as_str()),
+                            it.get("name").and_then(|x| x.as_str()),
+                        );
+                    }
+                }
+            }
+        }
+        ProviderKind::Custom => {}
+    }
+    if ids.is_empty() && names.is_empty() {
+        return (None, None);
+    }
+    (Some(ids.len() as i64), Some(names))
+}
+
+/// What one relayed SSE stream yielded: usage tokens plus the distinct tool
+/// calls seen in it. Accumulated across frames by the observing relay body
+/// (`protocol_anthropic::ObservingBody`); `tool_call_ids` is a set because the
+/// count, not the order or the names, is what v1 persists (`route_request.
+/// tool_calls`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StreamObservation {
+    pub usage: ObservedUsage,
+    pub tool_call_ids: HashSet<String>,
+    /// Observed tool-call invocations per tool NAME (counts, not successes —
+    /// the gateway counts what it saw in the stream; a later execution
+    /// failure or connection drop does not un-count it).
+    pub tool_names: BTreeMap<String, u64>,
+}
+
+fn bump(map: &mut BTreeMap<String, u64>, name: &str) {
+    if !name.is_empty() {
+        *map.entry(name.to_string()).or_insert(0) += 1;
+    }
+}
+
+/// Observe one buffered text window of an Anthropic Messages SSE stream.
+/// Usage rides `message_start`/`message_delta` (see [`observe_usage_chunk`]);
+/// tool calls are announced by `content_block_start` blocks of type
+/// `tool_use`, deduplicated by block id.
+pub fn observe_anthropic_chunk(text: &str, obs: &mut StreamObservation) {
+    observe_usage_chunk(text, &mut obs.usage);
+    for line in text.lines() {
+        let Some(payload) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let payload = payload.trim();
+        if payload == "[DONE]" {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+            continue;
+        };
+        let Some(obj) = v.as_object() else { continue };
+        if obj.get("type").and_then(|t| t.as_str()) != Some("content_block_start") {
+            continue;
+        }
+        let block = obj.get("content_block");
+        let is_tool = block
+            .and_then(|b| b.get("type"))
+            .and_then(|t| t.as_str())
+            == Some("tool_use");
+        if is_tool {
+            if let Some(id) = block.and_then(|b| b.get("id")).and_then(|i| i.as_str()) {
+                obs.tool_call_ids.insert(id.to_string());
+            }
+            if let Some(name) = block.and_then(|b| b.get("name")).and_then(|n| n.as_str()) {
+                bump(&mut obs.tool_names, name);
+            }
+        }
+    }
+}
+
+/// Observe one buffered text window of an OpenAI Chat Completions SSE stream.
+/// Usage appears as a top-level `usage` on the final chunk (only when the
+/// request set `stream_options.include_usage` — the gateway's Anthropic→OpenAI
+/// bridge injects it, native OpenAI agents may not). Tool-call deltas arrive
+/// on `choices[].delta.tool_calls`; `index` is constant per call and present
+/// on every delta, so it is the dedup key (the `id` rides only the first
+/// delta and would double-count).
+pub fn observe_openai_chat_chunk(text: &str, obs: &mut StreamObservation) {
+    for line in text.lines() {
+        let Some(payload) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let payload = payload.trim();
+        if payload == "[DONE]" {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+            continue;
+        };
+        let Some(obj) = v.as_object() else { continue };
+        if let Some(u) = obj.get("usage").and_then(|u| u.as_object()) {
+            merge_usage_obj(u, &mut obs.usage);
+        }
+        let Some(choices) = obj.get("choices").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        for choice in choices {
+            let Some(tcs) = choice
+                .get("delta")
+                .and_then(|d| d.get("tool_calls"))
+                .and_then(|t| t.as_array())
+            else {
+                continue;
+            };
+            for tc in tcs {
+                let key = tc
+                    .get("index")
+                    .and_then(|i| i.as_u64())
+                    .map(|i| format!("idx:{i}"))
+                    .or_else(|| {
+                        tc.get("id")
+                            .and_then(|i| i.as_str())
+                            .map(str::to_string)
+                    });
+                if let Some(k) = key {
+                    obs.tool_call_ids.insert(k);
+                }
+                // The name rides only the FIRST delta of a call (continuation
+                // deltas carry just the index) — count once per named delta.
+                if let Some(name) = tc
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                {
+                    bump(&mut obs.tool_names, name);
+                }
+            }
+        }
+    }
+}
+
+/// Observe one buffered text window of an OpenAI Responses API SSE stream
+/// (the upstream wire when the gateway bridges to a `responses` endpoint).
+/// `response.completed` / `response.incomplete` carry `response.usage`
+/// (Anthropic-style `input_tokens`/`output_tokens`, cache under
+/// `input_tokens_details.cached_tokens`); tool calls surface as
+/// `function_call` output items, announced by `response.output_item.added`.
+pub fn observe_responses_chunk(text: &str, obs: &mut StreamObservation) {
+    for line in text.lines() {
+        let Some(payload) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let payload = payload.trim();
+        if payload == "[DONE]" {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+            continue;
+        };
+        let Some(obj) = v.as_object() else { continue };
+        match obj.get("type").and_then(|t| t.as_str()) {
+            Some("response.completed") | Some("response.incomplete") => {
+                if let Some(u) = obj
+                    .get("response")
+                    .and_then(|r| r.get("usage"))
+                    .and_then(|u| u.as_object())
+                {
+                    merge_usage_obj(u, &mut obs.usage);
+                }
+            }
+            Some("response.output_item.added") => {
+                let is_call = obj
+                    .get("item")
+                    .and_then(|i| i.get("type"))
+                    .and_then(|t| t.as_str())
+                    == Some("function_call");
+                if is_call {
+                    if let Some(id) = obj
+                        .get("item")
+                        .and_then(|i| i.get("call_id").or_else(|| i.get("id")))
+                        .and_then(|i| i.as_str())
+                    {
+                        obs.tool_call_ids.insert(id.to_string());
+                    }
+                    if let Some(name) =
+                        obj.get("item").and_then(|i| i.get("name")).and_then(|n| n.as_str())
+                    {
+                        bump(&mut obs.tool_names, name);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -242,5 +498,79 @@ data: {"type":"message_delta","usage":{"output_tokens":128}}"#;
         merge_usage_obj(&obj, &mut usage);
         assert_eq!(usage.input, Some(42));
         assert_eq!(usage.output, Some(7));
+    }
+
+    #[test]
+    fn observe_anthropic_chunk_counts_tool_use_blocks() {
+        let chunk = r#"event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":42}}}
+
+event: content_block_start
+data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"toolu_1","name":"bash"}}
+
+event: content_block_start
+data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"toolu_2","name":"read"}}
+
+event: content_block_start
+data: {"type":"content_block_start","content_block":{"type":"text"}}
+
+event: message_delta
+data: {"type":"message_delta","usage":{"output_tokens":9}}"#;
+        let mut obs = StreamObservation::default();
+        observe_anthropic_chunk(chunk, &mut obs);
+        assert_eq!(obs.usage, ObservedUsage { input: Some(42), output: Some(9), cache_creation: None, cache_read: None });
+        assert_eq!(obs.tool_call_ids.len(), 2, "two distinct tool_use ids, text blocks ignored");
+        assert_eq!(obs.tool_names.get("bash"), Some(&1));
+        assert_eq!(obs.tool_names.get("read"), Some(&1));
+        // Same id twice (e.g. split frames re-observed) must not double-count.
+        observe_anthropic_chunk(
+            r#"data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"toolu_1"}}"#,
+            &mut obs,
+        );
+        assert_eq!(obs.tool_call_ids.len(), 2);
+    }
+
+    #[test]
+    fn observe_openai_chat_chunk_usage_and_tool_calls() {
+        let chunk = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"bash"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ls"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","function":{"name":"read"}}]}}]}
+
+data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":120,"completion_tokens":45,"prompt_tokens_details":{"cached_tokens":88}}}"#;
+        let mut obs = StreamObservation::default();
+        observe_openai_chat_chunk(chunk, &mut obs);
+        assert_eq!(obs.usage.input, Some(120));
+        assert_eq!(obs.usage.output, Some(45));
+        assert_eq!(obs.usage.cache_read, Some(88));
+        assert_eq!(obs.tool_call_ids.len(), 2, "index-keyed dedup: continuation deltas of call_a collapse");
+        assert!(obs.tool_call_ids.contains("idx:0") && obs.tool_call_ids.contains("idx:1"));
+        // Names ride only the first delta of each call → one count per call.
+        assert_eq!(obs.tool_names.get("bash"), Some(&1));
+        assert_eq!(obs.tool_names.get("read"), Some(&1));
+    }
+
+    #[test]
+    fn observe_responses_chunk_usage_and_function_calls() {
+        let chunk = r#"event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_p1","name":"bash"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"message","id":"msg_1"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"usage":{"input_tokens":77,"output_tokens":31,"input_tokens_details":{"cached_tokens":12}}}}"#;
+        let mut obs = StreamObservation::default();
+        observe_responses_chunk(chunk, &mut obs);
+        assert_eq!(obs.usage.input, Some(77));
+        assert_eq!(obs.usage.output, Some(31));
+        assert_eq!(obs.usage.cache_read, Some(12));
+        assert_eq!(obs.tool_call_ids.len(), 1, "only function_call items count");
+        assert!(obs.tool_call_ids.contains("call_p1"));
+        assert_eq!(obs.tool_names.get("bash"), Some(&1));
+        // Garbage tolerance: malformed JSON and unknown events are ignored.
+        observe_responses_chunk("data: not json\n\nevent: ping\ndata: {}", &mut obs);
+        assert_eq!(obs.tool_call_ids.len(), 1);
     }
 }

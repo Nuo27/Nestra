@@ -122,6 +122,15 @@ pub async fn handle_bytes(
         }
     }
 
+    // Capability requirements derived from the body activate the router's
+    // capability stage (tool/vision; Smart Gateway fix 2). Conservative:
+    // absent signals stay false → no filtering.
+    ctx.required_capabilities =
+        crate::orchestration::capability_registry::derive_capability_req(
+            &body_bytes,
+            ProviderKind::Openai,
+        );
+
     // State 3: a request declaring tools/functions may have executed a tool
     // upstream — never blind-retry it (the loop surfaces instead).
     let side_effect_risk = migration::body_has_side_effect_risk(&body_bytes);
@@ -152,12 +161,13 @@ pub async fn handle_bytes(
                 router::resolve(&ctx, &inputs)
             })
         },
-        move |route: &ResolvedRoute| -> ForwardFuture {
+        move |ctx: &TaskContext, route: &ResolvedRoute| -> ForwardFuture {
             let route = route.clone();
             let st = forward_state.clone();
             let headers = fwd_headers.clone();
             let body = fwd_body.clone();
-            Box::pin(async move { forward_one(&st, route, headers, body).await })
+            let request_id = ctx.request_id.to_string();
+            Box::pin(async move { forward_one(&st, route, headers, body, &request_id).await })
         },
         error_response,
     )
@@ -170,6 +180,7 @@ async fn forward_one(
     route: ResolvedRoute,
     headers: hyper::HeaderMap,
     body: Bytes,
+    request_id: &str,
 ) -> ForwardOutcome {
     let rewritten = rewrite_model(&body, &route.model);
     // Responses-class models (grok-4.5, gpt-5.6-luna) cannot speak the chat
@@ -241,8 +252,17 @@ async fn forward_one(
     // Relay + observe. Reuse the Anthropic relay for the mechanics (it streams
     // verbatim + observes usage from SSE or buffered JSON); the OpenAI usage
     // fields differ (prompt_tokens/completion_tokens) so we post-process the
-    // observed usage to map them onto our standard input/output fields.
-    let relay = super::protocol_anthropic::relay_response(upstream_resp, status).await;
+    // observed usage to map them onto our standard input/output fields. The
+    // relay's own SSE accumulator keys off `upstream_kind` (the raw upstream
+    // bytes are chat-wire unless bridged to Responses).
+    let relay = super::protocol_anthropic::relay_response(
+        state.clone(),
+        request_id.to_string(),
+        upstream_kind,
+        upstream_resp,
+        status,
+    )
+    .await;
     let usage = relay.usage.map(|u| map_openai_usage(u, &resp_headers));
     // Convert the responses-wire body back to chat chunks when bridging.
     let body = if bridging {
@@ -263,6 +283,8 @@ async fn forward_one(
         usage,
         generation_started: relay.generation_started,
         body_error: relay.body_error,
+        tool_calls: relay.tool_calls,
+        tool_names: relay.tool_names,
     }
 }
 
@@ -272,8 +294,10 @@ async fn forward_one(
 /// OpenAI field names), so the non-streaming buffered path captures OpenAI
 /// usage automatically and this mapping is an identity passthrough.
 ///
-/// Streaming responses (body not buffered at this point) stay best-effort:
-/// usage may be None — the status-based outcome is still recorded.
+/// Streaming usage is captured by the relay's SSE accumulator (backfilled
+/// after the stream ends); it is present only when the stream carried a
+/// `usage` chunk — i.e. `stream_options.include_usage` was set by the agent
+/// (the gateway's bridges inject it; a native OpenAI agent's body may not).
 fn map_openai_usage(observed: ObservedUsage, _headers: &hyper::HeaderMap) -> ObservedUsage {
     observed
 }

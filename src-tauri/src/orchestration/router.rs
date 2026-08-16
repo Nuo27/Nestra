@@ -48,7 +48,15 @@ use super::store;
 /// it into `AppState`; tests construct their own.
 pub struct RouteAffinity {
     inner: Mutex<HashMap<AffinityKey, AffinityValue>>,
+    /// Last session-snapshot persist (Unix millis) — the debounce that keeps
+    /// `record` off the DB on the per-request hot path.
+    last_persist_ms: Mutex<Option<i64>>,
 }
+
+/// `setting_kv` key for the persisted session-grain affinity snapshot.
+const AFFINITY_PERSIST_KEY: &str = "route_affinity";
+/// Minimum spacing between affinity snapshot writes.
+const AFFINITY_PERSIST_DEBOUNCE_MS: i64 = 5_000;
 
 /// The grain an affinity entry is keyed at. Matches `routing_policy.affinity_scope`.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -63,6 +71,16 @@ struct AffinityValue {
     model: String,
 }
 
+/// Persisted session-grain affinity row (`setting_kv["route_affinity"]`).
+/// Credential-free: endpoint id + model id only.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SessionAffinityRow {
+    agent_id: String,
+    logical_session_id: String,
+    endpoint_id: String,
+    model: String,
+}
+
 impl Default for RouteAffinity {
     fn default() -> Self {
         Self::new()
@@ -73,6 +91,7 @@ impl RouteAffinity {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            last_persist_ms: Mutex::new(None),
         }
     }
 
@@ -107,8 +126,17 @@ impl RouteAffinity {
     }
 
     /// Record the route chosen for a task so the next request in the same
-    /// task reuses it (affinity).
-    pub fn record(&self, ctx: &TaskContext, endpoint_id: &str, model: &str) {
+    /// task reuses it (affinity). `conn` is the caller's already-held gateway
+    /// connection — used for the debounced session-grain snapshot (Smart
+    /// Gateway fix 3: a restart otherwise loses the session's provider pin
+    /// and the prompt-cache prefix with it).
+    pub fn record(
+        &self,
+        conn: &rusqlite::Connection,
+        ctx: &TaskContext,
+        endpoint_id: &str,
+        model: &str,
+    ) {
         let mut map = self.inner.lock().expect("affinity lock poisoned");
         Self::evict_if_needed(&mut map);
         map.insert(
@@ -134,6 +162,82 @@ impl RouteAffinity {
                 },
             );
         }
+        drop(map);
+        // Debounced snapshot: at most one setting_kv write per interval no
+        // matter how hot the proxy path is.
+        let now = chrono::Utc::now().timestamp_millis();
+        let due = self
+            .last_persist_ms
+            .lock()
+            .expect("affinity persist lock poisoned")
+            .map_or(true, |t| now - t >= AFFINITY_PERSIST_DEBOUNCE_MS);
+        if due {
+            self.persist_sessions(conn);
+        }
+    }
+
+    /// Snapshot the SESSION-grain entries to `setting_kv`. Task entries are
+    /// deliberately not persisted: a `task_id` lives one HTTP lifecycle
+    /// (retry/migration reuse), so the cross-restart-valuable part is the
+    /// session pin. Credential-free (endpoint id + model id only).
+    fn persist_sessions(&self, conn: &rusqlite::Connection) {
+        let map = self.inner.lock().expect("affinity lock poisoned");
+        let mut rows: Vec<SessionAffinityRow> = map
+            .iter()
+            .filter_map(|(k, v)| match k {
+                AffinityKey::Session {
+                    agent_id,
+                    logical_session_id,
+                } => Some(SessionAffinityRow {
+                    agent_id: agent_id.clone(),
+                    logical_session_id: logical_session_id.clone(),
+                    endpoint_id: v.endpoint_id.clone(),
+                    model: v.model.clone(),
+                }),
+                AffinityKey::Task(_) => None,
+            })
+            .collect();
+        drop(map);
+        rows.sort_by(|a, b| a.logical_session_id.cmp(&b.logical_session_id));
+        let Ok(value) = serde_json::to_value(&rows) else {
+            return;
+        };
+        if crate::db::set_setting(conn, AFFINITY_PERSIST_KEY, &value).is_ok() {
+            *self
+                .last_persist_ms
+                .lock()
+                .expect("affinity persist lock poisoned") = Some(chrono::Utc::now().timestamp_millis());
+        }
+    }
+
+    /// Restore session-grain affinity at startup. Task entries stay
+    /// in-memory-only (ephemeral by nature).
+    pub fn load_sessions(&self, conn: &rusqlite::Connection) {
+        let Ok(Some(v)) = crate::db::get_setting(conn, AFFINITY_PERSIST_KEY) else {
+            return;
+        };
+        let Ok(rows) = serde_json::from_value::<Vec<SessionAffinityRow>>(v) else {
+            return;
+        };
+        let mut map = self.inner.lock().expect("affinity lock poisoned");
+        for r in rows {
+            map.insert(
+                AffinityKey::Session {
+                    agent_id: r.agent_id,
+                    logical_session_id: r.logical_session_id,
+                },
+                AffinityValue {
+                    endpoint_id: r.endpoint_id,
+                    model: r.model,
+                },
+            );
+        }
+    }
+
+    /// Write the session snapshot NOW (no debounce) — the exit path's final
+    /// flush so the ≤5s debounce tail doesn't die with the process.
+    pub fn flush_sessions(&self, conn: &rusqlite::Connection) {
+        self.persist_sessions(conn);
     }
 
     /// Look up the last route for `ctx`'s affinity grain.
@@ -211,7 +315,7 @@ pub fn resolve(ctx: &TaskContext, inputs: &RouterInputs<'_>) -> AppResult<Resolv
             && model_allowed(&policy.allowed_models, model)
         {
             let route = build_route(ctx, ep, model, RouteReason::Explicit, inputs, policy.inject_cache_control)?;
-            inputs.affinity.record(ctx, ep, model);
+            inputs.affinity.record(inputs.conn, ctx, ep, model);
             return Ok(route);
         }
     }
@@ -225,7 +329,7 @@ pub fn resolve(ctx: &TaskContext, inputs: &RouterInputs<'_>) -> AppResult<Resolv
         {
             let route = build_route(ctx, &ep, &model, RouteReason::Affinity, inputs, policy.inject_cache_control)?;
             // Affinity hit re-records (refreshes at_ms).
-            inputs.affinity.record(ctx, &ep, &model);
+            inputs.affinity.record(inputs.conn, ctx, &ep, &model);
             return Ok(route);
         }
     }
@@ -233,7 +337,7 @@ pub fn resolve(ctx: &TaskContext, inputs: &RouterInputs<'_>) -> AppResult<Resolv
     // 3. Capability-ranked selection over the policy's candidate lists.
     if let Some((ep, model, reason)) = pick_by_capability(ctx, &policy, inputs)? {
         let route = build_route(ctx, &ep, &model, reason, inputs, policy.inject_cache_control)?;
-        inputs.affinity.record(ctx, &ep, &model);
+        inputs.affinity.record(inputs.conn, ctx, &ep, &model);
         return Ok(route);
     }
 
@@ -1074,5 +1178,87 @@ mod tests {
         seed_binding(&env.conn, "opencode-desktop", "ep-1");
         let r = resolve(&o_ctx, &env.inputs()).unwrap();
         assert_eq!(r.protocol, ProviderKind::Openai);
+    }
+
+    #[test]
+    fn session_affinity_survives_simulated_restart() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::schema::build_v1(&conn).unwrap();
+        let a = RouteAffinity::new();
+        let ctx = TaskContext::new_task("claude-code-cli", Some("sess-1".to_string()));
+        a.record(&conn, &ctx, "ep-a", "model-a");
+
+        // Fresh instance = a Nestra restart: only session-grain affinity
+        // comes back (task entries are ephemeral by design).
+        let b = RouteAffinity::new();
+        b.load_sessions(&conn);
+        assert_eq!(
+            b.lookup(&ctx, AffinityScope::Session),
+            Some(("ep-a".to_string(), "model-a".to_string()))
+        );
+        assert_eq!(b.lookup(&ctx, AffinityScope::Task), None);
+    }
+
+    #[test]
+    fn affinity_persist_is_debounced() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::schema::build_v1(&conn).unwrap();
+        let a = RouteAffinity::new();
+        let ctx = TaskContext::new_task("claude-code-cli", Some("sess-1".to_string()));
+        a.record(&conn, &ctx, "ep-a", "model-a");
+
+        // Second record inside the debounce window must not rewrite the
+        // setting (detect via row deletion: a rewrite would re-insert it).
+        conn.execute("DELETE FROM setting_kv WHERE key = 'route_affinity'", [])
+            .unwrap();
+        a.record(&conn, &ctx, "ep-b", "model-b");
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM setting_kv WHERE key = 'route_affinity'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "debounced record must skip the setting write");
+    }
+
+    #[test]
+    fn capability_req_routes_vision_away_from_text_only_model() {
+        let env = TestEnv::new();
+        seed_endpoint(&env.conn, "ep-text", "anthropic", "https://t", "m-text");
+        seed_endpoint(&env.conn, "ep-vis", "anthropic", "https://v", "m-vis");
+        seed_binding(&env.conn, "claude-code-cli", "ep-text");
+        seed_binding(&env.conn, "claude-code-cli", "ep-vis");
+        // ep-text's model reports text-only input; ep-vis's reports text+image.
+        for (id, abilities) in [
+            ("ep-text", r#"{"m-text":{"modalities":{"input":["text"]}}}"#),
+            ("ep-vis", r#"{"m-vis":{"modalities":{"input":["text","image"]}}}"#),
+        ] {
+            env.conn
+                .execute(
+                    "UPDATE provider_endpoint SET model_abilities_json = ?2 WHERE id = ?1",
+                    rusqlite::params![id, abilities],
+                )
+                .unwrap();
+        }
+        capability_registry::rebuild(&env.conn).unwrap();
+
+        // An image-bearing request derives vision=true and must not resolve
+        // onto the text-only model (Smart Gateway fix 2 activating the
+        // previously inert capability stage).
+        let body = br#"{"model":"m-text","messages":[{"role":"user","content":[
+             {"type":"text","text":"see"},{"type":"image","source":{"data":"x"}}]}]}"#;
+        let mut ctx = TaskContext::new_task("claude-code-cli", None);
+        ctx.required_capabilities =
+            capability_registry::derive_capability_req(body, ProviderKind::Anthropic);
+        assert!(ctx.required_capabilities.vision);
+        let r = resolve(&ctx, &env.inputs()).unwrap();
+        assert_eq!(r.endpoint_id, "ep-vis", "vision request excludes the text-only model");
+
+        // A text-only request stays eligible for the text-only model.
+        let mut ctx2 = TaskContext::new_task("claude-code-cli", None);
+        ctx2.requested_model = Some("m-text".into());
+        let r2 = resolve(&ctx2, &env.inputs()).unwrap();
+        assert_eq!(r2.model, "m-text");
     }
 }

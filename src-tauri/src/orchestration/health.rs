@@ -173,8 +173,25 @@ pub struct EndpointHealth {
     /// True once the circuit has opened; the router excludes the endpoint
     /// until an Ok clears it.
     pub degraded: bool,
+    /// When the circuit opened (Unix millis). A degraded endpoint receives no
+    /// traffic, so without a TTL it could never get the Ok that clears it —
+    /// [`ProviderHealth::DEGRADED_TTL_MS`] bounds the exclusion window.
+    pub degraded_at_ms: Option<i64>,
     /// Last observed failure class, when any. `None` after an Ok.
     pub last_failure: Option<FailureClass>,
+}
+
+impl EndpointHealth {
+    /// Degraded AND within the TTL. This is the router's exclusion signal:
+    /// an expired circuit is treated as eligible so the next request probes
+    /// the endpoint (an Ok clears it; a failure re-opens it with a fresh
+    /// timestamp).
+    fn effectively_degraded(&self, now_ms: i64) -> bool {
+        self.degraded
+            && self
+                .degraded_at_ms
+                .is_some_and(|at| now_ms.saturating_sub(at) < DEGRADED_TTL_MS)
+    }
 }
 
 /// One observed outcome in the rolling window.
@@ -196,6 +213,9 @@ pub struct OutcomeSnap {
 /// gateway records one outcome per proxied request.
 pub struct ProviderHealth {
     inner: Mutex<HashMap<String, EndpointHealth>>,
+    /// Serialized last-persisted degraded set — the no-op guard that keeps
+    /// `persist_degraded` off the hot path while the set is stable.
+    last_persist: Mutex<Option<String>>,
 }
 
 /// How many recent outcomes to retain per endpoint.
@@ -203,6 +223,21 @@ pub const WINDOW: usize = 20;
 /// Consecutive migratable failures (quota/rate/5xx/timeout) before the
 /// endpoint is marked degraded and excluded from routing until an Ok clears it.
 pub const DEGRADED_THRESHOLD: u32 = 3;
+/// A degraded circuit is held out for at most this long (Smart Gateway fix 3):
+/// the degraded endpoint gets no traffic, so without a bound a
+/// restart-persisted circuit could stay open forever (stale-circuit trap).
+pub const DEGRADED_TTL_MS: i64 = 10 * 60 * 1000;
+/// `setting_kv` key for the persisted degraded set.
+const PERSIST_KEY: &str = "provider_health";
+
+/// One persisted degraded-circuit row. Credential-free (endpoint id +
+/// timestamps + a failure-class label).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DegradedEntry {
+    endpoint_id: String,
+    degraded_at_ms: i64,
+    class: FailureClass,
+}
 
 impl Default for ProviderHealth {
     fn default() -> Self {
@@ -214,6 +249,7 @@ impl ProviderHealth {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            last_persist: Mutex::new(None),
         }
     }
 
@@ -229,6 +265,7 @@ impl ProviderHealth {
                 h.consecutive_failures = 0;
                 h.consecutive_migratable = 0;
                 h.degraded = false;
+                h.degraded_at_ms = None;
                 h.last_failure = None;
             }
             HealthOutcome::Fail(class) => {
@@ -237,6 +274,12 @@ impl ProviderHealth {
                     h.consecutive_migratable = h.consecutive_migratable.saturating_add(1);
                 }
                 if h.consecutive_migratable >= DEGRADED_THRESHOLD {
+                    // Stamp the open time on the healthy→degraded transition
+                    // only, so a still-failing endpoint doesn't reset its own
+                    // TTL window.
+                    if !h.degraded {
+                        h.degraded_at_ms = Some(now);
+                    }
                     h.degraded = true;
                 }
                 h.last_failure = Some(class);
@@ -267,23 +310,113 @@ impl ProviderHealth {
 
     /// All endpoints the router should consider eligible (not degraded).
     pub fn eligible(&self, candidates: &[String]) -> Vec<String> {
+        let now = chrono::Utc::now().timestamp_millis();
         let map = self.inner.lock().expect("health lock poisoned");
         candidates
             .iter()
-            .filter(|id| !map.get(*id).map(|h| h.degraded).unwrap_or(false))
+            .filter(|id| {
+                !map.get(*id)
+                    .map(|h| h.effectively_degraded(now))
+                    .unwrap_or(false)
+            })
             .cloned()
             .collect()
     }
 
-    /// `true` if the endpoint is currently degraded (circuit open).
+    /// `true` if the endpoint is currently degraded (circuit open, within the
+    /// TTL).
     pub fn is_degraded(&self, endpoint_id: &str) -> bool {
-        self.get(endpoint_id).degraded
+        let now = chrono::Utc::now().timestamp_millis();
+        self.inner
+            .lock()
+            .expect("health lock poisoned")
+            .get(endpoint_id)
+            .map(|h| h.effectively_degraded(now))
+            .unwrap_or(false)
     }
 
     /// Clear all health state (used by tests and a future "reset health" UI).
     pub fn clear(&self) {
         self.inner.lock().expect("health lock poisoned").clear();
     }
+
+    /// Persist the degraded set to `setting_kv` — called from the gateway's
+    /// outcome recording while it already holds the DB lock. Writes only on a
+    /// degraded↔healthy TRANSITION: the cached last snapshot makes the stable
+    /// case a compare-and-return, so the per-request hot path adds no write.
+    /// Best-effort; a failure is logged and retried on the next transition.
+    pub fn persist_degraded(&self, conn: &rusqlite::Connection) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let entries = fresh_degraded_entries(&self.inner.lock().expect("health lock poisoned"), now);
+        let Ok(value) = serde_json::to_value(&entries) else {
+            return;
+        };
+        let serialized = value.to_string();
+        let mut last = self.last_persist.lock().expect("health persist lock poisoned");
+        if last.as_deref() == Some(serialized.as_str()) {
+            return;
+        }
+        if let Err(e) = crate::db::set_setting(conn, PERSIST_KEY, &value) {
+            tracing::warn!("gateway: failed to persist provider health: {e}");
+            return;
+        }
+        *last = Some(serialized);
+    }
+
+    /// Restore the degraded set at startup. Entries past the TTL are dropped:
+    /// a stale persisted circuit must not exclude an endpoint forever — the
+    /// next request probes it. Restored entries carry the threshold already
+    /// crossed so the circuit holds until an Ok or the TTL.
+    pub fn load(&self, conn: &rusqlite::Connection) {
+        let Ok(Some(v)) = crate::db::get_setting(conn, PERSIST_KEY) else {
+            return;
+        };
+        let Ok(entries) = serde_json::from_value::<Vec<DegradedEntry>>(v) else {
+            return;
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut map = self.inner.lock().expect("health lock poisoned");
+        for e in entries {
+            if now.saturating_sub(e.degraded_at_ms) >= DEGRADED_TTL_MS {
+                continue;
+            }
+            map.insert(
+                e.endpoint_id,
+                EndpointHealth {
+                    degraded: true,
+                    degraded_at_ms: Some(e.degraded_at_ms),
+                    consecutive_migratable: DEGRADED_THRESHOLD,
+                    consecutive_failures: DEGRADED_THRESHOLD,
+                    last_failure: Some(e.class),
+                    ..Default::default()
+                },
+            );
+        }
+        // Sync the persist no-op guard so an unchanged set doesn't rewrite.
+        let entries = fresh_degraded_entries(&map, now);
+        if let Ok(s) = serde_json::to_string(&entries) {
+            *self.last_persist.lock().expect("health persist lock poisoned") = Some(s);
+        }
+    }
+}
+
+/// TTL-fresh degraded entries, sorted by endpoint id for a stable comparison
+/// string (HashMap order must not decide whether a transition "happened").
+fn fresh_degraded_entries(
+    map: &HashMap<String, EndpointHealth>,
+    now_ms: i64,
+) -> Vec<DegradedEntry> {
+    let mut entries: Vec<DegradedEntry> = map
+        .iter()
+        .filter(|(_, h)| h.effectively_degraded(now_ms))
+        .map(|(id, h)| DegradedEntry {
+            endpoint_id: id.clone(),
+            degraded_at_ms: h.degraded_at_ms.unwrap_or(now_ms),
+            class: h.last_failure.unwrap_or(FailureClass::Unknown),
+        })
+        .collect();
+    entries.sort_by(|a, b| a.endpoint_id.cmp(&b.endpoint_id));
+    entries
 }
 
 #[cfg(test)]
@@ -452,5 +585,77 @@ mod tests {
             HealthOutcome::from_response(429, "too many requests", false),
             HealthOutcome::Fail(FailureClass::RateLimit)
         ));
+    }
+
+    fn mem_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::schema::build_v1(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn degraded_circuit_persists_and_restores() {
+        let conn = mem_conn();
+        let h = ProviderHealth::new();
+        for _ in 0..DEGRADED_THRESHOLD {
+            h.record("ep-1", HealthOutcome::Fail(FailureClass::Temp5xx), 503);
+        }
+        assert!(h.is_degraded("ep-1"));
+        h.persist_degraded(&conn);
+
+        // Simulated restart: a fresh instance restores the open circuit.
+        let h2 = ProviderHealth::new();
+        h2.load(&conn);
+        assert!(h2.is_degraded("ep-1"), "degraded circuit survives restart");
+        assert!(h2.eligible(&["ep-1".into()]).is_empty());
+
+        // An Ok clears it; the healthy transition persists as an empty set.
+        h2.record("ep-1", HealthOutcome::Ok, 200);
+        h2.persist_degraded(&conn);
+        let h3 = ProviderHealth::new();
+        h3.load(&conn);
+        assert!(!h3.is_degraded("ep-1"), "cleared circuit stays cleared across restart");
+    }
+
+    #[test]
+    fn expired_persisted_circuit_is_dropped_at_load() {
+        let conn = mem_conn();
+        // A degraded_at beyond the TTL — the stale-circuit trap fix 3 exists
+        // for: without the TTL check this endpoint would never route again.
+        let stale = serde_json::json!([{
+            "endpoint_id": "ep-old",
+            "degraded_at_ms": chrono::Utc::now().timestamp_millis() - DEGRADED_TTL_MS - 1,
+            "class": "temp_5xx"
+        }]);
+        crate::db::set_setting(&conn, PERSIST_KEY, &stale).unwrap();
+        let h = ProviderHealth::new();
+        h.load(&conn);
+        assert!(!h.is_degraded("ep-old"));
+        assert_eq!(h.eligible(&["ep-old".into()]), vec!["ep-old".to_string()]);
+    }
+
+    #[test]
+    fn persist_degraded_writes_only_on_transition() {
+        let conn = mem_conn();
+        let h = ProviderHealth::new();
+        for _ in 0..DEGRADED_THRESHOLD {
+            h.record("ep-1", HealthOutcome::Fail(FailureClass::Temp5xx), 503);
+        }
+        h.persist_degraded(&conn);
+        // Delete the row to detect any rewrite; a further failure does NOT
+        // transition (still degraded, same open time) so the snapshot is
+        // unchanged and the persist must be a no-op.
+        conn.execute("DELETE FROM setting_kv WHERE key = 'provider_health'", [])
+            .unwrap();
+        h.record("ep-1", HealthOutcome::Fail(FailureClass::Temp5xx), 503);
+        h.persist_degraded(&conn);
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM setting_kv WHERE key = 'provider_health'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "stable degraded set must not rewrite the setting");
     }
 }
