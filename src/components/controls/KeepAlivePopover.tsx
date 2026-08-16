@@ -16,6 +16,7 @@ import { qk } from "../../lib/queries";
 import { extractError } from "../../ipc/errors";
 import { formatTime } from "../../lib/format";
 import { keepaliveMeta } from "../../lib/keepalive";
+import { useNow } from "../../lib/useNow";
 
 /// Keep-alive indicator + status popover for the Quota card. The trigger
 /// tracks runtime state (polled every 10s) with the shared `HeartPulse` +
@@ -33,11 +34,23 @@ export function KeepAlivePopover({ endpointId }: { endpointId: string }) {
     queryKey: qk.keepaliveStatus(endpointId),
     queryFn: () => quotaKeepaliveStatus(endpointId),
     refetchInterval: 10_000,
+    // The 10s poll is a UI-freshness timer; it stops while the window is
+    // hidden (background polling would waste cycles). On window focus/visibility
+    // regain, refetch once so the countdown reflects the LATEST backend state —
+    // the Rust worker may have fired pings / advanced `next_fire_at` while the
+    // window was hidden. `next_fire_at` itself is an absolute deadline, so the
+    // countdown stays correct even if this fetch lags.
     refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
   const phase = status.data?.phase ?? "disabled";
   const meta = keepaliveMeta(phase);
   const s = status.data;
+  // UI-only clock: re-renders the countdown each second so "next fire" ticks
+  // live instead of only updating on the 10s poll. `next_fire_at` is an
+  // absolute deadline, so the displayed delta is always correct regardless of
+  // how long the window was hidden or how late this clock ticked.
+  const now = useNow(1000);
 
   // Close on outside click or Escape. No portal — the panel is anchored to
   // the header cluster in normal document flow, so a local listener suffices.
@@ -94,7 +107,7 @@ export function KeepAlivePopover({ endpointId }: { endpointId: string }) {
             </span>
             <span className="text-subtle">{t("keepalive.nextFire")}</span>
             <span className="text-right font-mono">
-              {s?.next_fire_at ? formatUntil(s.next_fire_at) : "—"}
+              {s?.next_fire_at ? formatUntil(s.next_fire_at, now) : "—"}
             </span>
           </div>
 
@@ -197,9 +210,11 @@ function buildCurl(p: PingPreview): string {
 }
 
 /// Relative countdown for a future fire time (formatTime would render a
-/// future date as "-Nd ago"). Falls back to clock time beyond ~24h.
-function formatUntil(ts: number): string {
-  const delta = ts - Date.now();
+/// future date as "-Nd ago"). Falls back to clock time beyond ~24h. `now` is
+/// passed in from the UI-only clock so the caller controls the tick cadence
+/// (and the value stays a pure function of an absolute deadline).
+function formatUntil(ts: number, now: number): string {
+  const delta = ts - now;
   const t = i18n.t;
   if (delta <= 0) return t("keepalive.due");
   if (delta < 60_000) return t("keepalive.inSec", { n: Math.ceil(delta / 1000) });

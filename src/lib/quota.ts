@@ -158,3 +158,37 @@ export function composeEndpointConfig(
     opencode_workspace_id: patch.opencode_workspace_id,
   };
 }
+
+/// Inputs to the single-refresh-authority decision. Pure so the deadline logic
+/// is unit-testable without a React/jsdom harness.
+export interface CatchUpRefreshArgs {
+  auto: boolean;
+  isFetching: boolean;
+  /** Absolute deadline for the next auto-refresh (epoch ms); 0 = not armed. */
+  nextRefreshAt: number;
+  /** UI-only wall clock (epoch ms). */
+  now: number;
+  /** Epoch ms of the last catch-up attempt for this deadline. */
+  lastAttemptAt: number;
+  intervalSec: number;
+}
+
+/// Decide whether a catch-up refetch should fire right now. The ONLY refresh
+/// authority for auto-refresh: fires when the absolute deadline has passed,
+/// no fetch is in flight, and the last attempt is older than one interval.
+/// The `intervalSec` throttle turns a failed fetch (deadline unchanged) into a
+/// retry on the same cadence as the countdown instead of a per-render hammer
+/// loop; a success advances `nextRefreshAt` past `now`, which silences the
+/// decision until the next deadline.
+export function shouldCatchUpRefresh({
+  auto,
+  isFetching,
+  nextRefreshAt,
+  now,
+  lastAttemptAt,
+  intervalSec,
+}: CatchUpRefreshArgs): boolean {
+  if (!auto || isFetching) return false;
+  if (nextRefreshAt <= 0 || now < nextRefreshAt) return false;
+  return now - lastAttemptAt >= intervalSec * 1000;
+}

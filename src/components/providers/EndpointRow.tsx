@@ -129,6 +129,10 @@ function KeepAliveChip({ endpointId }: { endpointId: string }) {
       const phase = query.state.data?.phase ?? "disabled";
       return keepaliveMeta(phase).visible ? 10_000 : false;
     },
+    // Refresh once when the window comes back so the phase reflects the
+    // backend's latest state (the worker may have fired pings while hidden).
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
   const phase = q.data?.phase ?? "disabled";
   const meta = keepaliveMeta(phase);
@@ -164,7 +168,11 @@ function QuotaSection({ endpoint }: { endpoint: EndpointInfo }) {
     staleTime: 60_000,
     // Passive preview — the quota page owns the Auto interval.
     refetchInterval: false,
-    refetchOnWindowFocus: false,
+    // Catch up on window focus/visibility regain so the preview isn't stale
+    // after the app was hidden (stale-gated by staleTime). The Quota page's
+    // absolute-deadline auto-refresh is the real refresh authority; this just
+    // refreshes the passive card when the user returns.
+    refetchOnWindowFocus: true,
   });
   const data = q.data;
   useEffect(() => {

@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Settings2 } from "lucide-react";
 import {
@@ -20,7 +20,8 @@ import { Skeleton } from "../components/ui/skeleton";
 import { useUI } from "../stores/ui";
 import { qk } from "../lib/queries";
 import { useQuotaRefresh } from "../lib/quotaRefresh";
-import { BUILTIN_LABEL, planLabel } from "../lib/quota";
+import { useNow } from "../lib/useNow";
+import { BUILTIN_LABEL, planLabel, shouldCatchUpRefresh } from "../lib/quota";
 
 export function QuotaPage({ id }: { id: string }) {
   const { t } = useTranslation();
@@ -74,15 +75,14 @@ function QuotaCard({ endpoint }: { endpoint: EndpointInfo }) {
     queryFn: () => endpointFetchQuota(endpoint.id),
     staleTime: 60_000,
     gcTime: 30 * 60_000,
-    refetchInterval: auto ? intervalSec * 1000 : false,
-    // Keep polling while the window is hidden (minimized / occluded /
-    // closed-to-tray): quota freshness is the whole point of auto-refresh.
-    refetchIntervalInBackground: true,
+    // Auto-refresh is NOT driven by a TanStack interval: a JS interval is
+    // throttled/frozen when the window is hidden, so it can't be the refresh
+    // authority. The single refresh mechanism is the absolute deadline below
+    // (`nextRefreshAt`) checked against the UI-only clock — which re-syncs on
+    // window focus/visibility regain. No refetchInterval, no
+    // refetchIntervalInBackground, no refetchOnWindowFocus: one authority,
+    // no duplicate fetches from overlapping mechanisms.
     refetchOnMount: false,
-    // Catch up the moment the user returns — covers OS suspend/wake and any
-    // timer throttling during long hidden periods. Skips when data is fresh
-    // (staleTime).
-    refetchOnWindowFocus: true,
   });
   const data = q.data;
   const qc = useQueryClient();
@@ -111,29 +111,36 @@ function QuotaCard({ endpoint }: { endpoint: EndpointInfo }) {
   const rf = useQuotaRefresh(endpoint, targetItems);
   const { plan, planActive, provisioned, canArm, verifyQuery } = rf;
 
-  // Countdown until next automatic refetch. We track the last successful
-  // fetch timestamp from TanStack and tick a local interval so the UI can
-  // surface "next refresh in 18s" without polling the query.
-  const nextRefreshMs = q.dataUpdatedAt > 0 && auto ? q.dataUpdatedAt + intervalSec * 1000 : 0;
-  const [now, setNow] = useState(() => Date.now());
-  // One interval for the lifetime of `auto`  — NOT keyed on nextRefreshMs, so a
-  // refetch no longer tears it down + recreates it (the old recreation left
-  // `now` stale for up to 1s, which combined with rounding skipped seconds).
-  useEffect(() => {
-    if (!auto) return;
-    setNow(Date.now()); // re-sync when auto flips on
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [auto]);
-  // Re-sync the instant a fetch resolves so the countdown restarts cleanly at
-  // the full interval (floor — shows exactly N, not N-1 / N+1).
-  useEffect(() => {
-    setNow(Date.now());
-  }, [q.dataUpdatedAt]);
-  const secsLeft = nextRefreshMs > 0 ? Math.max(0, Math.floor((nextRefreshMs - now) / 1000)) : 0;
+  // Countdown until the next automatic refetch — the ABSOLUTE deadline
+  // (dataUpdatedAt + interval), not a remaining-duration counter. The UI
+  // clock ticks so the label can render "next refresh in Ns"; the deadline
+  // itself is the business truth and survives window hide/suspend.
+  const nextRefreshAt = q.dataUpdatedAt > 0 && auto ? q.dataUpdatedAt + intervalSec * 1000 : 0;
+  // UI-only clock: ticks every second and re-syncs instantly on window
+  // focus/visibility regain and on every fetch completion (syncKey), so the
+  // countdown restarts cleanly at the full interval.
+  const now = useNow(1000, q.dataUpdatedAt);
+  const secsLeft = nextRefreshAt > 0 ? Math.max(0, Math.floor((nextRefreshAt - now) / 1000)) : 0;
   // "sending request" only while a fetch is genuinely in flight — a due-but-
   // not-yet-fired tick or a paused interval must not stick the label on.
   const sending = auto && shown && q.isFetching;
+
+  // Single refresh authority: when the deadline has passed and no fetch is in
+  // flight, fire exactly one catch-up fetch (see `shouldCatchUpRefresh` for
+  // the throttle semantics — no hammering on failed fetches, retry on the
+  // countdown cadence, and a success advances the deadline to silence it).
+  const lastAttemptAt = useRef(0);
+  // Re-arming auto-refresh must be allowed to catch up immediately (a prior
+  // throttled attempt must not block a fresh arm). Reset on every auto flip.
+  useEffect(() => {
+    if (auto) lastAttemptAt.current = 0;
+  }, [auto]);
+  useEffect(() => {
+    if (shouldCatchUpRefresh({ auto, isFetching: q.isFetching, nextRefreshAt, now, lastAttemptAt: lastAttemptAt.current, intervalSec })) {
+      lastAttemptAt.current = now;
+      qc.invalidateQueries({ queryKey: qk.endpointQuota(endpoint.id) });
+    }
+  }, [now, nextRefreshAt, intervalSec, auto, q.isFetching, qc, endpoint.id]);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
 
