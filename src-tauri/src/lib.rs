@@ -10,6 +10,7 @@ mod model_abilities;
 mod mcp;
 pub mod orchestration;
 mod quota_refresh;
+mod review;
 mod schema;
 mod secrets;
 mod session;
@@ -59,6 +60,9 @@ pub struct AppState {
     pub orch_health: Arc<orchestration::health::ProviderHealth>,
     pub orch_quota: Arc<orchestration::quota_state::QuotaState>,
     pub orch_affinity: Arc<orchestration::router::RouteAffinity>,
+    /// The single active review session (Review Runtime R1 — one at a time).
+    /// Clone handle; the runner task + abort command coordinate through it.
+    pub reviews: review::ReviewRegistry,
     /// The running gateway handle, once spawned. `None` if the gateway failed
     /// to bind (the app still runs, just without routing). `Arc<tokio::sync::Mutex>`
     /// so the spawn task can store the handle after `.manage()` already cloned
@@ -87,6 +91,14 @@ pub fn run() {
     let orch_health = Arc::new(orchestration::health::ProviderHealth::new());
     let orch_quota = Arc::new(orchestration::quota_state::QuotaState::new());
     let orch_affinity = Arc::new(orchestration::router::RouteAffinity::new());
+    // Restore the restart-persistent routing state (Smart Gateway fix 3):
+    // session-grain affinity keeps a session on its prior provider (prompt-
+    // cache locality across a Nestra restart), and the degraded-endpoint
+    // circuit keeps a known-dead endpoint out of rotation. Both loads are
+    // TTL/best-effort and touch only non-secret routing ids. `conn` is still
+    // the plain pre-AppState connection here — no lock to take.
+    orch_affinity.load_sessions(&conn);
+    orch_health.load(&conn);
 
     // Loopback auth token: get-or-generate up front (encrypted keychain). The
     // gateway is fail-closed without it; generating at launch means it is ready
@@ -111,6 +123,7 @@ pub fn run() {
         orch_health: orch_health.clone(),
         orch_quota: orch_quota.clone(),
         orch_affinity: orch_affinity.clone(),
+        reviews: review::ReviewRegistry::default(),
         gateway: gateway_control,
     };
 
@@ -293,6 +306,22 @@ pub fn run() {
             commands::sessions::session_open,
             commands::sessions::session_reveal,
             commands::sessions::session_delete,
+            // Handoff (Context Lifecycle)
+            commands::handoff::session_context_pressure,
+            commands::handoff::handoff_preview,
+            commands::handoff::handoff_save,
+            commands::handoff::handoff_list,
+            commands::handoff::handoff_delete,
+            commands::handoff::handoff_inject,
+            commands::handoff::handoff_inject_remove,
+            commands::handoff::handoff_to_knowledge,
+            commands::handoff::handoff_spawn,
+            // Review Runtime
+            commands::review::review_create,
+            commands::review::review_start,
+            commands::review::review_abort,
+            commands::review::review_list,
+            commands::review::review_get,
             // Skills
             commands::skills::skills_list,
             commands::skills::skills_reveal,
@@ -312,6 +341,7 @@ pub fn run() {
             commands::mcp::mcp_import_all,
             commands::mcp::mcp_import_one,
             commands::mcp::mcp_sync_agent,
+            commands::mcp::mcp_usage_stats,
             commands::mcp::mcp_sync_all,
             commands::mcp::mcp_probe,
             // Settings
@@ -412,6 +442,11 @@ fn drain_gateway_on_exit(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
+    // Final affinity snapshot (no debounce) so the ≤5s tail of session pins
+    // survives the exit; health persists on transitions and needs no flush.
+    if let Ok(conn) = state.db.lock() {
+        state.orch_affinity.flush_sessions(&conn);
+    }
     if let Some(handle) = state.gateway.try_take_for_shutdown() {
         tauri::async_runtime::block_on(async {
             handle.shutdown().await;
