@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next"
+import { AgentKindBadge } from "../agents/AgentKindBadge"
 
 /// One agent's toggle inside the group. Unlike `SegmentedControl` (which is
 /// single-select), each segment here is an independent on/off — the bordered
@@ -78,7 +79,7 @@ export function AgentToggleGroup({
                   {it.checked ? "●" : "○"}
                 </span>
               )}
-              <span>{it.label}</span>
+              <span className="flex items-center gap-1.5">{it.label}<AgentKindBadge id={it.id} /></span>
             </button>
             {!last && <span aria-hidden="true" className="w-px self-stretch bg-border-strong" />}
           </div>
@@ -191,7 +192,7 @@ export function AgentStateGroup({
                   {STATE_GLYPH[it.state]}
                 </span>
               )}
-              <span>{it.label}</span>
+              <span className="flex items-center gap-1.5">{it.label}<AgentKindBadge id={it.id} /></span>
             </button>
             {!last && <span aria-hidden="true" className="w-px self-stretch bg-border-strong" />}
           </div>

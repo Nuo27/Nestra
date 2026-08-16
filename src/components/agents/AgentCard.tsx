@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { AgentKindBadge } from "./AgentKindBadge";
 import { ArrowRight } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -123,6 +124,7 @@ export function AgentCard({ agent, endpoints }: { agent: AgentInfo; endpoints: E
       <AgentStatusBanner
         enabled={agent.enabled}
         connected={connected}
+        agentId={agent.id}
         displayName={agent.display_name}
         statusLabel={statusLabel}
         source={agent.source}
@@ -276,6 +278,7 @@ function TaskChip({ t }: { t: TaskSummary }) {
 function AgentStatusBanner({
   enabled,
   connected,
+  agentId,
   displayName,
   statusLabel,
   source,
@@ -284,6 +287,7 @@ function AgentStatusBanner({
 }: {
   enabled: boolean;
   connected: boolean;
+  agentId: string;
   displayName: string;
   statusLabel: string;
   source: "auto" | "manual";
@@ -308,6 +312,7 @@ function AgentStatusBanner({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="text-md font-medium">{displayName}</span>
+          <AgentKindBadge id={agentId} />
           <span className="text-xs text-muted tabular">{statusLabel}</span>
         </div>
       </div>
