@@ -22,10 +22,11 @@
 //!
 //! - Any content block an importer does not explicitly recognize becomes a
 //!   [`PartPayload::Unknown`] carrying the verbatim JSON, never dropped.
-//! - Every [`Part`] also keeps `raw_json`: the full native record it was derived
-//!   from, so provider-specific fields the typed payload doesn't model (model
-//!   name, token usage, system prompt, cost) survive end-to-end and round-trip
-//!   through exporters.
+//! - Every [`Part`] also carries `provider_metadata_json`: provider fields
+//!   the typed payload doesn't model (token usage, model name) are PROMOTED
+//!   there via [`provider_meta`] as normalized `usage` + `model` keys.
+//!   (`raw_json` is persisted blank by the store — a deliberate size
+//!   decision; the typed payload + metadata are the source of truth.)
 //!
 //! Adding a new provider = implement one importer (emit [`SemanticEvent`]s) +
 //! register it. No changes to the assembler, store, or UI.
@@ -391,10 +392,64 @@ impl Part {
 
 /// Deserialize a [`PartPayload`] from its stored JSON (the internally-tagged
 /// representation produced by [`Part::payload_json`]). Used when reading parts
-/// back from SQLite into the typed model.
-#[cfg(test)]
+/// back from SQLite into the typed model (e.g. by the handoff builder).
+/// Best-effort: `None` on malformed JSON — an undecodable part is treated as
+/// absent rather than fatal.
 pub fn parse_payload(json: &str) -> Option<PartPayload> {
     serde_json::from_str::<PartPayload>(json).ok()
+}
+
+/// Normalize a raw provider record/message object into canonical part
+/// metadata: `usage` (token fields under canonical names) + `model`. PURE
+/// alias mapping — no provider semantics (exclusivity/subset rules belong to
+/// the consumers, not here). Returns `"{}"` when the record carries neither.
+///
+/// Canonical aliases:
+/// - `input_tokens | prompt_tokens | input` → `usage.input_tokens`
+/// - `output_tokens | completion_tokens | output` → `usage.output_tokens`
+/// - `cache_read_input_tokens | cached_tokens` → `usage.cache_read_input_tokens`
+/// - `cache_creation_input_tokens` → `usage.cache_creation_input_tokens`
+/// - `model | modelId` → `model`
+pub fn provider_meta(v: &serde_json::Value) -> String {
+    let pick = |obj: &serde_json::Map<String, serde_json::Value>,
+                keys: &[&str]|
+     -> Option<serde_json::Value> {
+        keys.iter()
+            .find_map(|k| obj.get(*k).filter(|x| x.is_number()))
+            .cloned()
+    };
+    let mut out = serde_json::Map::new();
+    if let Some(u) = v.get("usage").and_then(|u| u.as_object()) {
+        let mut n = serde_json::Map::new();
+        for (aliases, canonical) in [
+            (&["input_tokens", "prompt_tokens", "input"][..], "input_tokens"),
+            (&["output_tokens", "completion_tokens", "output"][..], "output_tokens"),
+            (
+                &["cache_read_input_tokens", "cached_tokens"][..],
+                "cache_read_input_tokens",
+            ),
+            (
+                &["cache_creation_input_tokens"][..],
+                "cache_creation_input_tokens",
+            ),
+        ] {
+            if let Some(x) = pick(u, aliases) {
+                n.insert(canonical.to_string(), x);
+            }
+        }
+        if !n.is_empty() {
+            out.insert("usage".to_string(), serde_json::Value::Object(n));
+        }
+    }
+    if let Some(m) = v
+        .get("model")
+        .or_else(|| v.get("modelId"))
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        out.insert("model".to_string(), serde_json::Value::String(m.to_string()));
+    }
+    serde_json::to_string(&serde_json::Value::Object(out)).unwrap_or_else(|_| "{}".into())
 }
 
 #[cfg(test)]

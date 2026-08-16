@@ -1,5 +1,6 @@
 mod claude;
 mod desktop;
+pub mod handoff;
 mod model;
 mod partdb;
 pub mod provider;
@@ -356,7 +357,9 @@ fn flush_text_buf(
 
 /// Claude records MCP-served tool calls as `mcp__<server>__<tool>`; split that
 /// into provenance. Returns `None` for ordinary (non-MCP) tool names.
-fn parse_mcp_tool_name(name: &str) -> Option<McpProvenance> {
+/// `pub(crate)`: also the attribution rule for the MCP usage aggregation
+/// (P1-1) — one source of truth for the namespace.
+pub(crate) fn parse_mcp_tool_name(name: &str) -> Option<McpProvenance> {
     let rest = name.strip_prefix("mcp__")?;
     let mut it = rest.splitn(2, "__");
     let server = it.next()?.to_string();
@@ -490,6 +493,16 @@ fn parse_jsonl_events(path: &Path) -> AppResult<JsonlParse> {
             .map(String::from);
 
         let raw = line.clone();
+        // Usage/model metadata for THIS line (Claude carries both inside the
+        // `message` envelope; flat envelopes may carry them top-level).
+        // Attached to the line's FIRST event only — one line is one billing
+        // record, so per-block attachment would multiply token counts.
+        let meta = semantic::provider_meta(
+            v.get("message")
+                .filter(|m| m.is_object())
+                .unwrap_or(&v),
+        );
+        let mut meta_attached = false;
         let mut emit = |payload: PartPayload,
                         call_id: Option<String>,
                         title: &mut Option<String>,
@@ -505,13 +518,19 @@ fn parse_jsonl_events(path: &Path) -> AppResult<JsonlParse> {
                 }
                 _ => {}
             }
+            let provider_metadata_json = if meta_attached {
+                "{}".into()
+            } else {
+                meta_attached = true;
+                meta.clone()
+            };
             events.push(SemanticEvent {
                 tool_call_id: call_id,
                 message_id: message_id.clone(),
                 parent_message_id: parent_message_id.clone(),
                 ts,
                 raw_json: raw.clone(),
-                provider_metadata_json: "{}".into(),
+                provider_metadata_json,
                 payload,
             });
         };
@@ -1216,6 +1235,45 @@ mod tests {
     }
 
     const PI_HEADER: &str = r#"{"type":"session","id":"019fcfbd-7954-7f25-b526-9a289ccda14c","timestamp":"2026-08-05T02:25:28.916Z","cwd":"C:\\Users\\nuo\\SomeProj"}"#;
+
+    /// Boundary proof for usage/model promotion (audit requirement): a
+    /// Claude-shaped assistant line with multiple content blocks is ONE
+    /// message — metadata must attach to the line's first event only, and
+    /// user lines carry nothing. This test is the reproducible data-contract
+    /// evidence the promotion wiring depends on.
+    #[test]
+    fn jsonl_usage_model_metadata_attaches_to_first_event_of_line() {
+        let (home, _home_g) = temp_session_home();
+        let dir = home.join("tmp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("usage.jsonl");
+        write_jsonl(
+            &p,
+            &[
+                r#"{"type":"message","id":"a","message":{"role":"user","content":[{"type":"text","text":"q"}]},"timestamp":"2026-08-05T02:25:30.000Z"}"#,
+                r#"{"type":"message","id":"b","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"an answer"}],"usage":{"input_tokens":42,"output_tokens":7,"cache_read_input_tokens":100,"cache_creation_input_tokens":5}},"timestamp":"2026-08-05T02:25:31.000Z"}"#,
+            ],
+        );
+        let parsed = parse_jsonl_events(&p).unwrap();
+        let metas: Vec<&str> = parsed
+            .events
+            .iter()
+            .map(|e| e.provider_metadata_json.as_str())
+            .collect();
+        // user text, assistant thinking, assistant text → 3 events.
+        assert_eq!(metas.len(), 3);
+        assert_eq!(metas[0], "{}", "user lines carry no usage metadata");
+        let m: serde_json::Value = serde_json::from_str(metas[1]).unwrap();
+        assert_eq!(m["model"], "claude-sonnet-4-5");
+        assert_eq!(m["usage"]["input_tokens"], 42);
+        assert_eq!(m["usage"]["output_tokens"], 7);
+        assert_eq!(m["usage"]["cache_read_input_tokens"], 100);
+        assert_eq!(m["usage"]["cache_creation_input_tokens"], 5);
+        assert_eq!(
+            metas[2], "{}",
+            "only the FIRST event of a line carries the line's usage/model"
+        );
+    }
 
     #[test]
     fn pi_assemble_extracts_id_title_summary_project_and_times() {

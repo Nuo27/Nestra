@@ -260,7 +260,36 @@
     "toolNoId": " · 无 id",
     "revealSourceAria": "显示源文件",
     "revealSelectedAria": "在文件管理器中显示所选",
-    "rescanFailed": "重新扫描会话失败：{err}"
+    "rescanFailed": "重新扫描会话失败：{err}",
+    "handoffGenerate": "生成交接",
+    "handoffTitle": "会话交接",
+    "handoffDialogDesc": "保存前可编辑——这份 markdown 就是下一个会话要读的内容。",
+    "handoffPreviewFailed": "生成交接失败",
+    "handoffSaveButton": "保存交接",
+    "handoffSaveFailed": "保存交接失败",
+    "handoffSaved": "交接已保存",
+    "handoffHistory_other": "{{count}} 份交接",
+    "handoffTokens": "≈{{tok}} tok",
+    "pressureLine": "上下文 ~{{pct}}%(~{{tok}} tok)",
+    "pressureHigh": "· 接近满载,建议交接",
+    "topConsumer": "最大占用:{{what}}",
+    "handoffInjectTip": "注入 .pi/(附加一行可移除的引用)",
+    "handoffInjected": "已注入:{{path}}",
+    "handoffInjectFailed": "注入失败",
+    "handoffRemoveTip": "移除注入的 .pi/ 副本与引用",
+    "handoffKnowledgeTip": "保存为知识文件",
+    "handoffKnowledgeSaved": "知识文件:{{path}}",
+    "handoffKnowledgeFailed": "写入知识文件失败",
+    "handoffDeleteTip": "从索引移除(文件保留)",
+    "handoffDeleteTitle": "移除交接?",
+    "handoffDeleteBody": "仅从 Nestra 索引中移除;markdown 文件保留在磁盘上。",
+    "handoffDeleted": "已从索引移除",
+    "handoffDeleteFailed": "移除失败",
+    "reviewThisTip": "评审此会话(Pi)",
+    "handoffSpawnTip": "以此交接启动一个新的受管 Pi 会话",
+    "handoffSpawned": "交接会话启动中…",
+    "handoffSpawnFailed": "启动交接会话失败",
+    "handoffSpawnReady": "交接已送达——新会话已记录"
   },
   "skills": {
     "title": "技能",
@@ -371,7 +400,9 @@
     "envOverride": "环境变量覆盖 · {{agent}}",
     "needsName": "服务器需要名称。",
     "loadFailed": "加载 MCP 服务器失败。",
-    "importScanFailed": "扫描可导入服务器失败。"
+    "importScanFailed": "扫描可导入服务器失败。",
+    "usageObserved": "观察到 {{n}} 次调用 · {{rel}}",
+    "usageNone": "未观察到调用"
   },
   "settings": {
     "title": "设置",
@@ -624,7 +655,9 @@
     "detectedRolesHint": "路由请求中出现的子代理角色 · 在路由页面编辑策略",
     "roleChipTip": "{{count}} 次请求 · 编辑 {{role}} 的策略",
     "noGatewayTraffic": "无网关流量",
-    "noGatewayTrafficHint": "一旦此智能体被路由且请求流过，每个任务都会出现在这里，包含完整的路由谱系：请求的模型 → 解析的提供商、路由原因、提示缓存指标和代次中断标志。"
+    "noGatewayTrafficHint": "一旦此智能体被路由且请求流过，每个任务都会出现在这里，包含完整的路由谱系：请求的模型 → 解析的提供商、路由原因、提示缓存指标和代次中断标志。",
+    "reviewTitle": "评审运行时",
+    "reviewHint": "在完成的工作上派生隔离评审会话"
   },
   "routingPolicy": {
     "notSaved": "策略未保存",
@@ -832,5 +865,27 @@
       "deepseek_auto": "DeepSeek 自动",
       "openrouter_passthrough": "OpenRouter 透传"
     }
+  },
+  "agentReview": {
+    "titleSuffix": "评审",
+    "help": "在已完成的工作上派生一个隔离的 Pi 评审会话。它以 pi:reviewer 角色经网关路由,实时展示评审过程并返回裁决——不触碰主上下文。",
+    "newTitle": "新建评审",
+    "newHint": "评审是一个独立的 Pi 会话,按 pi:reviewer 策略路由到对应端点。",
+    "pickSession": "选择一个 Pi 会话…",
+    "startButton": "开始评审",
+    "started": "评审已启动",
+    "startFailed": "启动评审失败",
+    "runnerTitle": "评审",
+    "abortTip": "中止评审",
+    "aborted": "评审已中止",
+    "abortFailed": "中止失败",
+    "waiting": "等待评审事件…",
+    "historyTitle": "评审记录",
+    "empty": "还没有评审。",
+    "statusPending": "待启动",
+    "statusReviewing": "评审中",
+    "statusVerdict": "已裁决",
+    "statusFailed": "失败",
+    "statusAborted": "已中止"
   }
 }

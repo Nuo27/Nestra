@@ -2,7 +2,19 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { ExternalLink, FolderOpen, Trash2, Copy, Check } from "lucide-react";
+import {
+  ExternalLink,
+  FolderOpen,
+  Trash2,
+  Copy,
+  Check,
+  FileOutput,
+  FileInput,
+  FileX2,
+  BookMarked,
+  ShieldCheck,
+  Rocket,
+} from "lucide-react";
 import {
   sessionChildren,
   sessionDelete,
@@ -10,8 +22,16 @@ import {
   sessionOpen,
   sessionRead,
   sessionReveal,
+  sessionContextPressure,
+  handoffList,
+  handoffInject,
+  handoffInjectRemove,
+  handoffToKnowledge,
+  handoffDelete,
+  handoffSpawn,
   type Session,
 } from "../../ipc";
+import { listen } from "@tauri-apps/api/event";
 import { extractError } from "../../ipc/errors";
 import { formatRelative } from "../../lib/format";
 import { providerMeta } from "../../lib/sessionsMeta";
@@ -31,13 +51,17 @@ import { useCopy } from "../../lib/useCopy";
 import { SessionLineage } from "../orchestration/SessionLineage";
 import { SubagentTree } from "./SubagentTree";
 import { SessionMessageRows } from "./SessionMessageRows";
+import { HandoffDialog } from "./HandoffDialog";
 
 const PAGE = 100;
+
+const kTok = (n: number) => `${(n / 1000).toFixed(1)}k`;
 
 export function SessionDetail({ id, provider }: { id: string; provider: string }) {
   const { t } = useTranslation();
   const [shown, setShown] = useState(PAGE);
   const [actionErr, setActionErr] = useState<string | null>(null);
+  const [handoffOpen, setHandoffOpen] = useState(false);
   const [copiedResume, copyResume] = useCopy();
   const [copiedPath, copyPath] = useCopy();
   const toast = useUI((s) => s.pushToast);
@@ -114,6 +138,63 @@ export function SessionDetail({ id, provider }: { id: string; provider: string }
     queryFn: () => sessionChildren(provider, id),
     enabled: (session?.child_count ?? 0) > 0,
   });
+  // Context pressure (estimate) + handoff history — both derived reads over
+  // the session's parts (Context Lifecycle R1).
+  const pressureQuery = useQuery({
+    queryKey: qk.sessionPressure(provider, id),
+    queryFn: () => sessionContextPressure(provider, id),
+  });
+  const handoffsQuery = useQuery({
+    queryKey: qk.handoffs(provider, id),
+    queryFn: () => handoffList(provider, id),
+  });
+
+  const handleInject = async (handoffId: string) => {
+    try {
+      const path = await handoffInject(handoffId);
+      toast(t("sessions.handoffInjected", { path }), "success");
+    } catch (err) {
+      toast(extractError(err) ?? t("sessions.handoffInjectFailed"), "error");
+    }
+  };
+  const handleKnowledge = async (handoffId: string) => {
+    try {
+      const path = await handoffToKnowledge(handoffId);
+      toast(t("sessions.handoffKnowledgeSaved", { path }), "success");
+    } catch (err) {
+      toast(extractError(err) ?? t("sessions.handoffKnowledgeFailed"), "error");
+    }
+  };
+  const handleHandoffDelete = async (handoffId: string) => {
+    const ok = await confirmDialog({
+      title: t("sessions.handoffDeleteTitle"),
+      body: t("sessions.handoffDeleteBody"),
+      confirmLabel: t("common.delete"),
+    });
+    if (!ok) return;
+    try {
+      await handoffDelete(handoffId);
+      toast(t("sessions.handoffDeleted"), "success");
+    } catch (err) {
+      toast(extractError(err) ?? t("sessions.handoffDeleteFailed"), "error");
+    }
+    invalidate(qc, "handoff");
+  };
+  // Supervised RPC injection: seed a fresh Pi session with the handoff, then
+  // surface the landing (target session id) when the done event arrives.
+  const handleHandoffSpawn = async (handoffId: string) => {
+    try {
+      await handoffSpawn(handoffId);
+      toast(t("sessions.handoffSpawned"), "success");
+      const unlistenP = listen(`handoff:${handoffId}:done`, () => {
+        toast(t("sessions.handoffSpawnReady"), "success");
+        invalidate(qc, "handoff");
+        void unlistenP.then((u) => u());
+      });
+    } catch (err) {
+      toast(extractError(err) ?? t("sessions.handoffSpawnFailed"), "error");
+    }
+  };
 
   return (
     <div className="w-full p-4">
@@ -134,8 +215,27 @@ export function SessionDetail({ id, provider }: { id: string; provider: string }
           {session?.cwd && <span className="min-w-0 max-w-[50%] truncate font-mono">· {session.cwd}</span>}
           <span className="tabular">· {t("sessions.messagesCount", { n: total })}</span>
           {session && <span>· {t("sessions.updatedAt", { rel: formatRelative(session.updated_at) })}</span>}
+          {pressureQuery.data && pressureQuery.data.est_tokens > 0 && (
+            <span className="tabular">
+              ·{" "}
+              {t("sessions.pressureLine", {
+                pct: pressureQuery.data.pct,
+                tok: kTok(pressureQuery.data.est_tokens),
+              })}
+              {pressureQuery.data.pct >= 90 ? ` ${t("sessions.pressureHigh")}` : ""}
+              {pressureQuery.data.top_consumer
+                ? ` ${t("sessions.topConsumer", { what: pressureQuery.data.top_consumer })}`
+                : ""}
+            </span>
+          )}
         </div>
         <ButtonGroup className="mt-3" justify="end" space="loose" wrap>
+          {/* Labeled featured action (Context Lifecycle): opens the editable
+              handoff preview dialog. */}
+          <Button size="sm" variant="secondary" onClick={() => setHandoffOpen(true)}>
+            <FileOutput data-icon size={12} />
+            {t("sessions.handoffGenerate")}
+          </Button>
           {/* Icon-only compact cluster (DESIGN.md §4 rule 2): the label lives
               in the Tip, never as a second text element. Open only renders
               for resumable sessions — desktop providers (opencode/zcode)
@@ -178,6 +278,22 @@ export function SessionDetail({ id, provider }: { id: string; provider: string }
               </Button>
             </Tip>
           )}
+          {/* Review Runtime entry (Pi only): jump to the review page with this
+              session preselected. */}
+          {provider === "pi-cli" && (
+            <Tip content={t("sessions.reviewThisTip")}>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() =>
+                  navigate({ to: "/agents/$id/review", params: { id: "pi-cli" }, search: { session: id } })
+                }
+                aria-label={t("sessions.reviewThisTip")}
+              >
+                <ShieldCheck data-icon size={12} />
+              </Button>
+            </Tip>
+          )}
           <Tip content={t("sessions.deleteTip")}>
             <Button size="sm" variant="danger" onClick={handleDelete} aria-label={t("sessions.deleteAria")}>
               <Trash2 data-icon size={12} />
@@ -199,6 +315,91 @@ export function SessionDetail({ id, provider }: { id: string; provider: string }
           logical session, with their route history. Only renders when the
           gateway has actually routed traffic for this session. */}
       <SessionLineage sessionId={id} />
+
+      {/* handoff history (Context Lifecycle R1): artifacts generated from this
+          session, newest-first. Row actions: inject into .pi/, promote to a
+          knowledge file, drop the index row (the file stays). */}
+      {handoffsQuery.data && handoffsQuery.data.length > 0 && (
+        <Card className="mt-4" padding="sm">
+          <SectionLabel className="mb-1.5">
+            {t("sessions.handoffHistory", { count: handoffsQuery.data.length })}
+          </SectionLabel>
+          <ul className="divide-y divide-border">
+            {handoffsQuery.data.map((h) => (
+              <li key={h.id} className="flex items-center gap-2 py-1.5">
+                <span className="tabular text-xs text-subtle">
+                  {formatRelative(h.created_at)}
+                </span>
+                {h.token_snapshot != null && (
+                  <span className="tabular text-xs text-subtle">
+                    {t("sessions.handoffTokens", { tok: kTok(h.token_snapshot) })}
+                  </span>
+                )}
+                <span className="min-w-0 flex-1 truncate font-mono text-xs text-subtle">
+                  {h.artifact_path}
+                </span>
+                {h.target_session_id && (
+                  <span className="shrink-0 font-mono text-2xs text-subtle">
+                    → {h.target_session_id.slice(0, 8)}
+                  </span>
+                )}
+                <Tip content={t("sessions.handoffSpawnTip")}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleHandoffSpawn(h.id)}
+                    aria-label={t("sessions.handoffSpawnTip")}
+                  >
+                    <Rocket data-icon size={12} />
+                  </Button>
+                </Tip>
+                <Tip content={t("sessions.handoffInjectTip")}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleInject(h.id)}
+                    aria-label={t("sessions.handoffInjectTip")}
+                  >
+                    <FileInput data-icon size={12} />
+                  </Button>
+                </Tip>
+                <Tip content={t("sessions.handoffRemoveTip")}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handoffInjectRemove(h.id).catch((e) => toast(extractError(e) ?? t("sessions.handoffInjectFailed"), "error"))}
+                    aria-label={t("sessions.handoffRemoveTip")}
+                  >
+                    <FileX2 data-icon size={12} />
+                  </Button>
+                </Tip>
+                <Tip content={t("sessions.handoffKnowledgeTip")}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleKnowledge(h.id)}
+                    aria-label={t("sessions.handoffKnowledgeTip")}
+                  >
+                    <BookMarked data-icon size={12} />
+                  </Button>
+                </Tip>
+                <Tip content={t("sessions.handoffDeleteTip")}>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    onClick={() => handleHandoffDelete(h.id)}
+                    aria-label={t("sessions.handoffDeleteTip")}
+                  >
+                    <Trash2 data-icon size={12} />
+                  </Button>
+                </Tip>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
+      <HandoffDialog provider={provider} sessionId={id} open={handoffOpen} onOpenChange={setHandoffOpen} />
 
       {/* subagents */}
       {children.data && children.data.length > 0 && (

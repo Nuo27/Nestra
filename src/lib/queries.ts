@@ -13,6 +13,7 @@ export const qk = {
   skills: () => ["skills"] as const,
   mcp: () => ["mcp"] as const,
   mcpImport: () => ["mcp-import"] as const,
+  mcpUsage: () => ["mcp-usage"] as const,
   sessions: (provider?: string, search?: string) =>
     ["sessions", provider ?? "", search ?? ""] as const,
   session: (provider: string, id: string) => ["session", provider, id] as const,
@@ -20,6 +21,11 @@ export const qk = {
     ["session-messages", provider, id, shown] as const,
   sessionChildren: (provider: string, id: string) =>
     ["session-children", provider, id] as const,
+  sessionPressure: (provider: string, id: string) =>
+    ["session-pressure", provider, id] as const,
+  handoffs: (provider: string, id: string) => ["handoffs", provider, id] as const,
+  reviews: () => ["reviews"] as const,
+  review: (id: string) => ["review", id] as const,
   agentConfig: (agentId: string) => ["agent-config", agentId] as const,
   quotaRefresh: () => ["quota-refresh"] as const,
   opencodeCreds: (endpointId: string) => ["opencode-creds", endpointId] as const,
@@ -55,8 +61,10 @@ export const qk = {
 export const INVALIDATION: Record<string, readonly string[]> = {
   endpoint: ["endpoint", "endpoints", "endpoint-quota"],
   agent: ["agents", "agent-config"],
-  macro: ["skills", "mcp", "mcp-import"],
+  macro: ["skills", "mcp", "mcp-import", "mcp-usage"],
   session: ["sessions", "session", "session-messages", "session-children"],
+  handoff: ["handoffs"],
+  review: ["reviews", "review"],
   quota: ["quota-refresh", "endpoint-quota", "opencode-creds", "keepalive-preview", "keepalive-status"],
   settings: ["settings"],
   diag: ["diag"],

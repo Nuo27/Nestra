@@ -266,7 +266,37 @@
     "toolNoId": " · no id",
     "revealSourceAria": "Reveal source file",
     "revealSelectedAria": "Reveal selected in file manager",
-    "rescanFailed": "Failed to rescan sessions: {err}"
+    "rescanFailed": "Failed to rescan sessions: {err}",
+    "handoffGenerate": "Generate handoff",
+    "handoffTitle": "Handoff",
+    "handoffDialogDesc": "Edit before saving — this markdown is what the next session reads.",
+    "handoffPreviewFailed": "Failed to build handoff",
+    "handoffSaveButton": "Save handoff",
+    "handoffSaveFailed": "Failed to save handoff",
+    "handoffSaved": "Handoff saved",
+    "handoffHistory_one": "{{count}} handoff",
+    "handoffHistory_other": "{{count}} handoffs",
+    "handoffTokens": "≈{{tok}} tok",
+    "pressureLine": "context ~{{pct}}% (~{{tok}} tok)",
+    "pressureHigh": "· nearly full — consider a handoff",
+    "topConsumer": "top: {{what}}",
+    "handoffInjectTip": "Inject into .pi/ (adds a removable reference)",
+    "handoffInjected": "Injected: {{path}}",
+    "handoffInjectFailed": "Handoff inject failed",
+    "handoffRemoveTip": "Remove the injected .pi/ copy + reference",
+    "handoffKnowledgeTip": "Save as knowledge file",
+    "handoffKnowledgeSaved": "Knowledge file: {{path}}",
+    "handoffKnowledgeFailed": "Failed to write knowledge file",
+    "handoffDeleteTip": "Remove from index (file stays)",
+    "handoffDeleteTitle": "Remove handoff?",
+    "handoffDeleteBody": "Removes the handoff from Nestra's index. The markdown file stays on disk.",
+    "handoffDeleted": "Removed from index",
+    "handoffDeleteFailed": "Failed to remove handoff",
+    "reviewThisTip": "Review this session (Pi)",
+    "handoffSpawnTip": "Open a new supervised Pi session seeded with this handoff",
+    "handoffSpawned": "Handoff session spawning…",
+    "handoffSpawnFailed": "Failed to spawn handoff session",
+    "handoffSpawnReady": "Handoff landed — new session recorded"
   },
   "skills": {
     "title": "Skills",
@@ -377,7 +407,9 @@
     "envOverride": "Env override · {{agent}}",
     "needsName": "Server needs a name.",
     "loadFailed": "Failed to load MCP servers.",
-    "importScanFailed": "Failed to scan for importable servers."
+    "importScanFailed": "Failed to scan for importable servers.",
+    "usageObserved": "observed {{n}} calls · {{rel}}",
+    "usageNone": "no invocations observed"
   },
   "settings": {
     "title": "Settings",
@@ -630,7 +662,9 @@
     "detectedRolesHint": "subagent roles seen on routed requests · edit policies on the routing page",
     "roleChipTip": "{{count}} requests · edit policy for {{role}}",
     "noGatewayTraffic": "no gateway traffic",
-    "noGatewayTrafficHint": "Once this agent is routed and a request flows through, each task appears here with its full route lineage: requested model → resolved provider, route reason, prompt-cache metrics, and generation-broken flags."
+    "noGatewayTrafficHint": "Once this agent is routed and a request flows through, each task appears here with its full route lineage: requested model → resolved provider, route reason, prompt-cache metrics, and generation-broken flags.",
+    "reviewTitle": "Review runtime",
+    "reviewHint": "Spawn isolated review sessions on finished work"
   },
   "routingPolicy": {
     "notSaved": "Policy not saved",
@@ -838,5 +872,27 @@
       "deepseek_auto": "deepseek auto",
       "openrouter_passthrough": "openrouter passthrough"
     }
+  },
+  "agentReview": {
+    "titleSuffix": "Review",
+    "help": "Spawn an isolated Pi review session on completed work. It routes through the gateway as the pi:reviewer role, watches the review live, and returns a verdict without touching the main context.",
+    "newTitle": "New review",
+    "newHint": "The review runs as a separate Pi session routed to the pi:reviewer policy's endpoint.",
+    "pickSession": "Pick a Pi session…",
+    "startButton": "Start review",
+    "started": "Review started",
+    "startFailed": "Failed to start review",
+    "runnerTitle": "Review",
+    "abortTip": "Abort review",
+    "aborted": "Review aborted",
+    "abortFailed": "Abort failed",
+    "waiting": "Waiting for review events…",
+    "historyTitle": "Reviews",
+    "empty": "No reviews yet.",
+    "statusPending": "pending",
+    "statusReviewing": "reviewing",
+    "statusVerdict": "verdict",
+    "statusFailed": "failed",
+    "statusAborted": "aborted"
   }
 }
