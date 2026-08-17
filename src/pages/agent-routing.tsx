@@ -8,6 +8,7 @@ import { Skeleton } from "../components/ui/skeleton";
 import { SectionHeader } from "../components/layout/SectionHeader";
 import { RoutingPolicyEditor } from "../components/orchestration/RoutingPolicyEditor";
 import { RoutedGate } from "../components/orchestration/RoutedGate";
+import { SteadyRouteCard } from "../components/orchestration/SteadyRouteCard";
 import { ModeSwitch } from "../components/orchestration/ModeSwitch";
 import { Workflow } from "lucide-react";
 import { agentList } from "../ipc";
@@ -61,16 +62,19 @@ export function AgentRoutingPage({ id }: { id: string }) {
         title={t("agentRouting.gateTitle")}
         hint={t("agentRouting.gateHint")}
       >
-        <Card padding="none">
-          <SectionHeader
-            icon={<Workflow data-icon size={14} />}
-            title={t("agentRouting.policyTitle")}
-            hint={t("agentRouting.policyHint")}
-          />
-          <div className="p-3">
-            <RoutingPolicyEditor agentId={agent.id} />
-          </div>
-        </Card>
+        <div className="space-y-3">
+          <SteadyRouteCard agentId={agent.id} />
+          <Card padding="none">
+            <SectionHeader
+              icon={<Workflow data-icon size={14} />}
+              title={t("agentRouting.policyTitle")}
+              hint={t("agentRouting.policyHint")}
+            />
+            <div className="p-3">
+              <RoutingPolicyEditor agentId={agent.id} />
+            </div>
+          </Card>
+        </div>
       </RoutedGate>
     </Page>
   );

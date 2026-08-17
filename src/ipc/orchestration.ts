@@ -103,11 +103,14 @@ export interface ResolvePreview {
   cache_strategy: string; // "off" | "anthropicexplicit" | "deepseekauto" | "openrouterpassthrough"
   requested_model: string | null;
   requested_provider: string | null;
+  /** The resolved model's context window (tokens) — what a routed alias
+   *  advertises. `null` when the catalog carries no abilities for it. */
+  context_window: number | null;
 }
 
 /// Dry-run the router. All capability fields are optional hints; pass only
 /// the ones the Task requires. `role` is a policy-role key
-/// ("main" | "*" | "claude:x" | "pi:x" | "opencode:x").
+/// ("main" | "*" | "claude:x" | "pi:x" | "opencode:x" | "tier:haiku/sonnet/opus").
 export async function resolvePreview(input: {
   agentId: string;
   role?: string;

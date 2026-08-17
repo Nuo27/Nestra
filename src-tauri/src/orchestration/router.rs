@@ -300,7 +300,12 @@ pub struct RouterInputs<'a> {
 /// empty) so the caller can record the attempt uniformly; the only `Err`
 /// path is a DB/lookup failure that means we couldn't even attempt resolution.
 pub fn resolve(ctx: &TaskContext, inputs: &RouterInputs<'_>) -> AppResult<ResolvedRoute> {
-    let policy = store::routing_policy_for(inputs.conn, &ctx.agent_id, &ctx.policy_role_key())?;
+    let policy = store::routing_policy_for(
+        inputs.conn,
+        &ctx.agent_id,
+        &ctx.policy_role_key(),
+        ctx.budget_tier.as_ref(),
+    )?;
     let scope = AffinityScope::from_policy_str(&policy.affinity_scope);
 
     // 1. Explicit pin (highest priority). Policy still applies: the pinned
@@ -352,6 +357,48 @@ pub fn resolve(ctx: &TaskContext, inputs: &RouterInputs<'_>) -> AppResult<Resolv
         cache_strategy: CacheStrategy::Off,
         reason: RouteReason::NoEligible,
         route_lineage: Vec::new(),
+    })
+}
+
+/// The steady-state route for one agent: what `resolve` picks for a fresh
+/// main-role task under the current policy — i.e. the model a routed agent's
+/// requests actually land on absent affinity/failover. Used to advertise the
+/// REAL model abilities (context window above all) in agent configs
+/// (`GatewayAlias`) and in the gateway's `GET /v1/models`.
+#[derive(Debug, Clone)]
+pub struct SteadyStateRoute {
+    pub endpoint_id: String,
+    pub model_id: String,
+    /// Merged abilities from the model catalog (`None` when the catalog has no
+    /// row for the resolved model — callers degrade to placeholders).
+    pub abilities: Option<crate::model_abilities::ModelAbilities>,
+}
+
+/// Best-effort steady-state resolution for `tier` (`None` = unclassified /
+/// main). `None` is returned on ANY failure (no eligible endpoint, DB error)
+/// so callers can fall back to conservative placeholder values without
+/// failing the config write. Callers should ensure the catalog is fresh
+/// (`capability_registry::rebuild`) first.
+pub fn steady_state(
+    inputs: &RouterInputs<'_>,
+    agent_id: &str,
+    tier: Option<&super::identity::BudgetTier>,
+) -> Option<SteadyStateRoute> {
+    let mut ctx = TaskContext::new_task(agent_id, None);
+    ctx.budget_tier = tier.copied();
+    let route = resolve(&ctx, inputs).ok()?;
+    if route.endpoint_id.is_empty() || route.model.is_empty() {
+        return None; // fail-closed
+    }
+    let abilities = store::list_model_catalog(inputs.conn, &route.endpoint_id)
+        .ok()?
+        .into_iter()
+        .find(|r| r.model_id == route.model)
+        .and_then(|r| serde_json::from_str(&r.abilities_json).ok());
+    Some(SteadyStateRoute {
+        endpoint_id: route.endpoint_id,
+        model_id: route.model,
+        abilities,
     })
 }
 
@@ -814,6 +861,54 @@ mod tests {
         let r2 = resolve(&ctx2, &env.inputs()).unwrap();
         assert_eq!(r2.reason, RouteReason::Affinity, "same task_id must hit affinity");
         assert_eq!(r2.endpoint_id, "ep-1");
+    }
+
+    #[test]
+    fn subagent_role_policy_wins_over_tier_and_bound_default() {
+        // The tier layer (added between exact role and `*`) must not weaken
+        // subagent role routing: a claude:researcher request resolves via the
+        // researcher policy's preferred endpoint even when the request also
+        // carries a classifiable haiku tier AND a tier:haiku row exists.
+        let env = TestEnv::new();
+        seed_endpoint(&env.conn, "ep-bound", "anthropic", "https://x", "m-bound");
+        seed_endpoint(&env.conn, "ep-researcher", "anthropic", "https://y", "m-researcher");
+        seed_endpoint(&env.conn, "ep-tier", "anthropic", "https://z", "m-tier");
+        seed_binding(&env.conn, "claude-code-cli", "ep-bound");
+        capability_registry::rebuild(&env.conn).unwrap();
+
+        let now = chrono::Utc::now().timestamp_millis();
+        for (role, ep) in [("claude:researcher", "ep-researcher"), ("tier:haiku", "ep-tier")] {
+            store::upsert_routing_policy(
+                &env.conn,
+                &store::RoutingPolicyRow {
+                    agent_id: "claude-code-cli".into(),
+                    role: role.into(),
+                    preferred_endpoints: Some(format!(r#"["{ep}"]"#).into()),
+                    fallback_endpoints: None,
+                    allowed_models: None,
+                    migrate_on_quota: true,
+                    inject_cache_control: false,
+                    affinity_scope: "task".into(),
+                    updated_at: now,
+                },
+            )
+            .unwrap();
+        }
+
+        let mut ctx = TaskContext::new_task("claude-code-cli", None);
+        ctx.subagent_role = crate::orchestration::identity::SubagentRole::ClaudeAgent {
+            name: "researcher".into(),
+        };
+        ctx.budget_tier = Some(crate::orchestration::identity::BudgetTier::Haiku);
+        let r = resolve(&ctx, &env.inputs()).unwrap();
+        assert_eq!(r.endpoint_id, "ep-researcher", "exact role policy must beat tier:*");
+        assert_eq!(r.model, "m-researcher");
+
+        // Same agent, main thread + haiku tier (no role row) → the tier row.
+        let mut ctx = TaskContext::new_task("claude-code-cli", None);
+        ctx.budget_tier = Some(crate::orchestration::identity::BudgetTier::Haiku);
+        let r = resolve(&ctx, &env.inputs()).unwrap();
+        assert_eq!(r.endpoint_id, "ep-tier");
     }
 
     #[test]

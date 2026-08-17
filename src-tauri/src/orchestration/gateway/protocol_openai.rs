@@ -46,11 +46,11 @@ pub async fn handle(
     agent_id: &str,
 ) -> Result<Response<GatewayBody>, AppError> {
     // OpenCode/AI-SDK probes the model catalog via `GET {base}/models` before
-    // the first chat. Answer it with the gateway's placeholder alias — the
-    // router rewrites the real model per-task, so this list only feeds the
-    // client's picker.
+    // the first chat. Answer with the alias entry carrying the REAL
+    // steady-state abilities for this agent — a placeholder 200k limit lies
+    // about the actual window the router will serve.
     if req.method() == Method::GET && path_is_models(req.uri().path()) {
-        return Ok(models_response());
+        return Ok(models_response(&state, agent_id).await);
     }
     if req.method() != Method::POST || !path_is_chat_completions(req.uri().path()) {
         return Ok(error_response(
@@ -79,6 +79,12 @@ pub async fn handle_bytes(
     let mut ctx = TaskContext::new_task(agent_id, None);
     ctx.protocol_hint = Some(ProviderKind::Openai);
     ctx.requested_model = requested_model;
+    // Tier intent from the model id (no-op for the generic "nestra" alias,
+    // but a real-tier id classifies the same as on the Anthropic path).
+    ctx.budget_tier = ctx
+        .requested_model
+        .as_deref()
+        .and_then(crate::orchestration::identity::BudgetTier::from_model_id);
     ctx.lifecycle = TaskLifecycle::Routed;
     let started_at = chrono::Utc::now().timestamp_millis();
 
@@ -340,13 +346,19 @@ pub(super) fn path_is_models(p: &str) -> bool {
     false
 }
 
-/// `GET /models` answer: the gateway's single placeholder model. The alias
-/// for every non-Claude agent is `nestra` (commands.rs `apply_gateway_alias`);
-/// Claude Code never reaches the OpenAI path. The router rewrites the real
-/// model per-task, so this list only feeds the client's picker — the
-/// `limit`/`tool_call` fields are neutral placeholders so OpenAI-compatible
-/// clients (AI SDK) can render a usable model entry with tool support.
-fn models_payload() -> serde_json::Value {
+/// `GET /models` answer: the gateway's single alias entry (`nestra` — the id
+/// every non-Claude agent's config sends; Claude Code never reaches the
+/// OpenAI path). The `limit`/flag fields carry the abilities of the model the
+/// router resolves in the steady state for this agent, so OpenAI-compatible
+/// clients (AI SDK) render the real context window. Neutral placeholders when
+/// nothing resolves (no endpoints / cold catalog).
+fn models_payload(abilities: Option<&crate::model_abilities::ModelAbilities>) -> serde_json::Value {
+    let (context, output) = abilities
+        .and_then(|a| a.limit.as_ref())
+        .map(|l| (l.context, l.output))
+        .unwrap_or((200_000, 8_192));
+    let reasoning = abilities.and_then(|a| a.reasoning).unwrap_or(true);
+    let tool_call = abilities.and_then(|a| a.tool_call).unwrap_or(true);
     serde_json::json!({
         "object": "list",
         "data": [{
@@ -354,15 +366,32 @@ fn models_payload() -> serde_json::Value {
             "object": "model",
             "created": 0,
             "owned_by": "nestra-gw",
-            "limit": { "context": 200000, "output": 8192 },
-            "tool_call": true,
-            "reasoning": true,
+            "limit": { "context": context, "output": output },
+            "tool_call": tool_call,
+            "reasoning": reasoning,
         }],
     })
 }
 
-pub(super) fn models_response() -> Response<GatewayBody> {
-    let body = models_payload();
+/// Resolve the agent's steady-state abilities on the gateway's own connection
+/// (live health/quota; a scratch affinity so the probe never pollutes the
+/// process-global affinity map) and answer `GET /models` with them.
+async fn models_response(state: &GatewayState, agent_id: &str) -> Response<GatewayBody> {
+    let abilities = {
+        let conn = state.db.lock().await;
+        // Fresh catalog so the advertised limits match current endpoint
+        // config (same rebuild the alias write performs). Best-effort.
+        let _ = crate::orchestration::capability_registry::rebuild(&conn);
+        let scratch_affinity = router::RouteAffinity::new();
+        let inputs = RouterInputs {
+            conn: &conn,
+            health: &state.health,
+            quota: &state.quota,
+            affinity: &scratch_affinity,
+        };
+        router::steady_state(&inputs, agent_id, None).and_then(|s| s.abilities)
+    };
+    let body = models_payload(abilities.as_ref());
     let mut resp = Response::new(GatewayBody::json_full(body));
     *resp.status_mut() = StatusCode::OK;
     resp.headers_mut().insert(
@@ -509,14 +538,37 @@ mod tests {
     }
 
     #[test]
-    fn models_payload_carries_placeholder_capabilities() {
-        let v = models_payload();
+    fn models_payload_falls_back_to_placeholder_capabilities() {
+        let v = models_payload(None);
         let m = &v["data"][0];
         assert_eq!(m["id"], "nestra");
         assert_eq!(m["tool_call"], true);
         assert_eq!(m["reasoning"], true);
-        assert!(m["limit"]["context"].is_number());
-        assert!(m["limit"]["output"].is_number());
+        assert_eq!(m["limit"]["context"], 200_000);
+        assert_eq!(m["limit"]["output"], 8_192);
+    }
+
+    #[test]
+    fn models_payload_carries_real_abilities_when_resolved() {
+        let a = crate::model_abilities::ModelAbilities {
+            reasoning: Some(false),
+            tool_call: Some(true),
+            attachment: None,
+            temperature: None,
+            limit: Some(crate::model_abilities::ModelLimit {
+                context: 1_000_000,
+                output: 64_000,
+                input: None,
+            }),
+            modalities: None,
+            api: None,
+        };
+        let v = models_payload(Some(&a));
+        let m = &v["data"][0];
+        assert_eq!(m["limit"]["context"], 1_000_000);
+        assert_eq!(m["limit"]["output"], 64_000);
+        assert_eq!(m["reasoning"], false, "honest flags, not blanket true");
+        assert_eq!(m["tool_call"], true);
     }
 
     /// End-to-end "does it actually work" check: one OpenAI chat request for

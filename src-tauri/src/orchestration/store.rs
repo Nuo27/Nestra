@@ -92,16 +92,28 @@ pub fn upsert_routing_policy(conn: &Connection, row: &RoutingPolicyRow) -> AppRe
     Ok(())
 }
 
-/// Look up the most specific policy for `(agent_id, role)`, falling back to the
-/// agent's `role = "*"` catch-all, then to a synthesized default. Never errors
-/// on a missing row — the router always gets *some* policy.
+/// Look up the most specific policy for `(agent_id, role)`, falling back to
+/// the agent's tier row (`tier:haiku`/`tier:sonnet`/`tier:opus` — only when the
+/// request carried a classifiable budget tier), then the `role = "*"`
+/// catch-all, then a synthesized default. Never errors on a missing row — the
+/// router always gets *some* policy.
+///
+/// Specificity order: exact role > tier > wildcard. A subagent's own policy
+/// (e.g. `claude:researcher`) therefore still governs all of its requests,
+/// including its background-tier ones.
 pub fn routing_policy_for(
     conn: &Connection,
     agent_id: &str,
     role: &str,
+    tier: Option<&super::identity::BudgetTier>,
 ) -> AppResult<RoutingPolicyRow> {
     if let Some(row) = routing_policy_exact(conn, agent_id, role)? {
         return Ok(row);
+    }
+    if let Some(t) = tier {
+        if let Some(row) = routing_policy_exact(conn, agent_id, &t.as_policy_key())? {
+            return Ok(row);
+        }
     }
     if let Some(row) = routing_policy_exact(conn, agent_id, "*")? {
         return Ok(row);
@@ -771,7 +783,7 @@ mod tests {
         let conn = fresh_db();
         let now = 1_700_000_000;
         // No row → falls back to a synthesized default (task affinity, no injection).
-        let p = routing_policy_for(&conn, "claude-code-cli", "claude:researcher").unwrap();
+        let p = routing_policy_for(&conn, "claude-code-cli", "claude:researcher", None).unwrap();
         assert_eq!(p.affinity_scope, "task");
         assert!(!p.inject_cache_control);
         assert!(p.migrate_on_quota);
@@ -809,17 +821,75 @@ mod tests {
         .unwrap();
 
         // Specific role wins.
-        let p = routing_policy_for(&conn, "claude-code-cli", "claude:researcher").unwrap();
+        let p = routing_policy_for(&conn, "claude-code-cli", "claude:researcher", None).unwrap();
         assert_eq!(p.role, "claude:researcher");
         assert!(p.inject_cache_control);
         assert!(!p.migrate_on_quota);
         assert_eq!(p.affinity_scope, "session");
 
         // Unknown role falls back to the catch-all.
-        let p = routing_policy_for(&conn, "claude-code-cli", "claude:other").unwrap();
+        let p = routing_policy_for(&conn, "claude-code-cli", "claude:other", None).unwrap();
         assert_eq!(p.role, "*");
         assert!(!p.inject_cache_control);
         assert_eq!(p.preferred_endpoints.as_deref(), Some(r#"["ep-x"]"#));
+    }
+
+    /// Lookup specificity with a budget tier in play: exact role > tier row >
+    /// `*` catch-all > synthesized default.
+    #[test]
+    fn routing_policy_tier_sits_between_role_and_catch_all() {
+        use super::super::identity::BudgetTier;
+        let conn = fresh_db();
+        let now = 1_700_000_000;
+        for role in ["tier:haiku", "*"] {
+            upsert_routing_policy(
+                &conn,
+                &RoutingPolicyRow {
+                    agent_id: "claude-code-cli".into(),
+                    role: role.into(),
+                    preferred_endpoints: Some(format!(r#"["{role}-ep"]"#).into()),
+                    fallback_endpoints: None,
+                    allowed_models: None,
+                    migrate_on_quota: true,
+                    inject_cache_control: false,
+                    affinity_scope: "task".into(),
+                    updated_at: now,
+                },
+            )
+            .unwrap();
+        }
+
+        // No tier → straight to the catch-all.
+        let p = routing_policy_for(&conn, "claude-code-cli", "main", None).unwrap();
+        assert_eq!(p.role, "*");
+        // Haiku tier → the tier row (between exact role and catch-all).
+        let p =
+            routing_policy_for(&conn, "claude-code-cli", "main", Some(&BudgetTier::Haiku)).unwrap();
+        assert_eq!(p.role, "tier:haiku");
+        // An exact role row still outranks the tier row.
+        upsert_routing_policy(
+            &conn,
+            &RoutingPolicyRow {
+                agent_id: "claude-code-cli".into(),
+                role: "claude:researcher".into(),
+                preferred_endpoints: Some(r#"["role-ep"]"#.into()),
+                fallback_endpoints: None,
+                allowed_models: None,
+                migrate_on_quota: true,
+                inject_cache_control: false,
+                affinity_scope: "task".into(),
+                updated_at: now,
+            },
+        )
+        .unwrap();
+        let p = routing_policy_for(
+            &conn,
+            "claude-code-cli",
+            "claude:researcher",
+            Some(&BudgetTier::Haiku),
+        )
+        .unwrap();
+        assert_eq!(p.role, "claude:researcher");
     }
 
     #[test]

@@ -441,7 +441,7 @@ fn gateway_body_text(body: &GatewayBody) -> String {
 /// can disable it). Best-effort: on error, defaults to allowing migration.
 pub async fn read_migrate_policy(state: &GatewayState, ctx: &TaskContext) -> bool {
     let conn = state.db.lock().await;
-    store::routing_policy_for(&conn, &ctx.agent_id, &ctx.policy_role_key())
+    store::routing_policy_for(&conn, &ctx.agent_id, &ctx.policy_role_key(), ctx.budget_tier.as_ref())
         .map(|p| p.migrate_on_quota)
         .unwrap_or(true)
 }

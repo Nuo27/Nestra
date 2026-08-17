@@ -25,7 +25,7 @@
     "moveUp": "上移 {{name}}",
     "moveDown": "下移 {{name}}",
     "removeItem": "移除 {{name}}",
-    "addEndpoint": "+ 添加端点…",
+    "addEndpoint": "+ 添加 Provider…",
     "loadFailed": "加载失败。",
     "howItWorks": "工作原理"
   },
@@ -120,7 +120,7 @@
     "cardLite": "Lite",
     "cardTokenPlan": "token-plan",
     "planStatus": "查询",
-    "planTitleHint": "此端点用于读取配额的查询方案",
+    "planTitleHint": "此提供商用于读取配额的查询方案",
     "sending": "发送请求中",
     "nextIn": "{{n}} 秒后刷新",
     "verifying": "验证中…",
@@ -501,7 +501,7 @@
   },
   "providers": {
     "title": "提供商",
-    "help": "每个上游一个 LLM 端点和 API 密钥。每个 CLI 一次绑定一个提供商。路由策略和回退链在智能体页面按智能体配置。",
+    "help": "每个上游一个 LLM 提供商和 API 密钥。每个 CLI 一次绑定一个提供商。路由策略和回退链在智能体页面按智能体配置。",
     "createFailed": "创建提供商失败",
     "created": "提供商已创建",
     "createdValidated": "提供商已创建并通过验证",
@@ -510,7 +510,7 @@
     "protocolsFailed": "无法添加 {{n}} 个预设协议 — 请在编辑页面手动添加。",
     "none": {
       "title": "未配置 LLM 提供商",
-      "hint": "每个上游添加一个；Nestra 管理端点和密钥。"
+      "hint": "每个上游添加一个；Nestra 管理提供商和密钥。"
     },
     "badgeNoKey": "无密钥",
     "badgeInvalid": "密钥无效",
@@ -639,16 +639,21 @@
   "agentRouting": {
     "titleSuffix": "路由",
     "help": "策略将 (智能体, 角色) 映射到 首选 / 回退 / 允许模型。网关解析每个请求：显式 → 亲和 → 能力 → 失败关闭。",
+    "steadyTitle": "当前生效路由",
+    "steadyHint": "在当前策略下，新请求会解析到哪——试运行，不发送请求。保存策略后自动更新。",
+    "steadyContext": "{{n}} 上下文",
+    "steadyNoWindow": "上下文未知",
+    "steadyNoRoute": "无可用路由——检查提供商状态/配额与策略的模型白名单",
     "policyTitle": "路由策略",
-    "policyHint": "(智能体, 角色) → 首选 / 回退 / 允许模型",
+    "policyHint": "(智能体, 角色) → 首选 / 回退 / 允许模型 · 匹配顺序：精确角色 → 档位 tier:* → 通配 *",
     "gateTitle": "路由策略是 Routed 模式的功能",
-    "gateHint": "此智能体处于 Direct 模式 — 其配置作为普通提供商绑定写入。切换到 Routed 以配置 (智能体, 角色) → 端点链策略。"
+    "gateHint": "此智能体处于 Direct 模式 — 其配置作为普通提供商绑定写入。切换到 Routed 以配置 (智能体, 角色) → 提供商链策略。"
   },
   "agentDetail": {
     "helpGateway": "Direct 模式将真实提供商写入此智能体的配置。Routed 模式通过 Nestra 网关发送流量 — 按任务解析提供商/模型，支持配额感知回退和迁移。",
     "helpPlain": "已安装的编码智能体。",
     "policyTitle": "路由策略",
-    "policyHint": "(智能体, 角色) → 首选 / 回退 / 允许模型",
+    "policyHint": "(智能体, 角色) → 首选 / 回退 / 允许模型 · 匹配顺序：精确角色 → 档位 tier:* → 通配 *",
     "tasks": "任务",
     "tasksHint": "运行 → 任务 → 请求",
     "detectedRoles": "检测到的角色",
@@ -670,13 +675,17 @@
     "configuredTip": "此角色已配置策略",
     "createTip": "为 {{role}} 创建策略",
     "configured": "已配置",
+    "tierPresets": "档位策略：",
+    "tierTip": "为 {{role}} 创建策略 — 匹配 Claude Code 经对应模型槽位发出的请求（查找顺序：精确角色，其次档位，最后 *）。可用来把后台调用分流到更便宜的提供商。",
     "addRoleLabel": "添加策略角色",
     "addRoleHint": "使用 * 作为通配，或使用 SubagentRole 键（main、claude:{name}、pi:{role}、opencode:{name}）",
     "addPlaceholder": "* 或 claude:engineer",
     "catchAll": "通配",
-    "preferred": "首选端点",
+    "defaultModelTip": "默认模型：{{model}}（路由实际使用的就是它）",
+    "defaultModelNone": "未设置默认模型 — 请在提供商页面选择",
+    "preferred": "首选 Providers",
     "preferredHint": "按优先级顺序尝试。空 = 无偏好。",
-    "fallback": "回退端点",
+    "fallback": "回退 Providers",
     "fallbackHint": "迁移时尝试。空 = 从所有已启用推导。",
     "preferredPlaceholder": "无偏好",
     "fallbackPlaceholder": "从所有已启用推导",
@@ -789,7 +798,7 @@
     "configPreviewAria": "复制配置",
     "pick": "选择",
     "customOption": "自定义…",
-    "loadFailed": "加载端点失败。"
+    "loadFailed": "加载提供商失败。"
   },
   "gateway": {
     "title": "网关服务",
@@ -870,7 +879,7 @@
     "titleSuffix": "评审",
     "help": "在已完成的工作上派生一个隔离的 Pi 评审会话。它以 pi:reviewer 角色经网关路由,实时展示评审过程并返回裁决——不触碰主上下文。",
     "newTitle": "新建评审",
-    "newHint": "评审是一个独立的 Pi 会话,按 pi:reviewer 策略路由到对应端点。",
+    "newHint": "评审是一个独立的 Pi 会话,按 pi:reviewer 策略路由到对应提供商。",
     "pickSession": "选择一个 Pi 会话…",
     "startButton": "开始评审",
     "started": "评审已启动",

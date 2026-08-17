@@ -262,6 +262,52 @@ pub struct CapabilityReq {
     pub context_floor: Option<u64>,
 }
 
+/// Budget tier a request belongs to, classified from the model id the agent
+/// sent (Claude Code's per-tier env slots point at distinct alias ids in
+/// Routed mode). Feeds the policy lookup chain (`role` → `tier:<t>` → `*`)
+/// so e.g. background/haiku-tier traffic can be steered to a cheaper endpoint
+/// via a `tier:haiku` policy row — no schema change, `tier:*` is just a role
+/// string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetTier {
+    Haiku,
+    Sonnet,
+    Opus,
+}
+
+impl BudgetTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BudgetTier::Haiku => "haiku",
+            BudgetTier::Sonnet => "sonnet",
+            BudgetTier::Opus => "opus",
+        }
+    }
+
+    /// `routing_policy.role` key for this tier (`tier:haiku` | …).
+    pub fn as_policy_key(&self) -> String {
+        format!("tier:{}", self.as_str())
+    }
+
+    /// Classify a model id by its tier token (case-insensitive substring, so
+    /// marker suffixes like `[1m]` don't matter). Works for both real ids
+    /// (`claude-haiku-4-5`) and any alias carrying the token. `None` for
+    /// anything unclassifiable (e.g. the generic `nestra` alias).
+    pub fn from_model_id(id: &str) -> Option<Self> {
+        let l = id.to_ascii_lowercase();
+        if l.contains("haiku") {
+            Some(BudgetTier::Haiku)
+        } else if l.contains("opus") {
+            Some(BudgetTier::Opus)
+        } else if l.contains("sonnet") {
+            Some(BudgetTier::Sonnet)
+        } else {
+            None
+        }
+    }
+}
+
 /// Lifecycle of a Task. The router/migration engine drives transitions;
 /// the vocabulary is defined here so the `task` table's `lifecycle` column is
 /// typed end-to-end.
@@ -369,6 +415,10 @@ pub struct TaskContext {
     pub requested_model: Option<String>,
     /// Provider/endpoint the agent asked for, if any. Advisory.
     pub requested_provider: Option<String>,
+    /// Budget tier classified from `requested_model` (Claude Code's tier env
+    /// slots). Falls between the exact role and the `*` catch-all in the
+    /// policy lookup chain. `None` = unclassified.
+    pub budget_tier: Option<BudgetTier>,
     /// Capabilities the resolved model must satisfy.
     pub required_capabilities: CapabilityReq,
     /// Inbound protocol direction (set by the gateway handler: Anthropic vs
@@ -399,6 +449,7 @@ impl TaskContext {
             native_task_ref: None,
             requested_model: None,
             requested_provider: None,
+            budget_tier: None,
             required_capabilities: CapabilityReq::default(),
             protocol_hint: None,
             lifecycle: TaskLifecycle::Born,
@@ -846,10 +897,28 @@ You have been invoked to handle a specific task autonomously."
         assert_eq!(ctx.lifecycle, TaskLifecycle::Born);
         assert!(ctx.native_task_ref.is_none());
         assert_eq!(ctx.policy_role_key(), "main");
+        assert!(ctx.budget_tier.is_none(), "tier defaults to unclassified");
         // Two contexts get distinct request ids.
         let other = TaskContext::new_task("claude-code-cli", None);
         assert_ne!(ctx.request_id, other.request_id);
         assert_ne!(ctx.task_id, other.task_id);
+    }
+
+    #[test]
+    fn budget_tier_classifies_from_model_id() {
+        use super::BudgetTier;
+        // Real CC ids and marker-suffixed forms both classify.
+        assert_eq!(BudgetTier::from_model_id("claude-haiku-4-5"), Some(BudgetTier::Haiku));
+        assert_eq!(
+            BudgetTier::from_model_id("claude-sonnet-4-5[1m]"),
+            Some(BudgetTier::Sonnet)
+        );
+        assert_eq!(BudgetTier::from_model_id("CLAUDE-OPUS-4-5"), Some(BudgetTier::Opus));
+        // The generic alias / arbitrary model ids stay unclassified.
+        assert_eq!(BudgetTier::from_model_id("nestra"), None);
+        assert_eq!(BudgetTier::from_model_id("glm-5.2"), None);
+        assert_eq!(BudgetTier::from_model_id(""), None);
+        assert_eq!(BudgetTier::Haiku.as_policy_key(), "tier:haiku");
     }
 
     #[test]

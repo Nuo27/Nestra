@@ -122,8 +122,10 @@ impl ConfigAdapter for ZCode {
     }
 
     /// Gateway mode: same provider entry, but pointed at the stable gateway
-    /// alias with the sentinel key and a single alias model. The router
-    /// resolves the real upstream per-task.
+    /// alias with the sentinel key and a single alias model (carrying the
+    /// steady-state model's real limits — a bare alias makes ZCode fall back
+    /// to its 200k/128k guess). The router resolves the real upstream
+    /// per-task.
     fn apply_gateway_set(
         &self,
         config_path: &Path,
@@ -137,9 +139,13 @@ impl ConfigAdapter for ZCode {
         // Single alias model — the gateway ignores the agent-stated model and
         // resolves the real one per-task.
         let models = ModelsConfig::Openai {
-            default: alias.model_alias.clone(),
-            available: vec![alias.model_alias.clone()],
+            default: alias.model_alias.id.clone(),
+            available: vec![alias.model_alias.id.clone()],
         };
+        let mut abilities = std::collections::HashMap::new();
+        if let Some(a) = &alias.model_alias.abilities {
+            abilities.insert(alias.model_alias.id.clone(), a.clone());
+        }
         provider.insert(
             format!("{MANAGED_PREFIX}gateway"),
             provider_entry(
@@ -151,7 +157,7 @@ impl ConfigAdapter for ZCode {
                 &alias.gateway_base_url,
                 &alias.sentinel_key,
                 &models,
-                &Default::default(),
+                &abilities,
             ),
         );
 
@@ -386,11 +392,11 @@ mod tests {
         ZCode
             .apply_gateway_set(
                 &cfg,
-                &GatewayAlias {
-                    gateway_base_url: "http://127.0.0.1:18777/zcode-desktop".into(),
-                    model_alias: "nestra".into(),
-                    sentinel_key: "gw-token".into(),
-                },
+                &GatewayAlias::simple(
+                    "http://127.0.0.1:18777/zcode-desktop",
+                    "nestra",
+                    "gw-token",
+                ),
             )
             .unwrap();
 
@@ -403,6 +409,46 @@ mod tests {
         let models = entry["models"].as_object().unwrap();
         assert_eq!(models.len(), 1);
         assert!(models.contains_key("nestra"));
+        // No abilities on the alias → conservative fallback limits.
+        assert_eq!(models["nestra"]["limit"]["context"], 200_000);
+        assert_eq!(models["nestra"]["limit"]["output"], 128_000);
+    }
+
+    #[test]
+    fn gateway_write_carries_alias_abilities_as_limits() {
+        // The alias slot carries the steady-state model's abilities → ZCode
+        // plans against the REAL window instead of the 200k fallback.
+        let (dir, _dir_g) = tmp();
+        let cfg = dir.join("config.json");
+        fs::write(&cfg, FIXTURE).unwrap();
+        let alias = GatewayAlias {
+            gateway_base_url: "http://127.0.0.1:18777/zcode-desktop".into(),
+            model_alias: crate::config_writer::AliasModel {
+                id: "nestra".into(),
+                abilities: Some(crate::model_abilities::ModelAbilities {
+                    reasoning: None,
+                    tool_call: None,
+                    attachment: None,
+                    temperature: None,
+                    limit: Some(crate::model_abilities::ModelLimit {
+                        context: 1_000_000,
+                        output: 64_000,
+                        input: None,
+                    }),
+                    modalities: None,
+                    api: None,
+                }),
+            },
+            tier_aliases: None,
+            sentinel_key: "gw-token".into(),
+        };
+        ZCode.apply_gateway_set(&cfg, &alias).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+        let limit = &written["provider"]["nestra-gateway"]["models"]["nestra"]["limit"];
+        assert_eq!(limit["context"], 1_000_000);
+        assert_eq!(limit["output"], 64_000);
     }
 
     #[test]

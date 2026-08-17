@@ -122,27 +122,43 @@ impl ConfigAdapter for OpenCode {
         );
         block.insert("options".into(), serde_json::Value::Object(options));
         // One model entry under the alias name; the router resolves the real
-        // model per-task, so the catalog OpenCode sees is a single placeholder.
+        // model per-task, so the catalog OpenCode sees is a single entry.
         // Custom providers get NO models.dev data — OpenCode renders a model
         // from this config entry alone, so limits/reasoning MUST be declared
-        // here or the UI shows context 0 / "reasoning: no allow". Placeholder
-        // values are neutral (200k window, tools + reasoning on); the real
-        // model's capabilities are served live by the gateway's GET /models.
+        // here or the UI shows context 0 / "reasoning: no allow". The entry
+        // carries the steady-state model's REAL abilities when the alias
+        // resolved one; otherwise neutral placeholders (200k window, tools +
+        // reasoning on).
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "name".into(),
+            serde_json::Value::String(alias.model_alias.id.clone()),
+        );
+        match &alias.model_alias.abilities {
+            Some(a) => {
+                for (k, v) in crate::model_abilities::to_model_entry_fields(a) {
+                    entry.insert(k, v);
+                }
+            }
+            None => {
+                entry.insert(
+                    "limit".into(),
+                    serde_json::json!({ "context": 200000, "output": 8192 }),
+                );
+                entry.insert("reasoning".into(), serde_json::Value::Bool(true));
+            }
+        }
         let mut models_map = serde_json::Map::new();
         models_map.insert(
-            alias.model_alias.clone(),
-            serde_json::json!({
-                "name": alias.model_alias,
-                "limit": { "context": 200000, "output": 8192 },
-                "reasoning": true,
-            }),
+            alias.model_alias.id.clone(),
+            serde_json::Value::Object(entry),
         );
         block.insert("models".into(), serde_json::Value::Object(models_map));
         providers.insert("nestra-gw".into(), serde_json::Value::Object(block));
         // Top-level model pointer: `nestra-gw/<alias>`.
         root.insert(
             "model".into(),
-            serde_json::Value::String(format!("nestra-gw/{}", alias.model_alias)),
+            serde_json::Value::String(format!("nestra-gw/{}", alias.model_alias.id)),
         );
         let bytes = serde_json::to_vec_pretty(&root)?;
         crate::config_writer::atomic_write(config_path, &bytes)?;
@@ -577,11 +593,11 @@ mod tests {
         let cfg = dir.join("opencode.json");
         fs::write(&cfg, FIXTURE).unwrap();
 
-        let alias = crate::config_writer::GatewayAlias {
-            gateway_base_url: "http://127.0.0.1:18777/opencode-desktop".into(),
-            model_alias: "nestra".into(),
-            sentinel_key: "nestra".into(),
-        };
+        let alias = crate::config_writer::GatewayAlias::simple(
+            "http://127.0.0.1:18777/opencode-desktop",
+            "nestra",
+            "nestra",
+        );
         OpenCode.apply_gateway_set(&cfg, &alias).unwrap();
 
         let written: serde_json::Value =
@@ -600,6 +616,49 @@ mod tests {
         assert_eq!(entry["reasoning"], true);
         // Prior nestra-owned blocks are replaced.
         assert!(written["provider"].get("nestra-minimax-cn").is_none());
+    }
+
+    /// The gateway model entry carries the alias slot's REAL abilities (full
+    /// `to_model_entry_fields` passthrough — limits + flags + modalities), so
+    /// OpenCode plans against the actual window the router will serve.
+    #[test]
+    fn apply_gateway_set_passes_alias_abilities_through() {
+        let (dir, _dir_g) = tmp();
+        let cfg = dir.join("opencode.json");
+        fs::write(&cfg, FIXTURE).unwrap();
+
+        let alias = crate::config_writer::GatewayAlias {
+            gateway_base_url: "http://127.0.0.1:18777/opencode-desktop".into(),
+            model_alias: crate::config_writer::AliasModel {
+                id: "nestra".into(),
+                abilities: Some(crate::model_abilities::ModelAbilities {
+                    reasoning: Some(false),
+                    tool_call: Some(true),
+                    attachment: Some(true),
+                    temperature: None,
+                    limit: Some(crate::model_abilities::ModelLimit {
+                        context: 1_000_000,
+                        output: 64_000,
+                        input: None,
+                    }),
+                    modalities: None,
+                    api: None,
+                }),
+            },
+            tier_aliases: None,
+            sentinel_key: "gw-token".into(),
+        };
+        OpenCode.apply_gateway_set(&cfg, &alias).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+        let entry = &written["provider"]["nestra-gw"]["models"]["nestra"];
+        assert_eq!(entry["name"], "nestra");
+        assert_eq!(entry["limit"]["context"], 1_000_000);
+        assert_eq!(entry["limit"]["output"], 64_000);
+        assert_eq!(entry["reasoning"], false, "honest flag, not blanket true");
+        assert_eq!(entry["tool_call"], true);
+        assert_eq!(entry["attachment"], true);
     }
 
     /// End-to-end: a SwitchContext carrying models.dev-derived abilities

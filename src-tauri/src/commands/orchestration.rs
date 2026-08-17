@@ -1,5 +1,6 @@
 use crate::error::{AppError, AppResult};
 use crate::db;
+use super::run_blocking;
 use tauri::State;
 
 // ===========================================================================
@@ -65,22 +66,40 @@ pub fn routing_policy_list(
 }
 
 #[tauri::command]
-pub fn routing_policy_upsert(
+pub async fn routing_policy_upsert(
     state: State<'_, crate::AppState>,
     policy: RoutingPolicyInput,
 ) -> AppResult<()> {
-    let conn = state.db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-    crate::orchestration::store::upsert_routing_policy(&conn, &policy.into_row()?)
+    let agent_id = policy.agent_id.clone();
+    let row = policy.into_row()?;
+    let db = state.db.clone();
+    run_blocking(move || {
+        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        crate::orchestration::store::upsert_routing_policy(&conn, &row)
+    })
+    .await?;
+    // A policy edit can change the steady-state route (and with it the
+    // context window the agent's alias advertises) — refresh it.
+    super::gateway::refresh_alias_if_routed(&state, &agent_id).await;
+    Ok(())
 }
 
 #[tauri::command]
-pub fn routing_policy_delete(
+pub async fn routing_policy_delete(
     state: State<'_, crate::AppState>,
     agent_id: String,
     role: String,
 ) -> AppResult<bool> {
-    let conn = state.db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-    crate::orchestration::store::delete_routing_policy(&conn, &agent_id, &role)
+    let db = state.db.clone();
+    let role_clone = role.clone();
+    let agent_for_db = agent_id.clone();
+    let existed = run_blocking(move || {
+        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        crate::orchestration::store::delete_routing_policy(&conn, &agent_for_db, &role_clone)
+    })
+    .await?;
+    super::gateway::refresh_alias_if_routed(&state, &agent_id).await;
+    Ok(existed)
 }
 
 // ---- orchestration: model catalog / quota state / resolve preview --------
@@ -192,8 +211,11 @@ pub fn orch_resolve_preview(
     let mut ctx = crate::orchestration::TaskContext::new_task(&agent_id, None);
     if let Some(role) = role {
         // The user supplies a policy-role key directly (e.g. "main", "*",
-        // "claude:researcher"); parse it into the SubagentRole for display.
-        ctx.subagent_role = parse_role_key(&role);
+        // "claude:researcher", "tier:haiku"); parse it into the SubagentRole
+        // (+ budget tier for tier keys) for display.
+        let (parsed, tier) = parse_role_key(&role);
+        ctx.subagent_role = parsed;
+        ctx.budget_tier = tier;
     }
     ctx.requested_provider = requested_provider;
     ctx.requested_model = requested_model;
@@ -214,6 +236,17 @@ pub fn orch_resolve_preview(
         affinity: &affinity,
     };
     let route = crate::orchestration::router::resolve(&ctx, &inputs)?;
+    // The resolved model's context window from the catalog — the number the
+    // routed alias advertises, so the UI can show "what will my config
+    // actually give the agent" next to the policy editor.
+    let context_window = crate::orchestration::store::list_model_catalog(&conn, &route.endpoint_id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.model_id == route.model)
+        .and_then(|r| {
+            serde_json::from_str::<crate::model_abilities::ModelAbilities>(&r.abilities_json).ok()
+        })
+        .and_then(|a| a.limit.map(|l| l.context));
     Ok(ResolvePreview {
         endpoint_id: route.endpoint_id,
         model: route.model,
@@ -221,6 +254,7 @@ pub fn orch_resolve_preview(
         cache_strategy: format!("{:?}", route.cache_strategy).to_lowercase(),
         requested_model: ctx.requested_model.clone(),
         requested_provider: ctx.requested_provider.clone(),
+        context_window,
     })
 }
 
@@ -232,26 +266,41 @@ pub struct ResolvePreview {
     pub cache_strategy: String,
     pub requested_model: Option<String>,
     pub requested_provider: Option<String>,
+    /// The resolved model's context window (tokens) from the model catalog —
+    /// the number a routed alias advertises. `None` when the catalog carries
+    /// no abilities for the resolved model.
+    pub context_window: Option<u64>,
 }
 
-/// Parse a policy-role key ("main" | "*" | "claude:x" | "pi:x" | "opencode:x")
-/// back into a [`SubagentRole`] for the resolve-preview display. Unknown
-/// prefixes default to Main.
-fn parse_role_key(key: &str) -> crate::orchestration::SubagentRole {
+/// Parse a policy-role key ("main" | "*" | "claude:x" | "pi:x" |
+/// "opencode:x" | "tier:haiku/sonnet/opus") back into a
+/// [`SubagentRole`] (+ [`BudgetTier`] for tier keys) for the resolve-preview
+/// display. Tier keys ride the Main role — the tier feeds the policy lookup
+/// chain, not the subagent role. Unknown prefixes default to Main.
+fn parse_role_key(key: &str) -> (crate::orchestration::SubagentRole, Option<crate::orchestration::BudgetTier>) {
     use crate::orchestration::SubagentRole;
     if key == "main" || key == "*" {
-        return SubagentRole::Main;
+        return (SubagentRole::Main, None);
+    }
+    if let Some(t) = key.strip_prefix("tier:") {
+        let tier = match t {
+            "haiku" => crate::orchestration::BudgetTier::Haiku,
+            "sonnet" => crate::orchestration::BudgetTier::Sonnet,
+            "opus" => crate::orchestration::BudgetTier::Opus,
+            _ => return (SubagentRole::Main, None),
+        };
+        return (SubagentRole::Main, Some(tier));
     }
     if let Some(name) = key.strip_prefix("claude:") {
-        return SubagentRole::ClaudeAgent { name: name.into() };
+        return (SubagentRole::ClaudeAgent { name: name.into() }, None);
     }
     if let Some(role) = key.strip_prefix("pi:") {
-        return SubagentRole::PiSubagent { role: role.into() };
+        return (SubagentRole::PiSubagent { role: role.into() }, None);
     }
     if let Some(name) = key.strip_prefix("opencode:") {
-        return SubagentRole::OpenCodeAgent { name: name.into() };
+        return (SubagentRole::OpenCodeAgent { name: name.into() }, None);
     }
-    SubagentRole::Main
+    (SubagentRole::Main, None)
 }
 
 /// Full route history for one task: every attempt's credential-free

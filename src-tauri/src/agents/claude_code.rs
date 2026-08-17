@@ -126,9 +126,10 @@ impl ConfigAdapter for ClaudeCode {
     }
 
     /// Gateway mode: write the stable gateway alias as `ANTHROPIC_BASE_URL`
-    /// + a sentinel auth token + a stable model alias. The agent then talks
+    /// + the loopback token + per-tier model aliases. The agent then talks
     /// to the Nestra gateway, which resolves the real upstream per-task.
-    /// Switching the resolved route no longer rewrites this file.
+    /// Switching the resolved route no longer rewrites this file (only
+    /// policy/endpoint edits refresh it — see `refresh_alias_if_routed`).
     fn apply_gateway_set(
         &self,
         config_path: &Path,
@@ -154,23 +155,39 @@ impl ConfigAdapter for ClaudeCode {
         // Blank the API key slot so it can't win over the auth token
         // (same reason as the OpenRouter branch in `apply_set`).
         env.insert("ANTHROPIC_API_KEY".into(), serde_json::Value::String("".into()));
-        // Stable alias for ALL model env vars — the gateway resolves the real
-        // model per-task, so every tier points at the same alias.
-        env.insert(
-            "ANTHROPIC_MODEL".into(),
-            serde_json::Value::String(alias.model_alias.clone()),
-        );
+        // Per-slot aliases, each carrying its tier's steady-state abilities:
+        // the `[1m]` marker makes Claude Code perceive the REAL context window
+        // instead of defaulting the id to 200k (same rule as `apply_set`), and
+        // the distinct tier ids let the gateway classify haiku/sonnet/opus
+        // intent for `tier:*` routing policies. Without tier slots every env
+        // var repeats the primary alias.
+        let tiered = |m: &crate::config_writer::AliasModel| {
+            crate::model_abilities::claude_code_model_id(&m.id, m.abilities.as_ref())
+        };
+        let (primary, haiku, sonnet, opus) = match &alias.tier_aliases {
+            Some(t) => (
+                tiered(&t.sonnet),
+                tiered(&t.haiku),
+                tiered(&t.sonnet),
+                tiered(&t.opus),
+            ),
+            None => {
+                let p = tiered(&alias.model_alias);
+                (p.clone(), p.clone(), p.clone(), p.clone())
+            }
+        };
+        env.insert("ANTHROPIC_MODEL".into(), serde_json::Value::String(primary));
         env.insert(
             "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
-            serde_json::Value::String(alias.model_alias.clone()),
+            serde_json::Value::String(haiku),
         );
         env.insert(
             "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
-            serde_json::Value::String(alias.model_alias.clone()),
+            serde_json::Value::String(sonnet),
         );
         env.insert(
             "ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
-            serde_json::Value::String(alias.model_alias.clone()),
+            serde_json::Value::String(opus),
         );
 
         let bytes = serde_json::to_vec_pretty(&root)?;
@@ -507,5 +524,83 @@ mod tests {
             default_model: "claude-default".into(),
         };
         assert!(ClaudeCode.apply_set(&cfg, &set).is_err());
+    }
+
+    fn gw_alias(tiers: Option<crate::config_writer::TierAliases>) -> crate::config_writer::GatewayAlias {
+        crate::config_writer::GatewayAlias {
+            gateway_base_url: "http://127.0.0.1:18777/claude-code-cli".into(),
+            model_alias: crate::config_writer::AliasModel {
+                id: "claude-sonnet-4-5".into(),
+                abilities: None,
+            },
+            tier_aliases: tiers,
+            sentinel_key: "gw-token".into(),
+        }
+    }
+
+    fn tier_slot(id: &str, ctx: u64) -> crate::config_writer::AliasModel {
+        crate::config_writer::AliasModel {
+            id: id.into(),
+            abilities: Some(ModelAbilities {
+                reasoning: None,
+                tool_call: None,
+                attachment: None,
+                temperature: None,
+                limit: Some(ModelLimit { context: ctx, output: 8_000, input: None }),
+                modalities: None,
+                api: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn apply_gateway_set_writes_per_tier_aliases_with_1m_markers() {
+        // Tier slots get distinct real CC ids, each `[1m]`-marked iff ITS
+        // steady-state model advertises >=1M context (haiku tier here is a
+        // 200k model → bare; sonnet/opus are 1M+ → marked).
+        let (dir, _dir_g) = tmp();
+        let cfg = dir.join("settings.json");
+        fs::write(&cfg, FIXTURE).unwrap();
+        let alias = gw_alias(Some(crate::config_writer::TierAliases {
+            haiku: tier_slot("claude-haiku-4-5", 200_000),
+            sonnet: tier_slot("claude-sonnet-4-5", 1_000_000),
+            opus: tier_slot("claude-opus-4-5", 2_000_000),
+        }));
+        ClaudeCode.apply_gateway_set(&cfg, &alias).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+        let env = written["env"].as_object().unwrap();
+        assert_eq!(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:18777/claude-code-cli");
+        assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "gw-token");
+        // Primary = the sonnet-class slot, marked.
+        assert_eq!(env["ANTHROPIC_MODEL"], "claude-sonnet-4-5[1m]");
+        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-haiku-4-5");
+        assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "claude-sonnet-4-5[1m]");
+        assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-opus-4-5[1m]");
+        assert_eq!(env["ANTHROPIC_API_KEY"], "");
+    }
+
+    #[test]
+    fn apply_gateway_set_without_tiers_repeats_primary_alias_bare() {
+        // No tier slots (non-resolving steady state) → every env var repeats
+        // the primary alias, no `[1m]` (no abilities to justify it).
+        let (dir, _dir_g) = tmp();
+        let cfg = dir.join("settings.json");
+        fs::write(&cfg, FIXTURE).unwrap();
+        let alias = gw_alias(None);
+        ClaudeCode.apply_gateway_set(&cfg, &alias).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
+        let env = written["env"].as_object().unwrap();
+        for key in [
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        ] {
+            assert_eq!(env[key], "claude-sonnet-4-5", "{key} repeats the bare primary");
+        }
     }
 }

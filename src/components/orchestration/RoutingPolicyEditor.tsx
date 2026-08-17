@@ -176,6 +176,9 @@ export function RoutingPolicyEditor({ agentId }: { agentId: string }) {
           onAdd={() => addRole(newRole)}
           pending={addMut.isPending}
         />
+        {agentId === "claude-code-cli" && (
+          <TierPresets policies={policies} onAdd={addRole} pending={addMut.isPending} />
+        )}
         <DetectedRolesStrip
           agentId={agentId}
           policies={policies}
@@ -208,6 +211,10 @@ export function RoutingPolicyEditor({ agentId }: { agentId: string }) {
         onAdd={() => addRole(newRole)}
         pending={addMut.isPending}
       />
+
+      {agentId === "claude-code-cli" && (
+        <TierPresets policies={policies} onAdd={addRole} pending={addMut.isPending} />
+      )}
 
       <DetectedRolesStrip
         agentId={agentId}
@@ -268,6 +275,52 @@ function DetectedRolesStrip({
           >
             <RoleKey roleKey={r.role} />
             <span className="text-subtle tabular">×{r.request_count}</span>
+            {done && <span className="text-accent">{t("routingPolicy.configured")}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/// Budget-tier preset strip. Claude Code sends each of its model env slots
+/// (haiku/sonnet/opus) as a distinct id, so the gateway can classify a
+/// request's tier and match a `tier:*` policy row — e.g. steer background
+/// haiku-tier traffic to a cheaper endpoint. Only rendered for agents whose
+/// requests classify (Claude Code); the lookup order is exact role → tier →
+/// `*` catch-all.
+function TierPresets({
+  policies,
+  onAdd,
+  pending,
+}: {
+  policies: RoutingPolicyRow[];
+  onAdd: (role: string) => void;
+  pending: boolean;
+}) {
+  const { t } = useTranslation();
+  const configured = new Set(policies.map((p) => p.role));
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="font-mono text-2xs text-subtle">{t("routingPolicy.tierPresets")}</span>
+      {(["haiku", "sonnet", "opus"] as const).map((tier) => {
+        const role = `tier:${tier}`;
+        const done = configured.has(role);
+        return (
+          <button
+            key={role}
+            type="button"
+            disabled={done || pending}
+            onClick={() => !done && onAdd(role)}
+            title={t("routingPolicy.tierTip", { role })}
+            className={
+              "inline-flex items-center gap-1.5 rounded border border-border bg-inset px-1.5 py-0.5 font-mono text-2xs transition-colors duration-fast " +
+              (done
+                ? "cursor-default text-muted"
+                : "text-fg hover:border-accent/50 hover:bg-raised disabled:opacity-50")
+            }
+          >
+            <RoleKey roleKey={role} />
             {done && <span className="text-accent">{t("routingPolicy.configured")}</span>}
           </button>
         );
@@ -442,10 +495,12 @@ function PolicyRow({
   );
 }
 
-/// Ordered multi-select over the live endpoints list. Each chosen endpoint
+/// Ordered multi-select over the live providers list. Each chosen provider
 /// renders as a removable chip in priority order; unchosen ones appear in the
-/// add dropdown. Preserves order (the priority of the preferred/fallback chain).
-/// Thin wrapper over the shared `OrderedChain`.
+/// add dropdown. Preserves order (the priority of the preferred/fallback
+/// chain). The provider's DEFAULT model rides along (dropdown hint + row
+/// tooltip) — routing serves exactly that model, so it must be visible at
+/// pick time. Thin wrapper over the shared `OrderedChain`.
 function EndpointChainPicker({
   value,
   onChange,
@@ -457,12 +512,24 @@ function EndpointChainPicker({
   endpoints: EndpointInfo[];
   placeholder: string;
 }) {
+  const { t } = useTranslation();
   const labelFor = (id: string) =>
     endpoints.find((e) => e.id === id)?.display_name ?? id;
+  // The model the router will actually serve from this provider — its
+  // models_json default.
+  const defaultModel = (id: string) =>
+    endpoints.find((e) => e.id === id)?.models?.default ?? "";
+  const titleFor = (id: string) => {
+    const model = defaultModel(id);
+    return model
+      ? t("routingPolicy.defaultModelTip", { model })
+      : t("routingPolicy.defaultModelNone");
+  };
   return (
     <OrderedChain
       ids={value}
       labelFor={labelFor}
+      titleFor={titleFor}
       onMove={(from, to) => {
         const next = [...value];
         const [item] = next.splice(from, 1);
@@ -473,7 +540,11 @@ function EndpointChainPicker({
       onAdd={(id) => onChange([...value, id])}
       addChoices={endpoints
         .filter((e) => !value.includes(e.id))
-        .map((e) => ({ id: e.id, label: e.display_name }))}
+        .map((e) => ({
+          id: e.id,
+          label: e.display_name,
+          hint: e.models?.default || undefined,
+        }))}
       emptyHint={placeholder}
       surface
     />

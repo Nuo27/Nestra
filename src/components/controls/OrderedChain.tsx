@@ -10,15 +10,19 @@ import {
 } from "../ui/select"
 import { ButtonGroup } from "./ButtonGroup"
 
-/// Ordered list of endpoint ids with priority markers (index = priority) and
-/// optional reorder/remove/add affordances. The shared merge of the read-only
+/// Ordered list of ids with priority markers (index = priority) and optional
+/// reorder/remove/add affordances. The shared merge of the read-only
 /// FallbackChain and the editable EndpointChainPicker:
 ///   • `onMove`   → show ▲▼ move buttons (drag-free reorder)
 ///   • `onRemove` → show ✕ remove buttons
-///   • `onAdd`    → show the "+ add endpoint…" dropdown over `addChoices`
+///   • `onAdd`    → show the "+ add provider…" dropdown over `addChoices`
+/// `titleFor` puts a native tooltip on each chosen row (e.g. the provider's
+/// default model); `addChoices[].hint` shows secondary text inside the
+/// dropdown items for the same purpose at pick time.
 export function OrderedChain({
   ids,
   labelFor = (id) => id,
+  titleFor,
   onMove,
   onRemove,
   onAdd,
@@ -28,10 +32,11 @@ export function OrderedChain({
 }: {
   ids: string[]
   labelFor?: (id: string) => string
+  titleFor?: (id: string) => string
   onMove?: (from: number, to: number) => void
   onRemove?: (id: string) => void
   onAdd?: (id: string) => void
-  addChoices?: { id: string; label: string }[]
+  addChoices?: { id: string; label: string; hint?: string }[]
   emptyHint?: ReactNode
   surface?: boolean
 }) {
@@ -57,7 +62,10 @@ export function OrderedChain({
               <span className="w-4 shrink-0 text-right font-mono text-2xs text-subtle tabular">
                 {i + 1}
               </span>
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg">
+              <span
+                className="min-w-0 flex-1 truncate font-mono text-xs text-fg"
+                title={titleFor ? titleFor(id) : undefined}
+              >
                 {labelFor(id)}
               </span>
               {editable && (
@@ -117,6 +125,9 @@ export function OrderedChain({
             {addChoices.map((c) => (
               <SelectItem key={c.id} value={c.id}>
                 {c.label}
+                {c.hint && (
+                  <span className="ml-2 font-mono text-2xs text-subtle">{c.hint}</span>
+                )}
               </SelectItem>
             ))}
           </SelectContent>

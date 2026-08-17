@@ -121,6 +121,12 @@ pub async fn handle_bytes(
     let mut ctx = TaskContext::new_task(agent_id, session_id);
     ctx.protocol_hint = Some(ProviderKind::Anthropic);
     ctx.requested_model = requested_model;
+    // Tier intent from the model slot the agent used (Claude Code's per-tier
+    // env vars each carry a distinct tier id) — feeds `tier:*` policy rows.
+    ctx.budget_tier = ctx
+        .requested_model
+        .as_deref()
+        .and_then(crate::orchestration::identity::BudgetTier::from_model_id);
     ctx.lifecycle = TaskLifecycle::Routed;
     let started_at = chrono::Utc::now().timestamp_millis();
 

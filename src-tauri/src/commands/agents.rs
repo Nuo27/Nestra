@@ -966,7 +966,13 @@ pub async fn agent_apply_provider_selection(
     default_provider_id: String,
 ) -> AppResult<()> {
     let parts = snapshot_state(&state);
-    run_blocking(move || do_apply_provider_selection(&parts, agent_id, selected, default_provider_id)).await
+    let refresh_id = agent_id.clone();
+    run_blocking(move || do_apply_provider_selection(&parts, agent_id, selected, default_provider_id)).await?;
+    // A binding change moves the router's candidate list (and with it the
+    // steady-state model a routed alias advertises) — refresh it. In Direct
+    // mode this is a no-op (the flag is off).
+    super::gateway::refresh_alias_if_routed(&state, &refresh_id).await;
+    Ok(())
 }
 
 /// Clear the agent's active provider block (single-shot restore) — keeps

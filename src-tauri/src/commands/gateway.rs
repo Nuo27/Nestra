@@ -87,10 +87,14 @@ pub async fn agent_set_gateway_enabled(
 /// loopback `token` as its key slot). `base_url` is the gateway's live
 /// `http://127.0.0.1:<port>` (fetched from the control snapshot by the caller);
 /// `token` is the real loopback secret (NOT the legacy `"nestra"` sentinel).
-/// The alias embeds an agent-id path prefix so the dispatcher can identify the
-/// agent from the request path without agent-specific headers.
+/// The alias embeds an agent-id path prefix so the dispatcher can identify
+/// the agent from the request path without agent-specific headers.
+///
+/// The alias advertises the REAL steady-state model abilities (context window
+/// above all) so the agent doesn't fall back to its 200k guess — see
+/// [`build_gateway_alias`].
 fn write_gateway_alias_blocking(
-    _conn: &rusqlite::Connection,
+    conn: &rusqlite::Connection,
     agent_id: &str,
     base_url: &str,
     token: &str,
@@ -101,21 +105,137 @@ fn write_gateway_alias_blocking(
         .ok_or_else(|| AppError::Internal(format!("no adapter for '{}'", spec.config.writer)))?;
     let config_path = crate::db::home_dir()?.join(&spec.config.relative_path);
     let prefixed_base = format!("{base_url}/{agent_id}");
-    // The model alias must be one the agent ACCEPTS locally before sending.
-    // Claude Code validates model names; OpenCode/Pi don't. The gateway rewrites
-    // the model to the resolved one before hitting upstream in every case.
-    let model_alias = match agent_id {
-        "claude-code-cli" => "claude-haiku-4-5".to_string(),
-        _ => "nestra".to_string(),
-    };
-    let alias = crate::config_writer::GatewayAlias {
-        gateway_base_url: prefixed_base,
-        model_alias,
-        sentinel_key: token.to_string(),
-    };
+    let alias = build_gateway_alias(conn, agent_id, &prefixed_base, token);
     adapter.apply_gateway_set(&config_path, &alias)?;
     tracing::info!("agent '{agent_id}' now routed via gateway {base_url}");
     Ok(())
+}
+
+/// Build the abilities-aware gateway alias. Resolves the steady-state route
+/// (main role; per-tier for Claude Code) and attaches the resolved model's
+/// abilities so each writer can advertise the real context/output window.
+///
+/// Alias ids must be names the agent ACCEPTS locally before sending: Claude
+/// Code validates model names (real CC tier ids), everything else takes the
+/// conventional `"nestra"`. The gateway rewrites the model to the resolved
+/// one before hitting upstream in every case; the distinct Claude Code tier
+/// ids additionally classify tier intent at the gateway (`tier:*` policies).
+///
+/// Best-effort throughout: a failed steady-state resolution (no endpoints,
+/// empty catalog) degrades to abilities-less slots, which each writer renders
+/// as conservative placeholders — the alias write itself never fails here.
+fn build_gateway_alias(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    prefixed_base: &str,
+    token: &str,
+) -> crate::config_writer::GatewayAlias {
+    use crate::orchestration::identity::BudgetTier;
+    use crate::orchestration::router::{self, RouterInputs};
+
+    // Fresh catalog so the advertised abilities match current endpoint config.
+    // Best-effort: a rebuild failure leaves the previous catalog, which still
+    // beats placeholder values.
+    let _ = crate::orchestration::capability_registry::rebuild(conn);
+    // Transient stores — same steady-state shape as `orch_resolve_preview`:
+    // empty health (assume healthy), persisted quota, no affinity. Default
+    // task-grain affinity records in memory only, so this write path has no
+    // persisted side effects.
+    let health = crate::orchestration::health::ProviderHealth::new();
+    let quota = crate::orchestration::quota_state::load_all_from_db(conn)
+        .unwrap_or_default();
+    let affinity = crate::orchestration::router::RouteAffinity::new();
+    let inputs = RouterInputs { conn, health: &health, quota: &quota, affinity: &affinity };
+    let abilities = |tier: Option<&BudgetTier>| {
+        router::steady_state(&inputs, agent_id, tier).and_then(|s| s.abilities)
+    };
+
+    match agent_id {
+        "claude-code-cli" => {
+            let tier_slot = |id: &str, t: BudgetTier| crate::config_writer::AliasModel {
+                id: id.to_string(),
+                abilities: abilities(Some(&t)),
+            };
+            let sonnet = tier_slot("claude-sonnet-4-5", BudgetTier::Sonnet);
+            crate::config_writer::GatewayAlias {
+                gateway_base_url: prefixed_base.to_string(),
+                // Primary = the sonnet-class slot (Claude Code's main thread).
+                model_alias: sonnet.clone(),
+                tier_aliases: Some(crate::config_writer::TierAliases {
+                    haiku: tier_slot("claude-haiku-4-5", BudgetTier::Haiku),
+                    sonnet,
+                    opus: tier_slot("claude-opus-4-5", BudgetTier::Opus),
+                }),
+                sentinel_key: token.to_string(),
+            }
+        }
+        _ => crate::config_writer::GatewayAlias {
+            gateway_base_url: prefixed_base.to_string(),
+            model_alias: crate::config_writer::AliasModel {
+                id: "nestra".to_string(),
+                abilities: abilities(None),
+            },
+            tier_aliases: None,
+            sentinel_key: token.to_string(),
+        },
+    }
+}
+
+/// Re-write the gateway alias for one agent IF it is flagged routed and the
+/// gateway is Running. Called after edits that change the steady-state route
+/// (policy edits, endpoint model/ability edits, binding switches) so the
+/// agent's advertised context window tracks reality. Best-effort: failures
+/// log a warning and surface nothing — the next toggle/gateway lifecycle op
+/// re-applies the alias anyway.
+///
+/// ponytail: steady-state advertisement, not live tracking — a mid-task
+/// migration to a smaller-window model is NOT re-advertised (the agent keeps
+/// its perception until the next refresh; the migration row already marks
+/// `generation_broken` honestly). Upgrade path: push an abilities update to
+/// agents that support one.
+pub(crate) async fn refresh_alias_if_routed(state: &State<'_, crate::AppState>, agent_id: &str) {
+    use crate::orchestration::gateway::control::GatewayRuntimeState;
+    let snap = state.gateway.snapshot().await;
+    if snap.state != GatewayRuntimeState::Running || snap.base_url.is_empty() {
+        return;
+    }
+    let routed = {
+        let conn = state
+            .db_read
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()));
+        match conn {
+            Ok(conn) => gateway_enabled_for(&conn, agent_id),
+            Err(e) => {
+                tracing::warn!("alias refresh: db read failed for '{agent_id}': {e}");
+                return;
+            }
+        }
+    };
+    if !routed {
+        return;
+    }
+    let token = state.gateway.token.read().await.clone();
+    let db = state.db.clone();
+    let aid = agent_id.to_string();
+    let base_url = snap.base_url;
+    let res = run_blocking(move || {
+        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        write_gateway_alias_blocking(&conn, &aid, &base_url, &token)
+    })
+    .await;
+    if let Err(e) = res {
+        tracing::warn!("alias refresh failed for agent '{agent_id}': {e}");
+    }
+}
+
+/// Refresh the alias of EVERY intent-flagged agent (gateway Running only).
+/// Used after endpoint edits that can change any routed agent's steady-state
+/// model.
+pub(crate) async fn refresh_all_routed(state: &State<'_, crate::AppState>) {
+    for aid in enabled_agent_ids(state).await.unwrap_or_default() {
+        refresh_alias_if_routed(state, &aid).await;
+    }
 }
 
 /// Restore direct-config mode: re-apply the agent's active provider binding

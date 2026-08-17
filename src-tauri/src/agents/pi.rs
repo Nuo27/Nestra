@@ -298,12 +298,13 @@ fn write_gateway_models(config_path: &Path, alias: &crate::config_writer::Gatewa
     // openai-completions so Pi speaks Chat Completions -> OpenAI handler.
     provider.insert("api".into(), serde_json::Value::String("openai-completions".into()));
     // One placeholder model nested under the alias; the router resolves the
-    // real model per-task.
+    // real model per-task. Pi's models schema has no limits field, so there is
+    // nothing to advertise here — the id alone is what Pi needs.
     provider.insert(
         "models".into(),
         serde_json::Value::Array(vec![serde_json::json!({
-            "id": alias.model_alias,
-            "name": alias.model_alias,
+            "id": alias.model_alias.id,
+            "name": alias.model_alias.id,
         })]),
     );
     providers.insert("nestra-gw".into(), serde_json::Value::Object(provider));
@@ -341,7 +342,7 @@ fn write_gateway_settings(
     );
     root.insert(
         "defaultModel".into(),
-        serde_json::Value::String(alias.model_alias.clone()),
+        serde_json::Value::String(alias.model_alias.id.clone()),
     );
     let bytes = serde_json::to_vec_pretty(&root)?;
     if let Some(parent) = settings_path.parent() {

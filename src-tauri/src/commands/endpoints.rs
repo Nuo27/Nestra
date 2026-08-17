@@ -205,14 +205,22 @@ pub fn endpoint_create(
 }
 
 #[tauri::command]
-pub fn endpoint_delete(
+pub async fn endpoint_delete(
     state: State<'_, crate::AppState>,
     id: String,
 ) -> AppResult<()> {
-    let conn = state.db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-    let _existed = db::delete_endpoint(&conn, &id)?;
-    drop(conn);
-    let _ = secrets::delete(&id);
+    let db = state.db.clone();
+    run_blocking(move || {
+        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        let _existed = db::delete_endpoint(&conn, &id)?;
+        drop(conn);
+        let _ = secrets::delete(&id);
+        Ok(())
+    })
+    .await?;
+    // A deleted endpoint changes what the router can resolve to — re-advertise
+    // every routed agent's alias.
+    super::gateway::refresh_all_routed(&state).await;
     Ok(())
 }
 
@@ -265,17 +273,24 @@ pub fn endpoint_set_name(
 }
 
 #[tauri::command]
-pub fn endpoint_set_models(
+pub async fn endpoint_set_models(
     state: State<'_, crate::AppState>,
     id: String,
     models: serde_json::Value,
 ) -> AppResult<()> {
-    let conn = state.db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-    db::set_endpoint_models(&conn, &id, &serde_json::to_string(&models)?)?;
-    // Keep the routing catalog fresh: a default-model change must be visible
-    // to the next gateway request. Best-effort — a rebuild failure never
-    // fails the save.
-    let _ = crate::orchestration::capability_registry::rebuild_endpoint(&conn, &id);
+    let db = state.db.clone();
+    run_blocking(move || {
+        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        db::set_endpoint_models(&conn, &id, &serde_json::to_string(&models)?)?;
+        // Keep the routing catalog fresh: a default-model change must be visible
+        // to the next gateway request. Best-effort — a rebuild failure never
+        // fails the save.
+        let _ = crate::orchestration::capability_registry::rebuild_endpoint(&conn, &id);
+        Ok(())
+    })
+    .await?;
+    // A default-model change moves the steady-state route — re-advertise.
+    super::gateway::refresh_all_routed(&state).await;
     Ok(())
 }
 
@@ -295,17 +310,24 @@ pub fn endpoint_set_advanced_env(
 /// clear every override. The map is persisted as a JSON object keyed by
 /// model id; the OpenCode writer reads it via `build_switch_context`.
 #[tauri::command]
-pub fn endpoint_set_model_abilities(
+pub async fn endpoint_set_model_abilities(
     state: State<'_, crate::AppState>,
     id: String,
     abilities: HashMap<String, crate::model_abilities::ModelAbilities>,
 ) -> AppResult<()> {
-    let conn = state.db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-    if db::get_endpoint(&conn, &id)?.is_none() {
-        return Err(AppError::NotFound(format!("endpoint '{id}' not found")));
-    }
-    let json = serde_json::to_string(&abilities)?;
-    db::set_endpoint_model_abilities(&conn, &id, Some(&json))
+    let db = state.db.clone();
+    run_blocking(move || {
+        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        if db::get_endpoint(&conn, &id)?.is_none() {
+            return Err(AppError::NotFound(format!("endpoint '{id}' not found")));
+        }
+        let json = serde_json::to_string(&abilities)?;
+        db::set_endpoint_model_abilities(&conn, &id, Some(&json))
+    })
+    .await?;
+    // Ability overrides change the advertised context window — re-advertise.
+    super::gateway::refresh_all_routed(&state).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -347,7 +369,11 @@ pub async fn endpoint_set_api_key(
         );
         Ok(ValidationResult { ok: true, error_code: None, message: None })
     })
-    .await
+    .await?;
+    // Validation rewrites `models_json` (the discovered model list), which can
+    // move the steady-state route — re-advertise.
+    super::gateway::refresh_all_routed(&state).await;
+    Ok(ValidationResult { ok: true, error_code: None, message: None })
 }
 
 #[tauri::command]

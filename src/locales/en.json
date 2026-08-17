@@ -25,7 +25,7 @@
     "moveUp": "move {{name}} up",
     "moveDown": "move {{name}} down",
     "removeItem": "remove {{name}}",
-    "addEndpoint": "+ add endpoint…",
+    "addEndpoint": "+ add provider…",
     "loadFailed": "Failed to load.",
     "howItWorks": "How this works"
   },
@@ -120,7 +120,7 @@
     "cardLite": "Lite",
     "cardTokenPlan": "token-plan",
     "planStatus": "query",
-    "planTitleHint": "The query plan this endpoint uses to read quota",
+    "planTitleHint": "The query plan this provider uses to read quota",
     "sending": "sending request",
     "nextIn": "next refresh in {{n}}s",
     "verifying": "verifying…",
@@ -508,7 +508,7 @@
   },
   "providers": {
     "title": "Providers",
-    "help": "An LLM endpoint + API key per upstream. Each CLI binds to one provider at a time. Routing policy and fallback chains are configured per agent on the Agents page.",
+    "help": "An LLM provider + API key per upstream. Each CLI binds to one provider at a time. Routing policy and fallback chains are configured per agent on the Agents page.",
     "createFailed": "Failed to create provider",
     "created": "Provider created",
     "createdValidated": "Provider created and validated",
@@ -517,7 +517,7 @@
     "protocolsFailed": "Could not add {{n}} preset protocol(s) — add manually in the edit page.",
     "none": {
       "title": "No LLM providers configured",
-      "hint": "Add one per upstream; Nestra manages the endpoint and its key."
+      "hint": "Add one per upstream; Nestra manages the provider and its key."
     },
     "badgeNoKey": "no key",
     "badgeInvalid": "invalid key",
@@ -646,16 +646,21 @@
   "agentRouting": {
     "titleSuffix": "routing",
     "help": "Policies map (agent, role) → preferred / fallback / allowed models. The gateway resolves each request: explicit → affinity → capability → fail closed.",
+    "steadyTitle": "Current route",
+    "steadyHint": "What a new request resolves to under the current policies — a dry-run, no traffic sent. Updates when you save a policy.",
+    "steadyContext": "{{n}} context",
+    "steadyNoWindow": "context unknown",
+    "steadyNoRoute": "no eligible route — check provider health/quota and the policy's allowed models",
     "policyTitle": "Routing policy",
-    "policyHint": "(agent, role) → preferred / fallback / allowed models",
+    "policyHint": "(agent, role) → preferred / fallback / allowed models · match order: exact role → tier:* → *",
     "gateTitle": "routing policy is a Routed-mode surface",
-    "gateHint": "This agent is in Direct mode — its config is written as a plain provider binding. Switch to Routed to configure (agent, role) → endpoint chain policies."
+    "gateHint": "This agent is in Direct mode — its config is written as a plain provider binding. Switch to Routed to configure (agent, role) → provider chain policies."
   },
   "agentDetail": {
     "helpGateway": "Direct mode writes the real provider into this agent's config. Routed mode sends traffic through the Nestra gateway — provider/model resolved per task, with quota-aware fallback and migration.",
     "helpPlain": "Installed coding agent.",
     "policyTitle": "Routing policy",
-    "policyHint": "(agent, role) → preferred / fallback / allowed models",
+    "policyHint": "(agent, role) → preferred / fallback / allowed models · match order: exact role → tier:* → *",
     "tasks": "Tasks",
     "tasksHint": "run → task → request",
     "detectedRoles": "Detected roles",
@@ -677,13 +682,17 @@
     "configuredTip": "Policy already configured for this role",
     "createTip": "Create a policy for {{role}}",
     "configured": "configured",
+    "tierPresets": "budget tiers:",
+    "tierTip": "Create a policy for {{role}} — matches requests Claude Code sends through that model slot (lookup order: exact role, then tier, then *). Useful to steer background traffic to a cheaper provider.",
     "addRoleLabel": "Add a policy role",
     "addRoleHint": "Use * for catch-all, or a SubagentRole key (main, claude:{name}, pi:{role}, opencode:{name})",
     "addPlaceholder": "* or claude:engineer",
     "catchAll": "catch-all",
-    "preferred": "Preferred endpoints",
+    "defaultModelTip": "Default model: {{model}} (this is what routing serves)",
+    "defaultModelNone": "No default model set — pick one on the Providers page",
+    "preferred": "Preferred providers",
     "preferredHint": "Tried in priority order. Empty = no preference.",
-    "fallback": "Fallback endpoints",
+    "fallback": "Fallback providers",
     "fallbackHint": "Tried on migration. Empty = derive from all enabled.",
     "preferredPlaceholder": "no preference",
     "fallbackPlaceholder": "derive from all enabled",
@@ -796,7 +805,7 @@
     "configPreviewAria": "Copy config",
     "pick": "pick",
     "customOption": "custom…",
-    "loadFailed": "Failed to load endpoint."
+    "loadFailed": "Failed to load provider."
   },
   "gateway": {
     "title": "Gateway Service",
@@ -877,7 +886,7 @@
     "titleSuffix": "Review",
     "help": "Spawn an isolated Pi review session on completed work. It routes through the gateway as the pi:reviewer role, watches the review live, and returns a verdict without touching the main context.",
     "newTitle": "New review",
-    "newHint": "The review runs as a separate Pi session routed to the pi:reviewer policy's endpoint.",
+    "newHint": "The review runs as a separate Pi session routed to the pi:reviewer policy's provider.",
     "pickSession": "Pick a Pi session…",
     "startButton": "Start review",
     "started": "Review started",

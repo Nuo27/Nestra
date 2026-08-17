@@ -217,10 +217,11 @@ pub trait ConfigAdapter: Send + Sync {
     /// provider/model at request time, and switching the resolved route no
     /// longer rewrites the agent's config file (preserving session/cache).
     ///
-    /// `alias` carries the gateway base URL + a stable model alias string
-    /// (the agent sends this; the gateway ignores it and resolves the real
-    /// model per-task). The API key slot is filled with a sentinel
-    /// (`"nestra"`) — the gateway holds the real credential, not the agent.
+    /// `alias` carries the gateway base URL + a stable model alias (the agent
+    /// sends this; the gateway ignores it and resolves the real model
+    /// per-task) + the loopback token for the agent's key slot. The alias's
+    /// abilities describe the steady-state model so writers can advertise the
+    /// real context window.
     ///
     /// Default: not supported. Agents that opt into the gateway override this
     /// (Claude Code, OpenCode Desktop, Pi).
@@ -231,9 +232,34 @@ pub trait ConfigAdapter: Send + Sync {
     }
 }
 
+/// One alias model slot: the stable id the agent sends + the abilities of the
+/// steady-state model the router resolves for that slot. Writers use the
+/// abilities to advertise the REAL context/output window to the agent (a bare
+/// alias makes every agent default to a 200k guess); `abilities: None` →
+/// per-format conservative placeholders.
+#[derive(Clone, Debug)]
+pub struct AliasModel {
+    pub id: String,
+    pub abilities: Option<crate::model_abilities::ModelAbilities>,
+}
+
+/// Claude Code's three tier slots (`ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL`).
+/// Distinct ids per tier let the gateway classify tier intent from the request
+/// body and route via `tier:*` policy rows (e.g. background haiku-tier traffic
+/// to a cheaper endpoint). Only the Claude Code writer consumes these.
+#[derive(Clone, Debug)]
+pub struct TierAliases {
+    pub haiku: AliasModel,
+    pub sonnet: AliasModel,
+    pub opus: AliasModel,
+}
+
 /// Parameters for [`ConfigAdapter::apply_gateway_set`]. The agent is written a
 /// stable alias so its config file never changes when the resolved
 /// provider/model does — only the Nestra-internal route moves.
+///
+/// `model_alias.abilities` carries the steady-state model's abilities so the
+/// agent's config advertises the real context window (see [`AliasModel`]).
 ///
 /// `sentinel_key` carries the gateway's loopback auth token (written into the
 /// agent's key slot so the gateway can authenticate the inbound request). It is
@@ -241,24 +267,54 @@ pub trait ConfigAdapter: Send + Sync {
 /// appear in a log, panic backtrace, or `dbg!` output.
 #[derive(Clone)]
 pub struct GatewayAlias {
-    /// The gateway's loopback base URL (`http://127.0.0.1:<port>`). Written
-    /// wherever the agent's `base_url`/`ANTHROPIC_BASE_URL`/etc. goes.
+    /// The gateway's loopback base URL (`http://127.0.0.1:<port>`), already
+    /// agent-prefixed. Written wherever the agent's `base_url`/
+    /// `ANTHROPIC_BASE_URL`/etc. goes.
     pub gateway_base_url: String,
-    /// Stable model alias string. Written into the agent's model field; the
+    /// Primary model alias slot. Written into the agent's model field; the
     /// gateway ignores the agent-stated model and resolves the real one
-    /// per-task, so this value is arbitrary but must be stable across writes
-    /// (the convention is `"nestra"`).
-    pub model_alias: String,
+    /// per-task, so the id is arbitrary but must be stable across writes (the
+    /// convention is `"nestra"`; Claude Code uses a real CC id because it
+    /// validates model names locally).
+    pub model_alias: AliasModel,
+    /// Per-tier alias slots (Claude Code only). `None` for single-alias agents.
+    pub tier_aliases: Option<TierAliases>,
     /// Sentinel API key written into the agent's key slot. The gateway holds
     /// the real credential; the agent's value is never sent upstream.
     pub sentinel_key: String,
+}
+
+impl GatewayAlias {
+    /// Single-alias construction — no tiers, no abilities (the shape every
+    /// non-Claude agent uses; writers render conservative placeholders).
+    pub fn simple(
+        gateway_base_url: impl Into<String>,
+        model_alias: impl Into<String>,
+        sentinel_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            gateway_base_url: gateway_base_url.into(),
+            model_alias: AliasModel { id: model_alias.into(), abilities: None },
+            tier_aliases: None,
+            sentinel_key: sentinel_key.into(),
+        }
+    }
 }
 
 impl std::fmt::Debug for GatewayAlias {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GatewayAlias")
             .field("gateway_base_url", &self.gateway_base_url)
-            .field("model_alias", &self.model_alias)
+            .field("model_alias", &self.model_alias.id)
+            .field(
+                "tier_aliases",
+                &self.tier_aliases.as_ref().map(|t| {
+                    format!(
+                        "haiku={}, sonnet={}, opus={}",
+                        t.haiku.id, t.sonnet.id, t.opus.id
+                    )
+                }),
+            )
             .field("sentinel_key", &"<redacted>")
             .finish()
     }
@@ -471,11 +527,11 @@ mod tests {
 
     #[test]
     fn gateway_alias_debug_redacts_sentinel_key() {
-        let alias = GatewayAlias {
-            gateway_base_url: "http://127.0.0.1:18777/claude-code-cli".into(),
-            model_alias: "claude-haiku-4-5".into(),
-            sentinel_key: "super-secret-token-value".into(),
-        };
+        let alias = GatewayAlias::simple(
+            "http://127.0.0.1:18777/claude-code-cli",
+            "claude-haiku-4-5",
+            "super-secret-token-value",
+        );
         let s = format!("{alias:?}");
         assert!(s.contains("sentinel_key"), "field name should appear");
         assert!(

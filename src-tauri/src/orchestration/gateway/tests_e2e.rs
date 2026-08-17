@@ -145,6 +145,108 @@ async fn body_json(body: GatewayBody) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
 }
 
+/// Tier-aware routing: a `tier:haiku` policy row steers haiku-tier requests
+/// (model id `claude-haiku-4-5`) to a cheaper endpoint's default model, while
+/// sonnet-tier requests keep resolving to the agent's bound endpoint. Both
+/// upstreams speak the Anthropic wire (same-wire relay, so a plain message
+/// JSON payload suffices).
+#[tokio::test]
+async fn tier_policy_routes_haiku_requests_to_preferred_endpoint() {
+    let msg_payload = |model: &str| {
+        let payload = format!(
+            r#"{{"id":"msg_1","type":"message","role":"assistant","model":"{model}","content":[{{"type":"text","text":"hi"}}],"stop_reason":"end_turn","usage":{{"input_tokens":10,"output_tokens":2}}}}"#
+        );
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+            payload.len(),
+            payload
+        )
+    };
+    let (main_addr, main_upstream) = mock_upstream(msg_payload("glm-5.2")).await;
+    let (cheap_addr, cheap_upstream) = mock_upstream(msg_payload("cheap-2")).await;
+
+    // Seed: bound endpoint (main, glm-5.2) + a cheap endpoint whose default
+    // model is cheap-2, plus a tier:haiku policy preferring the cheap one.
+    let conn = {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::schema::build_v1(&conn).unwrap();
+        for a in crate::agents::agents() {
+            conn.execute(
+                "INSERT OR IGNORE INTO agent (id, kind, display_name, status, last_detected_at, enabled)
+                 VALUES (?1, ?2, ?3, 'ok', 0, 1)",
+                rusqlite::params![a.id, a.kind, a.display_name],
+            )
+            .unwrap();
+        }
+        for (id, addr, default) in [
+            ("ep-main", main_addr, "glm-5.2"),
+            ("ep-cheap", cheap_addr, "cheap-2"),
+        ] {
+            conn.execute(
+                "INSERT INTO provider_endpoint (id, kind, display_name, has_api_key, status, models_json)
+                 VALUES (?1,'custom','test',1,'valid',?2)",
+                rusqlite::params![
+                    id,
+                    format!(r#"{{"available":["{default}"],"default":"{default}"}}"#)
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO endpoint_protocol (endpoint_id, protocol, base_url) VALUES (?1,'anthropic',?2)",
+                rusqlite::params![id, format!("http://{addr}")],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO agent_provider_binding (agent_id, endpoint_id, active, created_at)
+             VALUES ('claude-code-cli','ep-main',1,0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO routing_policy (agent_id, role, preferred_endpoints, fallback_endpoints,
+                                        allowed_models, migrate_on_quota, inject_cache_control,
+                                        affinity_scope, updated_at)
+             VALUES ('claude-code-cli','tier:haiku','[\"ep-cheap\"]',NULL,NULL,1,0,'task',1)",
+            [],
+        )
+        .unwrap();
+        crate::orchestration::capability_registry::rebuild(&conn).unwrap();
+        conn
+    };
+    let state = state_for(conn);
+
+    // Haiku-tier request → the tier policy's preferred endpoint + its model.
+    let body = br#"{"model":"claude-haiku-4-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = super::protocol_anthropic::handle_bytes(
+        headers(),
+        Bytes::from_static(body),
+        state.clone(),
+        "claude-code-cli",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::OK);
+    let (path, req_body) = cheap_upstream.await.unwrap();
+    assert_eq!(path, "/v1/messages");
+    assert_eq!(req_body["model"], "cheap-2", "haiku tier follows the tier:haiku policy");
+    drop(body_json(resp.into_body()).await);
+
+    // Sonnet-tier request → the bound endpoint's default (no tier row for it).
+    let body = br#"{"model":"claude-sonnet-4-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = super::protocol_anthropic::handle_bytes(
+        headers(),
+        Bytes::from_static(body),
+        state,
+        "claude-code-cli",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::OK);
+    let (_path, req_body) = main_upstream.await.unwrap();
+    assert_eq!(req_body["model"], "glm-5.2", "sonnet tier keeps the bound default");
+}
+
 /// Anthropic inbound (Claude Code) → responses-class model (grok-4.5):
 /// the request is converted to the Responses API, dialed on `/v1/responses`,
 /// and the responses-shaped response is converted back to an Anthropic
