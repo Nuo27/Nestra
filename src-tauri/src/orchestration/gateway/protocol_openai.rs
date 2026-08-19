@@ -255,6 +255,18 @@ async fn forward_one(
 
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();
+    if !status.is_success() {
+        // The 404-style "page not found" failures are almost always a wrong
+        // dialed URL (off-direction protocol row, bad base layout) — log the
+        // EXACT upstream URL so the failure names itself.
+        tracing::warn!(
+            endpoint = %route.endpoint_id,
+            model = %route.model,
+            upstream = %upstream_url,
+            status = status.as_u16(),
+            "gateway: upstream non-success"
+        );
+    }
     // Relay + observe. Reuse the Anthropic relay for the mechanics (it streams
     // verbatim + observes usage from SSE or buffered JSON); the OpenAI usage
     // fields differ (prompt_tokens/completion_tokens) so we post-process the

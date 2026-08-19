@@ -607,6 +607,25 @@ fn build_route(
         row.map(|p| (parse_kind(&p.protocol), p.base_url.clone()))
             .unwrap_or((ProviderKind::Custom, String::new()))
     };
+    // Off-direction fallback is a 404 factory: an OpenAI inbound dialing an
+    // anthropic base (or vice versa) joins the wrong path and the upstream
+    // answers "page not found". Name it so the config fix is obvious.
+    if let Some(hint) = ctx.protocol_hint {
+        let row_kind = protocol;
+        let has_match = ep
+            .protocols
+            .iter()
+            .any(|p| parse_kind(&p.protocol) == hint);
+        if !has_match && row_kind != hint {
+            tracing::warn!(
+                agent = %ctx.agent_id,
+                endpoint = %endpoint_id,
+                inbound = %hint.as_str(),
+                base = %base_url,
+                "routing: no protocol row for the inbound direction — dialing an off-direction base; add a matching protocol row on the Providers page if this 404s upstream"
+            );
+        }
+    }
 
     // Wire selection: the per-model `api` dialect (from the catalog's merged
     // abilities) decides the upstream wire when known — an anthropic inbound
