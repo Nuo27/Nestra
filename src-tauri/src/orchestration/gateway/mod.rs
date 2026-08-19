@@ -194,9 +194,17 @@ pub async fn spawn(
                         // instead of silently tearing the socket down (the
                         // agent saw a bare ECONNRESET).
                         let serve = tauri::async_runtime::spawn(async move {
+                            // ponytail: `header_read_timeout` was dropped —
+                            // hyper 1.11.0 panics ("timeout set, but no timer
+                            // set") on every connection when the raw
+                            // http1::Builder isn't wired to a hyper timer, and
+                            // no timer API exists on this builder. The guard
+                            // was loopback-only DoS hardening; auth (token)
+                            // + 64KB header cap remain. Upgrade path: route
+                            // through `hyper_util::server::conn` (auto
+                            // builder + TokioTimer) to restore it.
                             if let Err(e) = http1::Builder::new()
                                 .max_buf_size(64 * 1024)
-                                .header_read_timeout(std::time::Duration::from_secs(10))
                                 .serve_connection(io, hyper::service::service_fn(move |req| {
                                     let st = conn_state.clone();
                                     async move { dispatch(req, st).await }
