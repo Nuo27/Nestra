@@ -658,6 +658,10 @@ struct ObservingBody {
     request_id: String,
     /// Backfill fired once (terminal poll already seen).
     done: bool,
+    /// A terminal SSE error event is queued (delivered next poll, then the
+    /// stream ends `None`) — converts an upstream mid-stream reset into a
+    /// structured error the agent can parse instead of a connection teardown.
+    pending_terminal: bool,
 }
 
 /// Cap on the unterminated-line carry buffer (bytes). Generous on purpose:
@@ -679,6 +683,7 @@ impl ObservingBody {
             state,
             request_id,
             done: false,
+            pending_terminal: false,
         }
     }
 
@@ -770,6 +775,22 @@ fn observe_text_window(
     observe_wire_chunk(wire, &complete, obs);
 }
 
+/// Terminal SSE event emitted when the upstream stream dies mid-flight, so
+/// the agent gets a structured error instead of a bare connection reset.
+/// The body is JSON-encoded (serde) so the upstream's message (which can
+/// carry quotes/newlines) stays inside a parseable `data:` line.
+fn terminal_sse_error(wire: ProviderKind, message: &str) -> String {
+    let json = serde_json::to_string(&serde_json::json!({
+        "type": "error",
+        "error": { "type": "overloaded_error", "message": message }
+    }))
+    .unwrap_or_else(|_| "{}".into());
+    match wire {
+        ProviderKind::Anthropic => format!("event: error\ndata: {json}\n\n"),
+        _ => format!("data: {json}\n\ndata: [DONE]\n\n"),
+    }
+}
+
 impl hyper::body::Body for ObservingBody {
     type Data = Bytes;
     type Error = std::io::Error;
@@ -785,6 +806,13 @@ impl hyper::body::Body for ObservingBody {
         // (All fields are Unpin, so `Pin::get_mut` would also be sound; this
         // mirrors the sibling stream wrappers.)
         let this = unsafe { self.get_unchecked_mut() };
+        // The terminal error event was handed out on the previous poll — end
+        // the stream now (hyper never sees a body error, so no connection
+        // reset).
+        if this.pending_terminal {
+            this.pending_terminal = false;
+            return std::task::Poll::Ready(None);
+        }
         let poll = std::pin::Pin::new(&mut this.inner).poll_frame(cx);
         match poll {
             std::task::Poll::Pending => std::task::Poll::Pending,
@@ -794,9 +822,11 @@ impl hyper::body::Body for ObservingBody {
             }
             std::task::Poll::Ready(Some(Err(e))) => {
                 this.finish();
-                std::task::Poll::Ready(Some(Err(std::io::Error::other(format!(
-                    "upstream body: {e}"
-                )))))
+                let msg = format!("upstream body: {e}");
+                tracing::warn!("gateway: relay stream error — terminating cleanly: {msg}");
+                let terminal = terminal_sse_error(this.wire, &msg);
+                this.pending_terminal = true;
+                std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from(terminal)))))
             }
             std::task::Poll::Ready(Some(Ok(frame))) => {
                 if let Some(bytes) = frame.data_ref() {
@@ -853,6 +883,20 @@ pub(super) fn build_agent_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_sse_error_formats_per_wire() {
+        // OpenAI chat dialect: a data: error object, then [DONE] — the AI SDK
+        // parses the error instead of seeing a dead connection.
+        let openai = terminal_sse_error(ProviderKind::Openai, "boom \"quote\"");
+        assert!(openai.starts_with("data: {"));
+        assert!(openai.ends_with("data: [DONE]\n\n"));
+        assert!(openai.contains("boom \\\""), "message is JSON-escaped");
+        // Anthropic dialect: an `error` event with a data payload.
+        let anthropic = terminal_sse_error(ProviderKind::Anthropic, "boom");
+        assert!(anthropic.starts_with("event: error\ndata: "));
+        assert!(!anthropic.contains("[DONE]"));
+    }
 
     #[test]
     fn path_is_messages_accepts_both_forms() {

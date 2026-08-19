@@ -182,22 +182,32 @@ pub async fn spawn(
                     let io = TokioIo::new(stream);
                     let conn_state = accept_state.clone();
                     tauri::async_runtime::spawn(async move {
-                        // Local DoS hardening: cap the header block + overall
+                        // Lazy DoS hardening: cap the header block + overall
                         // body size (a hostile local process could otherwise
                         // stream unbounded data into memory), bound the
                         // per-connection idle time, and drop `with_upgrades`
                         // (no websocket/upgrade surface is needed on the
                         // loopback gateway).
-                        if let Err(e) = http1::Builder::new()
-                            .max_buf_size(64 * 1024)
-                            .header_read_timeout(std::time::Duration::from_secs(10))
-                            .serve_connection(io, hyper::service::service_fn(move |req| {
-                                let st = conn_state.clone();
-                                async move { dispatch(req, st).await }
-                            }))
-                            .await
-                        {
-                            tracing::warn!("gateway connection error: {e}");
+                        //
+                        // serve_connection runs in an inner task; the outer
+                        // awaits its JoinHandle so a handler PANIC is logged
+                        // instead of silently tearing the socket down (the
+                        // agent saw a bare ECONNRESET).
+                        let serve = tauri::async_runtime::spawn(async move {
+                            if let Err(e) = http1::Builder::new()
+                                .max_buf_size(64 * 1024)
+                                .header_read_timeout(std::time::Duration::from_secs(10))
+                                .serve_connection(io, hyper::service::service_fn(move |req| {
+                                    let st = conn_state.clone();
+                                    async move { dispatch(req, st).await }
+                                }))
+                                .await
+                            {
+                                tracing::warn!("gateway connection error: {e}");
+                            }
+                        });
+                        if let Err(panic) = serve.await {
+                            tracing::error!("gateway: connection handler panicked: {panic:?}");
                         }
                     });
                 }
@@ -236,7 +246,7 @@ async fn dispatch(
 
     let path = req.uri().path().to_string();
     let agent_id = extract_agent_id(&path);
-    match agent_id.as_deref() {
+    let handled = match agent_id.as_deref() {
         Some("opencode-desktop") | Some("pi-cli") => {
             protocol_openai::handle(req, state, agent_id.unwrap().as_str()).await
         }
@@ -247,7 +257,17 @@ async fn dispatch(
             protocol_anthropic::handle(req, state, agent_id.as_deref().unwrap_or("claude-code-cli"))
                 .await
         }
-    }
+    };
+    Ok(match handled {
+        Ok(resp) => resp,
+        Err(e) => {
+            // A handler error used to tear the connection down with no
+            // response — the agent saw a bare ECONNRESET. Surface a 500 +
+            // a log line instead so failures are diagnosable.
+            tracing::error!("gateway: handler error: {e:?}");
+            internal_error()
+        }
+    })
 }
 
 /// Check the inbound credential against the loopback token. Accepts either
@@ -280,6 +300,18 @@ fn unauthorized() -> hyper::Response<stream::GatewayBody> {
         b"{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"unauthorized\"}}",
     ))));
     *r.status_mut() = StatusCode::UNAUTHORIZED;
+    r
+}
+
+/// 500 for an internal handler failure — keeps the connection alive with a
+/// real response (instead of the silent close the agent saw as ECONNRESET).
+/// The handler's error is logged by the caller.
+fn internal_error() -> hyper::Response<stream::GatewayBody> {
+    let mut r = hyper::Response::new(stream::GatewayBody::json_full(serde_json::json!({
+        "type": "error",
+        "error": { "type": "nestra_gateway_error", "message": "internal gateway error" }
+    })));
+    *r.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
     r
 }
 
