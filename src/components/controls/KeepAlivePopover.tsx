@@ -17,6 +17,7 @@ import { extractError } from "../../ipc/errors";
 import { formatTime } from "../../lib/format";
 import { keepaliveMeta } from "../../lib/keepalive";
 import { useNow } from "../../lib/useNow";
+import { useResumeInvalidate } from "../../lib/useResumeInvalidate";
 
 /// Keep-alive indicator + status popover for the Quota card. The trigger
 /// tracks runtime state (polled every 10s) with the shared `HeartPulse` +
@@ -35,14 +36,16 @@ export function KeepAlivePopover({ endpointId }: { endpointId: string }) {
     queryFn: () => quotaKeepaliveStatus(endpointId),
     refetchInterval: 10_000,
     // The 10s poll is a UI-freshness timer; it stops while the window is
-    // hidden (background polling would waste cycles). On window focus/visibility
-    // regain, refetch once so the countdown reflects the LATEST backend state —
-    // the Rust worker may have fired pings / advanced `next_fire_at` while the
-    // window was hidden. `next_fire_at` itself is an absolute deadline, so the
-    // countdown stays correct even if this fetch lags.
+    // hidden (background polling would waste cycles). On visibility regain,
+    // `useResumeInvalidate` below pulls the LATEST backend state — the Rust
+    // worker may have fired pings / advanced `next_fire_at` while hidden.
+    // `next_fire_at` itself is an absolute deadline, so the countdown stays
+    // correct even if this fetch lags. `refetchOnWindowFocus` is intentionally
+    // off: unreliable in WebView2, and the hook below is the sole resume
+    // authority.
     refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
   });
+  useResumeInvalidate([qk.keepaliveStatus(endpointId)]);
   const phase = status.data?.phase ?? "disabled";
   const meta = keepaliveMeta(phase);
   const s = status.data;

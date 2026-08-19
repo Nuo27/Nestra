@@ -16,6 +16,7 @@ import { qk } from "../../lib/queries";
 import { isPlanActive, resolvePlan } from "../../lib/quota";
 import { keepaliveMeta } from "../../lib/keepalive";
 import { fmtMoney } from "../../lib/format";
+import { useResumeInvalidate } from "../../lib/useResumeInvalidate";
 import { Card } from "../controls/Card";
 import { Button } from "../controls/Button";
 import { StatusDot } from "../feedback/StatusDot";
@@ -129,11 +130,12 @@ function KeepAliveChip({ endpointId }: { endpointId: string }) {
       const phase = query.state.data?.phase ?? "disabled";
       return keepaliveMeta(phase).visible ? 10_000 : false;
     },
-    // Refresh once when the window comes back so the phase reflects the
-    // backend's latest state (the worker may have fired pings while hidden).
+    // Don't refetch in the background; `useResumeInvalidate` (below) is the
+    // sole resume authority here — `refetchOnWindowFocus` is unreliable in
+    // WebView2 when the window is restored from tray.
     refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
   });
+  useResumeInvalidate([qk.keepaliveStatus(endpointId)]);
   const phase = q.data?.phase ?? "disabled";
   const meta = keepaliveMeta(phase);
   if (!meta.visible) return null;
@@ -168,12 +170,11 @@ function QuotaSection({ endpoint }: { endpoint: EndpointInfo }) {
     staleTime: 60_000,
     // Passive preview — the quota page owns the Auto interval.
     refetchInterval: false,
-    // Catch up on window focus/visibility regain so the preview isn't stale
-    // after the app was hidden (stale-gated by staleTime). The Quota page's
-    // absolute-deadline auto-refresh is the real refresh authority; this just
-    // refreshes the passive card when the user returns.
-    refetchOnWindowFocus: true,
+    // No refetchOnWindowFocus: TanStack's focus manager doesn't fire reliably
+    // in WebView2 when the window is restored from tray. The reliable resume
+    // trigger lives in `useResumeInvalidate` below (visibilitychange).
   });
+  useResumeInvalidate([qk.endpointQuota(endpoint.id)]);
   const data = q.data;
   useEffect(() => {
     if (data?.ok && data.items.length > 0) setQuotaCache(endpoint.id, data);
