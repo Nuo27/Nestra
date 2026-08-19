@@ -19,7 +19,7 @@ use serde_json::{Map, Value};
 use crate::config_writer::ProviderKind;
 
 use super::stream::GatewayBody;
-use super::stream_convert::OpenAiToAnthropicStream;
+use super::stream_convert::{AnthropicToChatStream, OpenAiToAnthropicStream};
 
 /// Convert a relayed upstream body back to the inbound agent's format.
 /// Streaming SSE is rewritten frame-by-frame; a buffered JSON body is
@@ -72,6 +72,7 @@ pub async fn convert_relay_body(
                     }
                 }
                 (ProviderKind::Openai, ProviderKind::Responses) => responses_to_chat(&bytes),
+                (ProviderKind::Openai, ProviderKind::Anthropic) => anthropic_to_chat(&bytes),
                 _ => Bytes::from(bytes),
             };
             // A conversion that yields non-JSON (HTML/empty/malformed
@@ -95,6 +96,9 @@ pub async fn convert_relay_body(
                 }
                 (ProviderKind::Openai, ProviderKind::Responses) => {
                     GatewayBody::streaming(super::stream_responses::ResponsesToChatStream::new(stream))
+                }
+                (ProviderKind::Openai, ProviderKind::Anthropic) => {
+                    GatewayBody::streaming(AnthropicToChatStream::new(stream))
                 }
                 _ => GatewayBody::streaming(stream),
             };
@@ -502,6 +506,334 @@ pub fn openai_to_anthropic(body: &[u8]) -> Bytes {
     Bytes::from(serde_json::to_vec(&msg).unwrap_or_else(|_| body.to_vec()))
 }
 
+/// OpenAI Chat Completions request → Anthropic Messages request — the reverse
+/// of `anthropic_to_openai`, bridging a chat-wire agent (opencode/pi) to an
+/// endpoint whose only protocol row is Anthropic (e.g. MiniMax-M3 on
+/// `…/anthropic/v1/messages`). Malformed input returns the original bytes.
+pub fn chat_to_anthropic(body: &[u8]) -> Bytes {
+    let mut v: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return Bytes::copy_from_slice(body),
+    };
+    let obj = match v.as_object_mut() {
+        Some(o) => o,
+        None => return Bytes::copy_from_slice(body),
+    };
+
+    let mut system: Vec<String> = Vec::new();
+    let mut messages: Vec<Value> = Vec::new();
+
+    if let Some(list) = obj.get("messages").and_then(Value::as_array).cloned() {
+        for m in list {
+            let Some(role) = m.get("role").and_then(Value::as_str) else { continue };
+            match role {
+                // OpenAI system is a role message; Anthropic wants top-level.
+                "system" => {
+                    if let Some(s) = m.get("content").and_then(Value::as_str) {
+                        system.push(s.to_string());
+                    }
+                }
+                "user" | "assistant" => {
+                    let mut blocks: Vec<Value> = Vec::new();
+                    match m.get("content") {
+                        Some(Value::String(s)) if !s.is_empty() => {
+                            let mut tb = Map::new();
+                            tb.insert("type".into(), Value::String("text".into()));
+                            tb.insert("text".into(), Value::String(s.clone()));
+                            blocks.push(Value::Object(tb));
+                        }
+                        Some(Value::Array(parts)) => {
+                            for p in parts {
+                                match p.get("type").and_then(Value::as_str) {
+                                    Some("text") => {
+                                        if let Some(t) = p.get("text").and_then(Value::as_str) {
+                                            if !t.is_empty() {
+                                                let mut tb = Map::new();
+                                                tb.insert("type".into(), Value::String("text".into()));
+                                                tb.insert("text".into(), Value::String(t.into()));
+                                                blocks.push(Value::Object(tb));
+                                            }
+                                        }
+                                    }
+                                    Some("image_url") => {
+                                        // Only data-URI images convert; an
+                                        // http(s) URL can't be re-encoded here.
+                                        let url = p
+                                            .get("image_url")
+                                            .and_then(|i| i.get("url"))
+                                            .and_then(Value::as_str);
+                                        if let Some((media_type, data)) = url.and_then(split_data_uri)
+                                        {
+                                            let mut img = Map::new();
+                                            img.insert("type".into(), Value::String("image".into()));
+                                            let mut source = Map::new();
+                                            source.insert("type".into(), Value::String("base64".into()));
+                                            source.insert("media_type".into(), Value::String(media_type.into()));
+                                            source.insert("data".into(), Value::String(data.into()));
+                                            img.insert("source".into(), Value::Object(source));
+                                            blocks.push(Value::Object(img));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    // assistant tool_calls ride the same message → tool_use.
+                    if role == "assistant" {
+                        if let Some(calls) = m.get("tool_calls").and_then(Value::as_array) {
+                            for call in calls {
+                                let mut tb = Map::new();
+                                tb.insert("type".into(), Value::String("tool_use".into()));
+                                if let Some(id) = call.get("id").and_then(Value::as_str) {
+                                    tb.insert("id".into(), Value::String(id.into()));
+                                }
+                                if let Some(func) = call.get("function") {
+                                    if let Some(name) = func.get("name").and_then(Value::as_str) {
+                                        tb.insert("name".into(), Value::String(name.into()));
+                                    }
+                                    let input = func
+                                        .get("arguments")
+                                        .and_then(Value::as_str)
+                                        .and_then(|a| serde_json::from_str::<Value>(a).ok())
+                                        .unwrap_or(Value::Null);
+                                    tb.insert("input".into(), input);
+                                }
+                                blocks.push(Value::Object(tb));
+                            }
+                        }
+                    }
+                    if !blocks.is_empty() {
+                        let mut mm = Map::new();
+                        mm.insert("role".into(), Value::String(role.into()));
+                        mm.insert("content".into(), Value::Array(blocks));
+                        messages.push(Value::Object(mm));
+                    }
+                }
+                // OpenAI `tool` role = tool result.
+                "tool" => {
+                    let mut tb = Map::new();
+                    tb.insert("type".into(), Value::String("tool_result".into()));
+                    tb.insert("tool_use_id".into(), m.get("tool_call_id").cloned().unwrap_or(Value::Null));
+                    let text = match m.get("content") {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(Value::Array(parts)) => parts
+                            .iter()
+                            .filter_map(|p| p.get("text").and_then(Value::as_str))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        _ => String::new(),
+                    };
+                    tb.insert("content".into(), Value::String(text));
+                    let mut mm = Map::new();
+                    mm.insert("role".into(), Value::String("user".into()));
+                    mm.insert("content".into(), Value::Array(vec![Value::Object(tb)]));
+                    messages.push(Value::Object(mm));
+                }
+                _ => {}
+            }
+        }
+    }
+    if !system.is_empty() {
+        obj.insert("system".into(), Value::String(system.join("\n")));
+    }
+    obj.insert("messages".into(), Value::Array(messages));
+
+    // tools: {type:function, function:{name,description,parameters}} →
+    // anthropic {name, description, input_schema}.
+    if let Some(tools) = obj.get("tools").and_then(Value::as_array).cloned() {
+        let mut out: Vec<Value> = Vec::new();
+        for t in tools {
+            let Some(func) = t.get("function") else { continue };
+            let mut tf = Map::new();
+            if let Some(name) = func.get("name").and_then(Value::as_str) {
+                tf.insert("name".into(), Value::String(name.into()));
+            }
+            if let Some(desc) = func.get("description").and_then(Value::as_str) {
+                tf.insert("description".into(), Value::String(desc.into()));
+            }
+            let mut schema = func
+                .get("parameters")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Map::new()));
+            clean_schema(&mut schema);
+            if !schema.get("type").and_then(Value::as_str).is_some() {
+                let mut o = Map::new();
+                o.insert("type".into(), Value::String("object".into()));
+                o.insert("properties".into(), Value::Object(Map::new()));
+                schema = Value::Object(o);
+            }
+            tf.insert("input_schema".into(), schema);
+            out.push(Value::Object(tf));
+        }
+        obj.insert("tools".into(), Value::Array(out));
+    }
+
+    // tool_choice reverse map (openai → anthropic).
+    if let Some(choice) = obj.get("tool_choice").cloned() {
+        let mapped = match choice {
+            Value::String(ref s) if s == "required" => Value::String("any".into()),
+            Value::Object(mut m)
+                if m.get("type").and_then(Value::as_str) == Some("function") =>
+            {
+                let name = m
+                    .get_mut("function")
+                    .and_then(|f| f.get("name"))
+                    .cloned()
+                    .or_else(|| m.remove("name"));
+                let mut out = Map::new();
+                out.insert("type".into(), Value::String("tool".into()));
+                if let Some(n) = name {
+                    out.insert("name".into(), n);
+                }
+                Value::Object(out)
+            }
+            other => other,
+        };
+        obj.insert("tool_choice".into(), mapped);
+    }
+
+    // stop → stop_sequences; strip openai-only keys Anthropic rejects.
+    if let Some(stop) = obj.remove("stop") {
+        obj.insert("stop_sequences".into(), stop);
+    }
+    for key in [
+        "stream_options",
+        "logprobs",
+        "top_logprobs",
+        "n",
+        "presence_penalty",
+        "frequency_penalty",
+        "seed",
+        "user",
+        "response_format",
+        "logit_bias",
+    ] {
+        obj.remove(key);
+    }
+
+    Bytes::from(serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec()))
+}
+
+/// Anthropic Messages response → OpenAI Chat Completions response — the
+/// reverse of `openai_to_anthropic`. Malformed input returns the original
+/// bytes.
+pub fn anthropic_to_chat(body: &[u8]) -> Bytes {
+    let mut v: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return Bytes::copy_from_slice(body),
+    };
+    let obj = match v.as_object_mut() {
+        Some(o) => o,
+        None => return Bytes::copy_from_slice(body),
+    };
+
+    let mut text: Vec<String> = Vec::new();
+    let mut tool_calls: Vec<Value> = Vec::new();
+    let mut stop_reason: Option<String> = None;
+    if let Some(reason) = obj.get("stop_reason").and_then(Value::as_str) {
+        stop_reason = Some(match reason {
+            "tool_use" => "tool_calls".to_string(),
+            "max_tokens" => "length".to_string(),
+            _ => "stop".to_string(),
+        });
+    }
+
+    if let Some(blocks) = obj.get("content").and_then(Value::as_array) {
+        for b in blocks {
+            match b.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if let Some(t) = b.get("text").and_then(Value::as_str) {
+                        if !t.is_empty() {
+                            text.push(t.to_string());
+                        }
+                    }
+                }
+                Some("tool_use") => {
+                    let mut call = Map::new();
+                    call.insert("index".into(), Value::from(tool_calls.len()));
+                    if let Some(id) = b.get("id").and_then(Value::as_str) {
+                        call.insert("id".into(), Value::String(id.into()));
+                    }
+                    let mut function = Map::new();
+                    if let Some(name) = b.get("name").and_then(Value::as_str) {
+                        function.insert("name".into(), Value::String(name.into()));
+                    }
+                    let args = b
+                        .get("input")
+                        .and_then(|i| serde_json::to_string(i).ok())
+                        .unwrap_or_else(|| "{}".into());
+                    function.insert("arguments".into(), Value::String(args));
+                    call.insert("function".into(), Value::Object(function));
+                    tool_calls.push(Value::Object(call));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut message = Map::new();
+    message.insert("role".into(), Value::String("assistant".into()));
+    message.insert("content".into(), Value::String(text.join("\n")));
+    if !tool_calls.is_empty() {
+        message.insert("tool_calls".into(), Value::Array(tool_calls));
+    }
+    let mut choice = Map::new();
+    choice.insert("index".into(), Value::from(0));
+    choice.insert("message".into(), Value::Object(message));
+    choice.insert(
+        "finish_reason".into(),
+        Value::String(stop_reason.unwrap_or_else(|| "stop".into())),
+    );
+
+    let mut usage = Map::new();
+    if let Some(u) = obj.get("usage") {
+        let input = u.get("input_tokens").and_then(Value::as_u64);
+        let output = u.get("output_tokens").and_then(Value::as_u64);
+        if let Some(i) = input {
+            usage.insert("prompt_tokens".into(), Value::from(i));
+        }
+        if let Some(o) = output {
+            usage.insert("completion_tokens".into(), Value::from(o));
+        }
+        let cached = u.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+        let cache_write = u.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+        if cached > 0 || cache_write > 0 {
+            let mut details = Map::new();
+            if cached > 0 {
+                details.insert("cached_tokens".into(), Value::from(cached));
+            }
+            usage.insert("prompt_tokens_details".into(), Value::Object(details));
+        }
+    }
+
+    let mut out = Map::new();
+    if let Some(id) = obj.get("id").cloned() {
+        out.insert("id".into(), id);
+    }
+    if let Some(model) = obj.get("model").cloned() {
+        out.insert("model".into(), model);
+    }
+    out.insert("object".into(), Value::String("chat.completion".into()));
+    out.insert("choices".into(), Value::Array(vec![Value::Object(choice)]));
+    if !usage.is_empty() {
+        out.insert("usage".into(), Value::Object(usage));
+    }
+
+    Bytes::from(serde_json::to_vec(&out).unwrap_or_else(|_| body.to_vec()))
+}
+
+/// Split a `data:<media_type>;base64,<data>` URI. Anything else (http(s)
+/// URLs, plain text) returns `None` — the bridge drops the part rather than
+/// fabricating bytes.
+fn split_data_uri(url: &str) -> Option<(&str, &str)> {
+    let rest = url.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let media = meta.strip_suffix(";base64")?;
+    Some((media, data))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,5 +954,81 @@ mod tests {
         assert_eq!(out["stop_reason"], "end_turn");
         assert_eq!(out["content"][0]["type"], "text");
         assert_eq!(out["content"][0]["text"], "done");
+    }
+
+    #[test]
+    fn chat_request_to_anthropic_messages() {
+        // ChatGPT-shape request → Anthropic Messages (tools, system, a
+        // tool_result, an image), the missing bridge direction.
+        let body = serde_json::json!({
+            "model": "MiniMax-M3",
+            "messages": [
+                { "role": "system", "content": "You are helpful" },
+                { "role": "user", "content": "look at this" },
+                { "role": "user", "content": [
+                    { "type": "image_url", "image_url": { "url": "data:image/png;base64,AA==" } }
+                ]},
+                { "role": "assistant", "content": "ok", "tool_calls": [
+                    { "id": "call_1", "type": "function", "function": { "name": "search", "arguments": "{\"q\":\"x\"}" } }
+                ]},
+                { "role": "tool", "tool_call_id": "call_1", "content": "results" }
+            ],
+            "tools": [{ "type": "function", "function": { "name": "search", "description": "Search it", "parameters": { "type": "object", "properties": { "q": { "type": "string" } } } } }],
+            "tool_choice": { "type": "function", "function": { "name": "search" } },
+            "stop": ["END"],
+            "stream_options": { "include_usage": true }
+        });
+        let out: Value = serde_json::from_slice(&chat_to_anthropic(body.to_string().as_bytes())).unwrap();
+
+        assert_eq!(out["system"], "You are helpful");
+        let messages = out["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["content"][0]["type"], "image");
+        assert_eq!(messages[1]["content"][0]["source"]["data"], "AA==");
+        assert_eq!(messages[2]["content"][1]["type"], "tool_use");
+        assert_eq!(messages[2]["content"][1]["id"], "call_1");
+        assert_eq!(messages[2]["content"][1]["input"]["q"], "x");
+        assert_eq!(messages[3]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[3]["content"][0]["tool_use_id"], "call_1");
+        // tools → {name, input_schema}
+        assert_eq!(out["tools"][0]["name"], "search");
+        assert_eq!(out["tools"][0]["input_schema"]["properties"]["q"]["type"], "string");
+        // tool_choice reverse-mapped; stop → stop_sequences; openai-only
+        // stream_options stripped.
+        assert_eq!(out["tool_choice"]["type"], "tool");
+        assert_eq!(out["tool_choice"]["name"], "search");
+        assert_eq!(out["stop_sequences"][0], "END");
+        assert!(out.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn anthropic_response_to_chat_completion() {
+        // Anthropic message response → chat completion (tool_use + usage).
+        let body = serde_json::json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "MiniMax-M3",
+            "content": [
+                { "type": "text", "text": "sure" },
+                { "type": "tool_use", "id": "toolu_1", "name": "search", "input": { "q": "x" } }
+            ],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 5 }
+        });
+        let out: Value = serde_json::from_slice(&anthropic_to_chat(body.to_string().as_bytes())).unwrap();
+
+        assert_eq!(out["object"], "chat.completion");
+        let choice = &out["choices"][0];
+        assert_eq!(choice["finish_reason"], "tool_calls");
+        let message = &choice["message"];
+        assert_eq!(message["role"], "assistant");
+        assert_eq!(message["content"], "sure");
+        assert_eq!(message["tool_calls"][0]["id"], "toolu_1");
+        assert_eq!(message["tool_calls"][0]["function"]["name"], "search");
+        assert_eq!(message["tool_calls"][0]["function"]["arguments"], r#"{"q":"x"}"#);
+        assert_eq!(out["usage"]["prompt_tokens"], 100);
+        assert_eq!(out["usage"]["completion_tokens"], 20);
+        assert_eq!(out["usage"]["prompt_tokens_details"]["cached_tokens"], 10);
     }
 }

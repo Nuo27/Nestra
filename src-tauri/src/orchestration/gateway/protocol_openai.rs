@@ -189,20 +189,17 @@ async fn forward_one(
     request_id: &str,
 ) -> ForwardOutcome {
     let rewritten = rewrite_model(&body, &route.model);
-    // Responses-class models (grok-4.5, gpt-5.6-luna) cannot speak the chat
-    // wire — convert the request to the Responses API and dial its path.
-    // Everything else stays on Chat Completions.
-    let bridging = route.protocol == ProviderKind::Responses;
-    let upstream_body = if bridging {
-        super::convert_responses::chat_to_responses(&rewritten)
-    } else {
-        rewritten
+    // Bridge the inbound chat wire to whatever wire the resolved row speaks:
+    // Responses-class models (grok-4.5, gpt-5.6-luna) get the Responses API,
+    // an endpoint whose only row is Anthropic (e.g. MiniMax-M3 on
+    // `…/anthropic`) gets Messages — otherwise native Chat Completions.
+    let bridging = route.protocol != ProviderKind::Openai;
+    let upstream_body = match route.protocol {
+        ProviderKind::Responses => super::convert_responses::chat_to_responses(&rewritten),
+        ProviderKind::Anthropic => super::convert::chat_to_anthropic(&rewritten),
+        _ => rewritten,
     };
-    let upstream_kind = if bridging {
-        ProviderKind::Responses
-    } else {
-        ProviderKind::Openai
-    };
+    let upstream_kind = route.protocol;
     let upstream_key = match (state.credential_reader)(&route.endpoint_id) {
         Ok(Some(k)) => k,
         Ok(None) => {
@@ -231,16 +228,21 @@ async fn forward_one(
             }
         }
     };
-    let upstream_req =
-        match build_upstream_request(&upstream_url, &headers, upstream_key, upstream_body) {
-            Ok(r) => r,
-            Err(e) => {
-                return ForwardOutcome::Unreachable {
-                    timeout: false,
-                    message: format!("build request: {e}"),
-                }
+    let upstream_req = match build_upstream_request(
+        &upstream_url,
+        &headers,
+        upstream_key,
+        upstream_body,
+        upstream_kind,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            return ForwardOutcome::Unreachable {
+                timeout: false,
+                message: format!("build request: {e}"),
             }
-        };
+        }
+    };
 
     let client = super::protocol_anthropic::upstream_client();
     let upstream_resp = match client.request(upstream_req).await {
@@ -282,13 +284,14 @@ async fn forward_one(
     )
     .await;
     let usage = relay.usage.map(|u| map_openai_usage(u, &resp_headers));
-    // Convert the responses-wire body back to chat chunks when bridging.
+    // Convert a bridged upstream wire back to chat chunks (Responses or
+    // Anthropic); native chat passes through verbatim.
     let body = if bridging {
         super::convert::convert_relay_body(
             relay.body,
             status.is_success(),
             ProviderKind::Openai,
-            ProviderKind::Responses,
+            route.protocol,
         )
         .await
     } else {
@@ -446,14 +449,17 @@ pub(super) fn rewrite_model(body: &[u8], resolved_model: &str) -> Bytes {
 const APP_TITLE: &str = "Nestra";
 const APP_REFERER: &str = "https://github.com/Nuo/Nestra";
 
-/// Build the upstream request. OpenAI uses `Authorization: Bearer <key>` (not
-/// `x-api-key`). We strip any inbound `authorization` and set it fresh from
+/// Build the upstream request. Chat/Responses wires use
+/// `Authorization: Bearer <key>`; the Anthropic wire uses `x-api-key`
+/// (Anthropic's native auth — some anthropic-compatible gateways 401 on
+/// Bearer-only). We strip any inbound `authorization` and set it fresh from
 /// the resolved credential.
 fn build_upstream_request(
     url: &hyper::Uri,
     original_headers: &hyper::HeaderMap,
     api_key: String,
     body: Bytes,
+    upstream_kind: ProviderKind,
 ) -> AppResult<Request<GatewayBody>> {
     let mut builder = Request::builder().method(Method::POST).uri(url);
     const SKIP: &[&str] = &[
@@ -474,6 +480,14 @@ fn build_upstream_request(
             continue;
         }
         builder = builder.header(name.clone(), value);
+    }
+    if upstream_kind == ProviderKind::Anthropic {
+        builder = builder.header(
+            "x-api-key",
+            HeaderValue::from_str(&api_key).map_err(|e| {
+                AppError::Validation(format!("api key contains invalid header chars: {e}"))
+            })?,
+        );
     }
     let bearer = format!("Bearer {api_key}");
     builder = builder.header(

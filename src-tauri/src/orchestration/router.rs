@@ -709,7 +709,11 @@ fn wire_for_model(
         (_, Some("openai-comp")) => ProviderKind::Openai,
         (Some(ProviderKind::Anthropic), Some("anthropic")) => ProviderKind::Anthropic,
         (Some(ProviderKind::Anthropic), _) => row,
-        (Some(ProviderKind::Openai), _) => ProviderKind::Openai,
+        // A chat inbound follows the endpoint's row: an openai row stays
+        // native Chat, an endpoint whose ONLY row is Anthropic (e.g.
+        // MiniMax-M3 on `…/anthropic`) gets the Messages wire and is bridged
+        // by the OpenAI handler.
+        (Some(ProviderKind::Openai), _) => row,
         (Some(ProviderKind::Responses), Some("anthropic")) => ProviderKind::Anthropic,
         // Custom inbounds aren't served by the gateway (only
         // anthropic/openai/responses paths dispatch); fall through to the row.
@@ -928,6 +932,46 @@ mod tests {
         ctx.budget_tier = Some(crate::orchestration::identity::BudgetTier::Haiku);
         let r = resolve(&ctx, &env.inputs()).unwrap();
         assert_eq!(r.endpoint_id, "ep-tier");
+    }
+
+    #[test]
+    fn openai_inbound_with_anthropic_only_row_bridges_to_messages() {
+        // A chat-wire agent bound to a single-row (anthropic) endpoint must
+        // resolve the Anthropic wire so the OpenAI handler can bridge — the
+        // 404 "page not found" case (MiniMax-M3 on `…/anthropic`).
+        let env = TestEnv::new();
+        seed_endpoint(&env.conn, "ep-a", "anthropic", "https://api.minimaxi.com/anthropic", "MiniMax-M3");
+        seed_binding(&env.conn, "opencode-desktop", "ep-a");
+        capability_registry::rebuild(&env.conn).unwrap();
+
+        let mut ctx = TaskContext::new_task("opencode-desktop", None);
+        ctx.protocol_hint = Some(ProviderKind::Openai);
+        let r = resolve(&ctx, &env.inputs()).unwrap();
+        assert_eq!(r.endpoint_id, "ep-a");
+        assert_eq!(r.protocol, ProviderKind::Anthropic, "chat inbound follows the anthropic row");
+    }
+
+    #[test]
+    fn openai_inbound_keeps_chat_when_openai_row_exists() {
+        // Regression: a chat-wire agent on an endpoint WITH an openai row
+        // stays native Chat (no bridge).
+        let env = TestEnv::new();
+        // anthropic + openai-comp rows on the SAME base (mock-style dual row).
+        seed_endpoint(&env.conn, "ep-a", "anthropic", "https://x", "m-1");
+        env.conn
+            .execute(
+                "INSERT INTO endpoint_protocol (endpoint_id, protocol, base_url)
+                 VALUES ('ep-a','openai-comp','https://x')",
+                [],
+            )
+            .unwrap();
+        seed_binding(&env.conn, "opencode-desktop", "ep-a");
+        capability_registry::rebuild(&env.conn).unwrap();
+
+        let mut ctx = TaskContext::new_task("opencode-desktop", None);
+        ctx.protocol_hint = Some(ProviderKind::Openai);
+        let r = resolve(&ctx, &env.inputs()).unwrap();
+        assert_eq!(r.protocol, ProviderKind::Openai, "openai row present → native chat wire");
     }
 
     #[test]

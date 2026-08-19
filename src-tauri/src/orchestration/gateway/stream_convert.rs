@@ -487,6 +487,458 @@ impl Body for OpenAiToAnthropicStream {
     }
 }
 
+/// Anthropic Messages SSE → OpenAI Chat Completions SSE — the mirror of
+/// `OpenAiToAnthropicStream`, used when a chat-wire agent (opencode/pi) is
+/// bridged to an Anthropic-protocol upstream. The relay already observed
+/// usage on the anthropic frames, so this wrapper is pure synchronous
+/// wire-rewriting: text deltas → `delta.content`, tool blocks →
+/// `delta.tool_calls`, `message_delta` → finish_reason + usage chunk,
+/// `message_stop` → `[DONE]`. Malformed/unknown events are skipped; a
+/// mid-stream upstream failure emits a chat `{"error":…}` then `[DONE]`
+/// instead of a corrupted stream.
+pub struct AnthropicToChatStream {
+    inner: BodyStream<Pin<Box<dyn Body<Data = Bytes, Error = std::io::Error> + Send + Sync>>>,
+    message_id: Option<String>,
+    model: Option<String>,
+    sent_first_chunk: bool,
+    /// content-block index → chat tool_call index (allocated at
+    /// content_block_start; `input_json_delta`s address blocks by index).
+    tool_by_block: HashMap<usize, u32>,
+    next_tool_index: u32,
+    finished: bool,
+    /// Bytes waiting to be emitted (one SSE event per poll drain).
+    out: Vec<u8>,
+    /// Raw upstream bytes not yet split into SSE frames.
+    buf: Vec<u8>,
+    done: bool,
+}
+
+impl AnthropicToChatStream {
+    pub fn new<B>(inner: B) -> Self
+    where
+        B: Body<Data = Bytes> + Send + Sync + 'static,
+        B::Error: std::fmt::Debug,
+    {
+        let inner = inner.map_err(|e| std::io::Error::other(format!("upstream stream error: {e:?}")));
+        AnthropicToChatStream {
+            inner: BodyStream::new(Box::pin(inner)),
+            message_id: None,
+            model: None,
+            sent_first_chunk: false,
+            tool_by_block: HashMap::new(),
+            next_tool_index: 0,
+            finished: false,
+            out: Vec::new(),
+            buf: Vec::new(),
+            done: false,
+        }
+    }
+
+    fn emit_data(&mut self, payload: serde_json::Value) {
+        self.out
+            .extend_from_slice(b"data: ");
+        self.out.extend_from_slice(
+            serde_json::to_string(&payload)
+                .unwrap_or_else(|_| "{}".into())
+                .as_bytes(),
+        );
+        self.out.extend_from_slice(b"\n\n");
+    }
+
+    /// A chat chunk with the given `choices` array (and optional usage).
+    fn emit_chunk(&mut self, choices: Value, usage: Option<Value>) {
+        let mut chunk = Map::new();
+        chunk.insert(
+            "id".into(),
+            Value::String(self.message_id.clone().unwrap_or_else(|| "chatcmpl-".into())),
+        );
+        chunk.insert("object".into(), Value::String("chat.completion.chunk".into()));
+        if let Some(m) = &self.model {
+            chunk.insert("model".into(), Value::String(m.clone()));
+        }
+        chunk.insert("choices".into(), choices);
+        if let Some(u) = usage {
+            chunk.insert("usage".into(), u);
+        }
+        self.emit_data(Value::Object(chunk));
+    }
+
+    /// The stream must open with a role-announcing empty chunk; the first
+    /// processable frame emits it lazily.
+    fn ensure_first(&mut self) {
+        if self.sent_first_chunk {
+            return;
+        }
+        self.sent_first_chunk = true;
+        let mut delta = Map::new();
+        delta.insert("role".into(), Value::String("assistant".into()));
+        let mut choice = Map::new();
+        choice.insert("index".into(), Value::from(0));
+        choice.insert("delta".into(), Value::Object(delta));
+        choice.insert("finish_reason".into(), Value::Null);
+        self.emit_chunk(Value::Array(vec![Value::Object(choice)]), None);
+    }
+
+    /// Split the raw buffer into complete SSE frames (both separator styles).
+    fn take_frames(&mut self) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        loop {
+            let double = self.buf.windows(4).position(|w| w == b"\r\n\r\n");
+            let single = self.buf.windows(2).position(|w| w == b"\n\n");
+            let end = match (double, single) {
+                (Some(d), Some(s)) => Some(d.min(s)),
+                (a, b) => a.or(b),
+            };
+            let Some(end) = end else { break };
+            let frame: Vec<u8> = self.buf.drain(..end).collect();
+            if self.buf.starts_with(b"\r\n\r\n") {
+                self.buf.drain(..4);
+            } else {
+                self.buf.drain(..2);
+            }
+            frames.push(frame);
+        }
+        frames
+    }
+
+    fn map_stop_reason(r: &str) -> &'static str {
+        match r {
+            "tool_use" => "tool_calls",
+            "max_tokens" => "length",
+            _ => "stop",
+        }
+    }
+
+    fn emit_done(&mut self) {
+        self.out.extend_from_slice(b"data: [DONE]\n\n");
+    }
+
+    fn emit_finish_and_done(&mut self, stop_reason: &str, usage: Option<Value>) {
+        let delta = Map::new();
+        let mut choice = Map::new();
+        choice.insert("index".into(), Value::from(0));
+        choice.insert("delta".into(), Value::Object(delta));
+        choice.insert("finish_reason".into(), Value::String(Self::map_stop_reason(stop_reason).into()));
+        self.emit_chunk(Value::Array(vec![Value::Object(choice)]), usage);
+        self.emit_done();
+        self.finished = true;
+    }
+
+    /// Process one anthropic SSE frame (event + data lines).
+    fn process_frame(&mut self, frame: &[u8]) {
+        let text = String::from_utf8_lossy(frame);
+        let mut event = "";
+        let mut data_lines: Vec<&str> = Vec::new();
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("event:") {
+                event = rest.trim();
+            } else if let Some(rest) = line.strip_prefix("data:") {
+                data_lines.push(rest);
+            }
+        }
+        let data = data_lines.join("\n");
+        let data = data.trim();
+        if data.is_empty() {
+            return;
+        }
+        // Anthropic `error` events → a chat error chunk, then [DONE].
+        if event == "error" {
+            let mut e_obj = Map::new();
+            e_obj.insert("type".into(), Value::String("nestra_upstream_error".into()));
+            if let Some(v) = serde_json::from_str::<Value>(data).ok() {
+                let message = v
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(Value::as_str);
+                if let Some(m) = message {
+                    e_obj.insert("message".into(), Value::String(m.into()));
+                }
+            }
+            let mut err = Map::new();
+            err.insert("error".into(), Value::Object(e_obj));
+            self.emit_data(Value::Object(err));
+            self.emit_done();
+            self.finished = true;
+            return;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(data) else { return };
+        match event {
+            "message_start" => {
+                if let Some(message) = v.get("message") {
+                    if let Some(id) = message.get("id").and_then(Value::as_str) {
+                        self.message_id = Some(id.to_string());
+                    }
+                    if let Some(m) = message.get("model").and_then(Value::as_str) {
+                        self.model = Some(m.to_string());
+                    }
+                }
+                self.ensure_first();
+            }
+            "content_block_start" => {
+                self.ensure_first();
+                let Some(cb) = v.get("content_block") else { return };
+                if cb.get("type").and_then(Value::as_str) == Some("tool_use") {
+                    let block_idx = v.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    let tool_idx = self.next_tool_index;
+                    self.next_tool_index += 1;
+                    self.tool_by_block.insert(block_idx, tool_idx);
+                    let mut tc = Map::new();
+                    tc.insert("index".into(), Value::from(tool_idx));
+                    if let Some(id) = cb.get("id").and_then(Value::as_str) {
+                        tc.insert("id".into(), Value::String(id.into()));
+                    }
+                    let mut function = Map::new();
+                    if let Some(name) = cb.get("name").and_then(Value::as_str) {
+                        function.insert("name".into(), Value::String(name.into()));
+                    }
+                    function.insert("arguments".into(), Value::String(String::new()));
+                    tc.insert("function".into(), Value::Object(function));
+                    let mut delta = Map::new();
+                    delta.insert("tool_calls".into(), Value::Array(vec![Value::Object(tc)]));
+                    let mut choice = Map::new();
+                    choice.insert("index".into(), Value::from(0));
+                    choice.insert("delta".into(), Value::Object(delta));
+                    choice.insert("finish_reason".into(), Value::Null);
+                    self.emit_chunk(Value::Array(vec![Value::Object(choice)]), None);
+                }
+            }
+            "content_block_delta" => {
+                self.ensure_first();
+                let Some(delta) = v.get("delta") else { return };
+                match delta.get("type").and_then(Value::as_str) {
+                    Some("text_delta") => {
+                        if let Some(t) = delta.get("text").and_then(Value::as_str) {
+                            if !t.is_empty() {
+                                let mut d = Map::new();
+                                d.insert("content".into(), Value::String(t.into()));
+                                let mut choice = Map::new();
+                                choice.insert("index".into(), Value::from(0));
+                                choice.insert("delta".into(), Value::Object(d));
+                                choice.insert("finish_reason".into(), Value::Null);
+                                self.emit_chunk(Value::Array(vec![Value::Object(choice)]), None);
+                            }
+                        }
+                    }
+                    Some("input_json_delta") => {
+                        let block_idx = v.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                        let Some(&tool_idx) = self.tool_by_block.get(&block_idx) else { return };
+                        let partial = delta
+                            .get("partial_json")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let mut tc = Map::new();
+                        tc.insert("index".into(), Value::from(tool_idx));
+                        let mut function = Map::new();
+                        function.insert("arguments".into(), Value::String(partial.into()));
+                        tc.insert("function".into(), Value::Object(function));
+                        let mut d = Map::new();
+                        d.insert("tool_calls".into(), Value::Array(vec![Value::Object(tc)]));
+                        let mut choice = Map::new();
+                        choice.insert("index".into(), Value::from(0));
+                        choice.insert("delta".into(), Value::Object(d));
+                        choice.insert("finish_reason".into(), Value::Null);
+                        self.emit_chunk(Value::Array(vec![Value::Object(choice)]), None);
+                    }
+                    _ => {}
+                }
+            }
+            "message_delta" => {
+                self.ensure_first();
+                let reason = v
+                    .get("delta")
+                    .and_then(|d| d.get("stop_reason"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("end_turn");
+                let usage = v
+                    .get("usage")
+                    .filter(|u| !u.is_null())
+                    .map(chat_usage_from_anthropic);
+                self.emit_finish_and_done(reason, usage.flatten());
+            }
+            "message_stop" => {
+                if !self.finished {
+                    let delta = Map::new();
+                    let mut choice = Map::new();
+                    choice.insert("index".into(), Value::from(0));
+                    choice.insert("delta".into(), Value::Object(delta));
+                    choice.insert("finish_reason".into(), Value::String("stop".into()));
+                    self.emit_chunk(Value::Array(vec![Value::Object(choice)]), None);
+                    self.emit_done();
+                    self.finished = true;
+                }
+            }
+            // ping / keepalive / anything else: ignore.
+            _ => {}
+        }
+    }
+}
+
+impl Body for AnthropicToChatStream {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        loop {
+            if !this.out.is_empty() {
+                let bytes = std::mem::take(&mut this.out);
+                return Poll::Ready(Some(Ok(Frame::data(Bytes::from(bytes)))));
+            }
+            if this.done {
+                return Poll::Ready(None);
+            }
+            let polled = Pin::new(&mut this.inner).poll_frame(cx);
+            match polled {
+                Poll::Ready(Some(Ok(frame))) => {
+                    if let Ok(data) = frame.into_data() {
+                        this.buf.extend_from_slice(&data);
+                        let frames = this.take_frames();
+                        for f in frames {
+                            this.process_frame(&f);
+                        }
+                        if this.finished {
+                            this.done = true;
+                            continue;
+                        }
+                    }
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    // Upstream died mid-stream: emit a chat error + [DONE].
+                    let mut err = Map::new();
+                    let mut e_obj = Map::new();
+                    e_obj.insert("type".into(), Value::String("nestra_upstream_error".into()));
+                    e_obj.insert("message".into(), Value::String(e.to_string()));
+                    err.insert("error".into(), Value::Object(e_obj));
+                    this.emit_data(Value::Object(err));
+                    this.done = true;
+                    continue;
+                }
+                Poll::Ready(None) => {
+                    // Upstream ended without message_stop — close cleanly.
+                    if !this.finished {
+                        let delta = Map::new();
+                        let mut choice = Map::new();
+                        choice.insert("index".into(), Value::from(0));
+                        choice.insert("delta".into(), Value::Object(delta));
+                        choice.insert("finish_reason".into(), Value::String("stop".into()));
+                        this.emit_chunk(Value::Array(vec![Value::Object(choice)]), None);
+                        this.emit_done();
+                        this.finished = true;
+                    }
+                    this.done = true;
+                    continue;
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+/// Anthropic usage map → OpenAI chat usage (`prompt_tokens` /
+/// `completion_tokens` / `prompt_tokens_details.cached_tokens`), mirroring
+/// `convert::anthropic_to_chat`'s buffered mapping for the stream path.
+fn chat_usage_from_anthropic(u: &Value) -> Option<Value> {
+    let mut usage = Map::new();
+    if let Some(i) = u.get("input_tokens").and_then(Value::as_u64) {
+        usage.insert("prompt_tokens".into(), Value::from(i));
+    }
+    if let Some(o) = u.get("output_tokens").and_then(Value::as_u64) {
+        usage.insert("completion_tokens".into(), Value::from(o));
+    }
+    let cached = u.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let cache_write = u.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+    if cached > 0 || cache_write > 0 {
+        let mut details = Map::new();
+        if cached > 0 {
+            details.insert("cached_tokens".into(), Value::from(cached));
+        }
+        usage.insert("prompt_tokens_details".into(), Value::Object(details));
+    }
+    if usage.is_empty() {
+        None
+    } else {
+        Some(Value::Object(usage))
+    }
+}
+
+#[cfg(test)]
+mod anthropic_to_chat_tests {
+    use super::*;
+    use http_body_util::Full;
+
+    fn collect_all(stream: AnthropicToChatStream) -> String {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let collected = http_body_util::BodyExt::collect(stream).await.unwrap();
+            String::from_utf8_lossy(&collected.to_bytes()).into_owned()
+        })
+    }
+
+    #[test]
+    fn text_then_message_stop_becomes_chat_chunks() {
+        let upstream = r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","model":"m3","role":"assistant","content":[]}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}
+
+event: message_stop
+data: {"type":"message_stop"}
+"#;
+        let body = Full::new(Bytes::from(upstream));
+        let out = collect_all(AnthropicToChatStream::new(body));
+
+        assert!(out.contains("\"delta\":{\"role\":\"assistant\"}"));
+        assert!(out.contains("\"content\":\"Hi\""));
+        assert!(out.contains("data: [DONE]"));
+        assert!(out.contains("\"finish_reason\":\"stop\""));
+    }
+
+    #[test]
+    fn tool_use_stream_becomes_tool_call_deltas() {
+        let upstream = r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_2","model":"m3","content":[]}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"search"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"x\"}"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":10}}
+
+event: message_stop
+data: {"type":"message_stop"}
+"#;
+        let body = Full::new(Bytes::from(upstream));
+        let out = collect_all(AnthropicToChatStream::new(body));
+
+        assert!(out.contains("\"name\":\"search\""));
+        assert!(out.contains("\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\""));
+        assert!(out.contains("\"finish_reason\":\"tool_calls\""));
+        assert!(out.contains("\"prompt_tokens\":100"));
+        assert!(out.contains("\"cached_tokens\":10"));
+        assert!(out.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn upstream_error_emits_chat_error_then_done() {
+        let upstream = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"boom\"}}\n\n";
+        let body = Full::new(Bytes::from(upstream));
+        let out = collect_all(AnthropicToChatStream::new(body));
+        assert!(out.contains("\"error\":{"));
+        assert!(out.contains("boom"));
+        assert!(out.contains("data: [DONE]"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

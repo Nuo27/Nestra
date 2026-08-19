@@ -341,6 +341,83 @@ async fn chat_inbound_to_responses_upstream() {
     assert_eq!(out["choices"][0]["finish_reason"], "stop");
 }
 
+/// Chat inbound (OpenCode Desktop) → endpoint whose ONLY row is Anthropic
+/// (single-row custom endpoint, e.g. MiniMax-M3 on `…/anthropic`): the chat
+/// request is converted to Messages, dialed on `/v1/messages` with
+/// `x-api-key` auth, and the anthropic response converted back to a chat
+/// completion. This is the case that used to 404 "page not found".
+#[tokio::test]
+async fn chat_inbound_to_anthropic_upstream() {
+    let payload = r#"{"id":"msg_1","type":"message","role":"assistant","model":"MiniMax-M3","content":[{"type":"text","text":"hi from m3"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}"#;
+    let (addr, upstream) = mock_upstream(format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        payload.len(),
+        payload
+    ))
+    .await;
+
+    let conn = {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::schema::build_v1(&conn).unwrap();
+        for a in crate::agents::agents() {
+            conn.execute(
+                "INSERT OR IGNORE INTO agent (id, kind, display_name, status, last_detected_at, enabled)
+                 VALUES (?1, ?2, ?3, 'ok', 0, 1)",
+                rusqlite::params![a.id, a.kind, a.display_name],
+            )
+            .unwrap();
+        }
+        // anthropic-only row — the single-row custom endpoint.
+        conn.execute(
+            "INSERT INTO provider_endpoint (id, kind, display_name, has_api_key, status, models_json)
+             VALUES ('m3','custom','MiniMax',1,'valid',?1)",
+            rusqlite::params![r#"{"available":["MiniMax-M3"],"default":"MiniMax-M3"}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO endpoint_protocol (endpoint_id, protocol, base_url) VALUES ('m3','anthropic',?1)",
+            rusqlite::params![format!("http://{addr}")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_provider_binding (agent_id, endpoint_id, active, created_at)
+             VALUES ('opencode-desktop','m3',1,0)",
+            [],
+        )
+        .unwrap();
+        crate::orchestration::capability_registry::rebuild(&conn).unwrap();
+        conn
+    };
+    let state = state_for(conn);
+
+    let body = br#"{"model":"nestra","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = super::protocol_openai::handle_bytes(
+        headers(),
+        Bytes::from_static(body),
+        state,
+        "opencode-desktop",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::OK);
+
+    // Upstream saw the Messages path + an anthropic-shaped __converted__ body.
+    let (path, req_body) = upstream.await.unwrap();
+    assert_eq!(path, "/v1/messages");
+    assert_eq!(req_body["model"], "MiniMax-M3", "model rewritten to the resolved model");
+    assert_eq!(
+        req_body["messages"][0]["role"], "user",
+        "chat body converted to anthropic messages"
+    );
+
+    // Response converted back to a chat completion.
+    let out = body_json(resp.into_body()).await;
+    assert_eq!(out["object"], "chat.completion");
+    assert_eq!(out["choices"][0]["message"]["content"], "hi from m3");
+    assert_eq!(out["choices"][0]["finish_reason"], "stop");
+    assert_eq!(out["usage"]["prompt_tokens"], 10);
+}
+
 /// Anthropic inbound, streaming (`stream: true`): the 2xx SSE response is
 /// relayed verbatim to the agent, and the stream's observed usage + tool-call
 /// count are BACKFILLED into `route_request` after the stream ends (Smart
