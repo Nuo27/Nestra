@@ -41,7 +41,8 @@ pub async fn convert_relay_body(
     upstream: ProviderKind,
 ) -> GatewayBody {
     use super::convert_responses::{
-        responses_to_anthropic, responses_to_chat, sniff_chat, sniff_responses,
+        chat_to_responses_response, responses_to_anthropic, responses_to_chat, sniff_chat,
+        sniff_responses,
     };
     let target: (ProviderKind, ProviderKind) = (inbound, upstream);
     match body {
@@ -73,6 +74,14 @@ pub async fn convert_relay_body(
                 }
                 (ProviderKind::Openai, ProviderKind::Responses) => responses_to_chat(&bytes),
                 (ProviderKind::Openai, ProviderKind::Anthropic) => anthropic_to_chat(&bytes),
+                // Codex inbound: pivot through the chat shape (an anthropic
+                // upstream converts to chat first, then on to Responses).
+                (ProviderKind::Responses, ProviderKind::Openai) => {
+                    chat_to_responses_response(&bytes)
+                }
+                (ProviderKind::Responses, ProviderKind::Anthropic) => {
+                    chat_to_responses_response(&anthropic_to_chat(&bytes))
+                }
                 _ => Bytes::from(bytes),
             };
             // A conversion that yields non-JSON (HTML/empty/malformed
@@ -99,6 +108,15 @@ pub async fn convert_relay_body(
                 }
                 (ProviderKind::Openai, ProviderKind::Anthropic) => {
                     GatewayBody::streaming(AnthropicToChatStream::new(stream))
+                }
+                (ProviderKind::Responses, ProviderKind::Openai) => {
+                    GatewayBody::streaming(super::stream_responses::ChatToResponsesStream::new(stream))
+                }
+                (ProviderKind::Responses, ProviderKind::Anthropic) => {
+                    // anthropic SSE → chat SSE → responses SSE (chat pivot).
+                    GatewayBody::streaming(super::stream_responses::ChatToResponsesStream::new(
+                        AnthropicToChatStream::new(stream),
+                    ))
                 }
                 _ => GatewayBody::streaming(stream),
             };

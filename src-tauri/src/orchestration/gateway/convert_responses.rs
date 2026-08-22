@@ -832,6 +832,301 @@ pub fn sniff_chat(bytes: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+// ---------------------------------------------------------------------------
+// Codex inbound bridge: Responses → Chat (request) and Chat → Responses
+// (response). Inverses of [`chat_to_responses`] / [`responses_to_chat`] —
+// the gateway bridges a Responses-speaking agent (Codex) onto chat or
+// anthropic upstreams by pivoting through the chat shape.
+// ---------------------------------------------------------------------------
+
+/// Responses API request → OpenAI Chat Completions request. Malformed input
+/// returns the original bytes.
+pub fn responses_to_chat_request(body: &[u8]) -> Bytes {
+    let v: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return Bytes::copy_from_slice(body),
+    };
+    let mut obj = match v.as_object() {
+        Some(o) => o.clone(),
+        None => return Bytes::copy_from_slice(body),
+    };
+
+    let mut out = Map::new();
+    if let Some(model) = obj.get("model").cloned() {
+        out.insert("model".into(), model);
+    }
+    let mut messages: Vec<Value> = Vec::new();
+    // instructions → a leading system message.
+    if let Some(Value::String(s)) = obj.remove("instructions") {
+        if !s.is_empty() {
+            messages.push(serde_json::json!({ "role": "system", "content": s }));
+        }
+    }
+    // input items → chat messages. A bare string input is a one-user-turn
+    // shorthand.
+    match obj.remove("input") {
+        Some(Value::String(s)) => {
+            if !s.is_empty() {
+                messages.push(serde_json::json!({ "role": "user", "content": s }));
+            }
+        }
+        Some(Value::Array(items)) => {
+            for item in items {
+                match item.get("type").and_then(Value::as_str) {
+                    Some("message") => {
+                        let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+                        let mut content: Vec<Value> = Vec::new();
+                        if let Some(parts) = item.get("content").and_then(Value::as_array) {
+                            for part in parts {
+                                match part.get("type").and_then(Value::as_str) {
+                                    Some("input_text") | Some("output_text")
+                                    | Some("summary_text") | Some("text") => {
+                                        if let Some(t) = part.get("text").and_then(Value::as_str) {
+                                            content.push(serde_json::json!({ "type": "text", "text": t }));
+                                        }
+                                    }
+                                    Some("input_image") => {
+                                        let url = part
+                                            .get("image_url")
+                                            .cloned()
+                                            .unwrap_or_else(|| Value::String(String::new()));
+                                        content.push(serde_json::json!({
+                                            "type": "image_url",
+                                            "image_url": { "url": url },
+                                        }));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if !content.is_empty() {
+                            messages.push(serde_json::json!({
+                                "role": role,
+                                "content": content,
+                            }));
+                        }
+                    }
+                    Some("function_call") => {
+                        // Assistant tool call. Chat wants tool_calls on an
+                        // assistant message; a bare call becomes its own
+                        // assistant message with only tool_calls.
+                        let mut call = Map::new();
+                        if let Some(id) = item.get("call_id").and_then(Value::as_str) {
+                            call.insert("id".into(), Value::String(id.into()));
+                        }
+                        call.insert("type".into(), Value::String("function".into()));
+                        let mut func = Map::new();
+                        if let Some(name) = item.get("name").and_then(Value::as_str) {
+                            func.insert("name".into(), Value::String(name.into()));
+                        }
+                        func.insert(
+                            "arguments".into(),
+                            Value::String(
+                                item.get("arguments").and_then(Value::as_str).unwrap_or("{}").into(),
+                            ),
+                        );
+                        call.insert("function".into(), Value::Object(func));
+                        messages.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [Value::Object(call)],
+                        }));
+                    }
+                    Some("function_call_output") => {
+                        messages.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": item.get("call_id").cloned().unwrap_or(Value::Null),
+                            "content": item.get("output").cloned().unwrap_or(Value::String(String::new())),
+                        }));
+                    }
+                    // reasoning items have no chat representation — dropped.
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    if !messages.is_empty() {
+        out.insert("messages".into(), Value::Array(messages));
+    }
+    // Flat Responses function tools → nested chat shape.
+    if let Some(tools) = obj.remove("tools").and_then(|v| v.as_array().cloned()) {
+        let mapped: Vec<Value> = tools
+            .iter()
+            .filter_map(|t| {
+                if t.get("type").and_then(Value::as_str) != Some("function") {
+                    return None;
+                }
+                let name = t.get("name").and_then(Value::as_str)?;
+                let mut f = Map::new();
+                f.insert("name".into(), Value::String(name.into()));
+                if let Some(desc) = t.get("description").and_then(Value::as_str) {
+                    f.insert("description".into(), Value::String(desc.into()));
+                }
+                if let Some(params) = t.get("parameters").cloned() {
+                    f.insert("parameters".into(), params);
+                }
+                Some(serde_json::json!({ "type": "function", "function": Value::Object(f) }))
+            })
+            .collect();
+        if !mapped.is_empty() {
+            out.insert("tools".into(), Value::Array(mapped));
+        }
+    }
+    if let Some(tc) = obj.remove("tool_choice") {
+        out.insert("tool_choice".into(), map_responses_tool_choice(&tc));
+    }
+    // max_output_tokens → max_tokens; reasoning.effort → reasoning_effort.
+    if let Some(mt) = obj.remove("max_output_tokens") {
+        out.insert("max_tokens".into(), mt);
+    }
+    if let Some(effort) = obj
+        .remove("reasoning")
+        .and_then(|r| r.get("effort").cloned())
+    {
+        out.insert("reasoning_effort".into(), effort);
+    }
+    // Responses-only knobs without a chat equivalent.
+    obj.remove("include");
+    obj.remove("parallel_tool_calls");
+    obj.remove("previous_response_id");
+    obj.remove("store");
+    for key in ["temperature", "top_p", "stream"] {
+        if let Some(v) = obj.remove(key) {
+            out.insert(key.into(), v);
+        }
+    }
+
+    match serde_json::to_string(&Value::Object(out)) {
+        Ok(s) => Bytes::from(s),
+        Err(_) => Bytes::copy_from_slice(body),
+    }
+}
+
+fn map_responses_tool_choice(tc: &Value) -> Value {
+    match tc {
+        Value::Object(o) if o.get("type").and_then(Value::as_str) == Some("function") => {
+            let mut m = Map::new();
+            m.insert("type".into(), Value::String("function".into()));
+            if let Some(name) = o.get("name").cloned() {
+                let mut f = Map::new();
+                f.insert("name".into(), name);
+                m.insert("function".into(), Value::Object(f));
+            }
+            Value::Object(m)
+        }
+        _ => tc.clone(),
+    }
+}
+
+/// OpenAI Chat Completions response → Responses API response. Malformed
+/// input returns the original bytes.
+pub fn chat_to_responses_response(body: &[u8]) -> Bytes {
+    let v: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return Bytes::copy_from_slice(body),
+    };
+    let obj = match v.as_object() {
+        Some(o) => o,
+        None => return Bytes::copy_from_slice(body),
+    };
+    // Chat error envelope is already the Responses error shape — pass it
+    // through untouched.
+    if obj.get("error").map(|e| !e.is_null()).unwrap_or(false) {
+        return Bytes::copy_from_slice(body);
+    }
+
+    let choice = obj
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .cloned()
+        .unwrap_or(Value::Null);
+    let message = choice.get("message").cloned().unwrap_or(Value::Null);
+    let finish = choice.get("finish_reason").and_then(Value::as_str).unwrap_or("stop");
+
+    let mut output: Vec<Value> = Vec::new();
+    if let Some(rc) = message.get("reasoning_content").and_then(Value::as_str) {
+        if !rc.is_empty() {
+            output.push(serde_json::json!({
+                "type": "reasoning",
+                "id": "rs_nestra",
+                "summary": [{ "type": "summary_text", "text": rc }],
+            }));
+        }
+    }
+    if let Some(text) = message.get("content").and_then(Value::as_str) {
+        if !text.is_empty() {
+            output.push(serde_json::json!({
+                "type": "message",
+                "id": "msg_nestra",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{ "type": "output_text", "text": text, "annotations": [] }],
+            }));
+        }
+    }
+    if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+        for (i, call) in calls.iter().enumerate() {
+            let func = call.get("function").cloned().unwrap_or(Value::Null);
+            output.push(serde_json::json!({
+                "type": "function_call",
+                "id": format!("fc_nestra_{i}"),
+                "call_id": call.get("id").cloned().unwrap_or(Value::Null),
+                "name": func.get("name").cloned().unwrap_or(Value::Null),
+                "arguments": func.get("arguments").cloned().unwrap_or(serde_json::json!("{}")),
+                "status": "completed",
+            }));
+        }
+    }
+
+    let mut resp = Map::new();
+    resp.insert(
+        "id".into(),
+        obj.get("id").cloned().unwrap_or_else(|| Value::String("resp_nestra".into())),
+    );
+    resp.insert("object".into(), Value::String("response".into()));
+    if let Some(model) = obj.get("model").cloned() {
+        resp.insert("model".into(), model);
+    }
+    resp.insert("created_at".into(), Value::from(0));
+    if finish == "length" {
+        resp.insert("status".into(), Value::String("incomplete".into()));
+        resp.insert(
+            "incomplete_details".into(),
+            serde_json::json!({ "reason": "max_output_tokens" }),
+        );
+    } else {
+        resp.insert("status".into(), Value::String("completed".into()));
+    }
+    resp.insert("output".into(), Value::Array(output));
+    if let Some(usage) = obj.get("usage") {
+        let input = usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+        let output_toks = usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+        let cached = usage
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let mut u = Map::new();
+        u.insert("input_tokens".into(), Value::from(input));
+        u.insert("output_tokens".into(), Value::from(output_toks));
+        // saturating: untrusted upstream JSON must clamp, not panic.
+        u.insert("total_tokens".into(), Value::from(input.saturating_add(output_toks)));
+        if cached > 0 {
+            u.insert(
+                "input_tokens_details".into(),
+                serde_json::json!({ "cached_tokens": cached }),
+            );
+        }
+        resp.insert("usage".into(), Value::Object(u));
+    }
+
+    match serde_json::to_string(&Value::Object(resp)) {
+        Ok(s) => Bytes::from(s),
+        Err(_) => Bytes::copy_from_slice(body),
+    }
+}
 
 #[cfg(test)]
 mod tests;

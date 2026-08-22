@@ -454,7 +454,7 @@ const APP_REFERER: &str = "https://github.com/Nuo/Nestra";
 /// (Anthropic's native auth — some anthropic-compatible gateways 401 on
 /// Bearer-only). We strip any inbound `authorization` and set it fresh from
 /// the resolved credential.
-fn build_upstream_request(
+pub(super) fn build_upstream_request(
     url: &hyper::Uri,
     original_headers: &hyper::HeaderMap,
     api_key: String,
@@ -508,7 +508,7 @@ fn build_upstream_request(
     Ok(req)
 }
 
-fn error_response(status: StatusCode, message: &str) -> Response<GatewayBody> {
+pub(super) fn error_response(status: StatusCode, message: &str) -> Response<GatewayBody> {
     let body = serde_json::json!({
         "error": { "message": message, "type": "nestra_gateway_error" }
     });

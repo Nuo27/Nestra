@@ -1163,6 +1163,449 @@ impl Body for ResponsesToChatStream {
     }
 }
 
+/// Chat Completions SSE chunks → Responses API SSE events. The inbound half
+/// of the Codex bridge (chat-shaped upstream, Responses-speaking agent);
+/// chained after [`super::stream_convert::AnthropicToChatStream`] it also
+/// covers anthropic-shaped upstreams. Mirrors [`ResponsesToChatStream`]'s
+/// engineering (one frame per poll, index-keyed tool buffering, deferred
+/// `response.completed` with usage, errors surfaced as `response.failed`).
+///
+/// Event protocol (the set the codex client consumes):
+///   - first assistant delta → `response.created` + `response.output_item.added`
+///     for the assistant message item;
+///   - content deltas → `response.output_text.delta` (+ `.done` at finish);
+///   - tool_calls deltas → `response.output_item.added` (function_call) once
+///     per index, then `response.function_call_arguments.delta`;
+///   - the finish_reason chunk → `response.output_item.done` for every open
+///     item, then `response.completed` carrying the full output snapshot +
+///     usage (chat `[DONE]` without a finish chunk finalizes as completed);
+///   - `data: {"error": …}` → `response.failed`.
+pub struct ChatToResponsesStream {
+    inner: InnerStream,
+    utf8: Utf8Accum,
+    buf: Vec<u8>,
+    out: Vec<u8>,
+    done: bool,
+    /// output_index → item state. 0 is the assistant message; tools take
+    /// 1.. in first-seen order.
+    message_open: bool,
+    message_text: String,
+    tool_indices: HashMap<usize, ToolItem>,
+    next_tool_index: usize,
+    latest_usage: Option<Value>,
+    finish_reason: Option<String>,
+    finished: bool,
+    model: Option<String>,
+    response_id: String,
+}
+
+struct ToolItem {
+    /// Responses item id (`fc_…`).
+    item_id: String,
+    call_id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+    /// Delta key already announced ("function_call_arguments") — set when
+    /// `response.output_item.added` went out for this tool.
+    open: bool,
+    output_index: usize,
+}
+
+impl ChatToResponsesStream {
+    pub fn new<B>(inner: B) -> Self
+    where
+        B: Body<Data = Bytes> + Send + Sync + 'static,
+    {
+        let inner = inner.map_err(|_| std::io::Error::other("upstream stream error"));
+        Self {
+            inner: inner.boxed(),
+            utf8: Utf8Accum::new(),
+            buf: Vec::new(),
+            out: Vec::new(),
+            done: false,
+            message_open: false,
+            message_text: String::new(),
+            tool_indices: HashMap::new(),
+            next_tool_index: 0,
+            latest_usage: None,
+            finish_reason: None,
+            finished: false,
+            model: None,
+            response_id: format!("resp-nestra-{}", uuid::Uuid::new_v4()),
+        }
+    }
+
+    fn response_skeleton(&self, status: &str) -> Map<String, Value> {
+        let mut m = Map::new();
+        m.insert("id".into(), Value::String(self.response_id.clone()));
+        m.insert("object".into(), Value::String("response".into()));
+        if let Some(model) = &self.model {
+            m.insert("model".into(), Value::String(model.clone()));
+        }
+        m.insert("status".into(), Value::String(status.into()));
+        m
+    }
+
+    fn ensure_message_item(&mut self) {
+        if self.message_open {
+            return;
+        }
+        self.message_open = true;
+        let mut resp = self.response_skeleton("in_progress");
+        resp.insert("output".into(), Value::Array(vec![]));
+        self.out.extend_from_slice(&sse("response.created", Value::Object(resp)));
+        self.out.extend_from_slice(&sse(
+            "response.output_item.added",
+            serde_json::json!({
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "id": "msg-nestra",
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [],
+                },
+            }),
+        ));
+    }
+
+    fn process_chunk(&mut self, chunk: &Value) {
+        if let Some(model) = chunk.get("model").and_then(Value::as_str) {
+            if self.model.is_none() {
+                self.model = Some(model.to_string());
+            }
+        }
+        if let Some(usage) = chunk.get("usage") {
+            if usage.is_object() && !usage.as_object().unwrap().is_empty() {
+                self.latest_usage = Some(usage.clone());
+            }
+        }
+        let Some(choice) = chunk
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+        else {
+            return;
+        };
+        let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
+
+        // Text content.
+        if let Some(text) = delta.get("content").and_then(Value::as_str) {
+            if !text.is_empty() {
+                self.ensure_message_item();
+                self.message_text.push_str(text);
+                self.out.extend_from_slice(&sse(
+                    "response.output_text.delta",
+                    serde_json::json!({
+                        "item_id": "msg-nestra",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "delta": text,
+                    }),
+                ));
+            }
+        }
+        // Tool call deltas: first sighting announces the item, then argument
+        // fragments stream as function_call_arguments deltas.
+        if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            for call in calls {
+                let idx = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                // Pre-compute new-slot identity: a closure in or_insert_with
+                // would capture all of `self` alongside the field borrow.
+                let fresh = !self.tool_indices.contains_key(&idx);
+                let (item_id, output_index) = if fresh {
+                    let i = self.next_tool_index;
+                    self.next_tool_index += 1;
+                    (format!("fc-nestra-{i}"), i + 1)
+                } else {
+                    let t = &self.tool_indices[&idx];
+                    (t.item_id.clone(), t.output_index)
+                };
+                let entry = self.tool_indices.entry(idx).or_insert(ToolItem {
+                    item_id: item_id.clone(),
+                    call_id: None,
+                    name: None,
+                    arguments: String::new(),
+                    open: false,
+                    output_index,
+                });
+                let func = call.get("function").cloned().unwrap_or(Value::Null);
+                if let Some(id) = call.get("id").and_then(Value::as_str) {
+                    entry.call_id = Some(id.to_string());
+                }
+                if let Some(name) = func.get("name").and_then(Value::as_str) {
+                    entry.name = Some(name.to_string());
+                }
+                let frag = func.get("arguments").and_then(Value::as_str).unwrap_or("");
+                if !frag.is_empty() {
+                    entry.arguments.push_str(frag);
+                }
+                let call_id = entry.call_id.clone();
+                let name = entry.name.clone();
+                let announce = !entry.open;
+                entry.open = true;
+                if announce {
+                    self.out.extend_from_slice(&sse(
+                        "response.output_item.added",
+                        serde_json::json!({
+                            "output_index": output_index,
+                            "item": {
+                                "type": "function_call",
+                                "id": item_id,
+                                "call_id": call_id,
+                                "name": name,
+                                "arguments": "",
+                                "status": "in_progress",
+                            },
+                        }),
+                    ));
+                }
+                if !frag.is_empty() {
+                    self.out.extend_from_slice(&sse(
+                        "response.function_call_arguments.delta",
+                        serde_json::json!({
+                            "item_id": item_id,
+                            "output_index": output_index,
+                            "delta": frag,
+                        }),
+                    ));
+                }
+            }
+        }
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.finish_reason = Some(reason.to_string());
+            self.finish();
+        }
+    }
+
+    /// Terminal events: item done for every open item + `response.completed`
+    /// carrying the full output snapshot and usage.
+    fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let mut output: Vec<Value> = Vec::new();
+        if self.message_open {
+            self.out.extend_from_slice(&sse(
+                "response.output_text.done",
+                serde_json::json!({
+                    "item_id": "msg-nestra",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": self.message_text,
+                }),
+            ));
+            output.push(serde_json::json!({
+                "type": "message",
+                "id": "msg-nestra",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": self.message_text,
+                    "annotations": [],
+                }],
+            }));
+            self.out.extend_from_slice(&sse(
+                "response.output_item.done",
+                serde_json::json!({
+                    "output_index": 0,
+                    "item": output[0],
+                }),
+            ));
+        }
+        let mut ordered: Vec<&mut ToolItem> = self.tool_indices.values_mut().collect();
+        ordered.sort_by_key(|t| t.output_index);
+        for tool in ordered {
+            let item = serde_json::json!({
+                "type": "function_call",
+                "id": tool.item_id,
+                "call_id": tool.call_id,
+                "name": tool.name,
+                "arguments": tool.arguments,
+                "status": "completed",
+            });
+            output.push(item.clone());
+            self.out.extend_from_slice(&sse(
+                "response.output_item.done",
+                serde_json::json!({
+                    "output_index": tool.output_index,
+                    "item": item,
+                }),
+            ));
+        }
+        let incomplete = self.finish_reason.as_deref() == Some("length");
+        let mut resp = self.response_skeleton(if incomplete { "incomplete" } else { "completed" });
+        if incomplete {
+            resp.insert(
+                "incomplete_details".into(),
+                serde_json::json!({ "reason": "max_output_tokens" }),
+            );
+        }
+        resp.insert("output".into(), Value::Array(output));
+        if let Some(usage) = self.latest_usage.clone() {
+            let input = usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let out_toks = usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+            resp.insert(
+                "usage".into(),
+                serde_json::json!({
+                    "input_tokens": input,
+                    "output_tokens": out_toks,
+                    "total_tokens": input.saturating_add(out_toks),
+                }),
+            );
+        }
+        let event = if incomplete { "response.incomplete" } else { "response.completed" };
+        self.out.extend_from_slice(&sse(event, Value::Object(resp)));
+        self.done = true;
+    }
+
+    fn emit_error(&mut self, message: &str) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        self.done = true;
+        let mut resp = self.response_skeleton("failed");
+        resp.insert(
+            "error".into(),
+            serde_json::json!({ "code": "nestra_upstream_error", "message": message }),
+        );
+        self.out.extend_from_slice(&sse("response.failed", Value::Object(resp)));
+    }
+
+    /// Process buffered chat chunks; `Ok(true)` = caller should yield.
+    fn drain_buffered_chunks(&mut self) -> bool {
+        while let Some(f) = take_one_frame(&mut self.buf) {
+            let frame = String::from_utf8_lossy(&f);
+            for line in frame.lines() {
+                let Some(data) = line.strip_prefix("data:") else { continue };
+                let data = data.trim();
+                if data == "[DONE]" {
+                    // Terminal sentinel — a clean EOF without a finish_reason
+                    // chunk finalizes as completed.
+                    self.finish();
+                    continue;
+                }
+                match serde_json::from_str::<Value>(data) {
+                    Ok(v) => {
+                        if v.get("error").map(|e| !e.is_null()).unwrap_or(false) {
+                            let msg = v
+                                .get("error")
+                                .and_then(|e| e.get("message"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("upstream stream failed");
+                            self.emit_error(msg);
+                        } else {
+                            self.process_chunk(&v);
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+            if !self.out.is_empty() || self.done {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn poll_loop(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, std::io::Error>>> {
+        if !self.out.is_empty() {
+            return Poll::Ready(Some(Ok(Frame::data(Bytes::from(std::mem::take(&mut self.out))))));
+        }
+        if self.done {
+            return Poll::Ready(None);
+        }
+        if self.drain_buffered_chunks() {
+            if !self.out.is_empty() {
+                return Poll::Ready(Some(Ok(Frame::data(Bytes::from(
+                    std::mem::take(&mut self.out),
+                )))));
+            }
+            if self.done {
+                return Poll::Ready(None);
+            }
+        }
+        loop {
+            match Pin::new(&mut self.inner).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    if let Some(data) = frame.data_ref() {
+                        let mut tmp = Vec::new();
+                        self.utf8.push(data, &mut tmp);
+                        self.buf.extend_from_slice(&tmp);
+                        if self.buf.len() > MAX_FRAME_BUFFER {
+                            self.emit_error("upstream stream exceeded the frame buffer limit");
+                        }
+                        if self.drain_buffered_chunks() {
+                            if !self.out.is_empty() {
+                                return Poll::Ready(Some(Ok(Frame::data(Bytes::from(
+                                    std::mem::take(&mut self.out),
+                                )))));
+                            }
+                            if self.done {
+                                return Poll::Ready(None);
+                            }
+                        }
+                    }
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    self.emit_error(&e.to_string());
+                    return if self.out.is_empty() {
+                        Poll::Ready(None)
+                    } else {
+                        Poll::Ready(Some(Ok(Frame::data(Bytes::from(std::mem::take(&mut self.out))))))
+                    };
+                }
+                Poll::Ready(None) => {
+                    if self.drain_buffered_chunks() {
+                        if !self.out.is_empty() {
+                            return Poll::Ready(Some(Ok(Frame::data(Bytes::from(
+                                std::mem::take(&mut self.out),
+                            )))));
+                        }
+                        if self.done {
+                            return Poll::Ready(None);
+                        }
+                    }
+                    if !self.buf.is_empty() {
+                        let leftover = std::mem::take(&mut self.buf);
+                        for line in String::from_utf8_lossy(&leftover).lines() {
+                            if let Some(data) = line.strip_prefix("data:").map(str::trim) {
+                                if data != "[DONE]" {
+                                    if let Ok(v) = serde_json::from_str::<Value>(data) {
+                                        self.process_chunk(&v);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.finish();
+                    return if self.out.is_empty() {
+                        Poll::Ready(None)
+                    } else {
+                        Poll::Ready(Some(Ok(Frame::data(Bytes::from(std::mem::take(&mut self.out))))))
+                    };
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+impl Body for ChatToResponsesStream {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.as_mut().get_mut();
+        this.poll_loop(cx)
+    }
+}
 
 #[cfg(test)]
 mod tests;

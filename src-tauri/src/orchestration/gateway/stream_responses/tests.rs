@@ -192,3 +192,133 @@ fn responses_stream_to_chat_tool_call_chunks() {
     assert!(out.contains("\"finish_reason\":\"tool_calls\""));
     assert!(out.contains("data: [DONE]"));
 }
+
+// ---------------------------------------------------------------------------
+// ChatToResponsesStream (Codex inbound bridge)
+// ---------------------------------------------------------------------------
+
+fn chat_chunk(delta: serde_json::Value, finish: Option<&str>) -> String {
+    let mut choice = serde_json::json!({
+        "index": 0,
+        "delta": delta,
+        "finish_reason": null,
+    });
+    if let Some(f) = finish {
+        choice["finish_reason"] = serde_json::json!(f);
+    }
+    serde_json::json!({
+        "id": "chatcmpl-x",
+        "object": "chat.completion.chunk",
+        "model": "glm-5.3",
+        "choices": [choice],
+    })
+    .to_string()
+}
+
+/// Extract `event:` names in order from an SSE stream dump.
+fn event_names(sse_text: &str) -> Vec<String> {
+    sse_text
+        .lines()
+        .filter_map(|l| l.strip_prefix("event: "))
+        .map(str::to_string)
+        .collect()
+}
+
+fn data_payload(sse_text: &str, event: &str) -> serde_json::Value {
+    let mut current = "";
+    for line in sse_text.lines() {
+        if let Some(e) = line.strip_prefix("event: ") {
+            current = e;
+        } else if let Some(d) = line.strip_prefix("data: ") {
+            if current == event {
+                return serde_json::from_str(d).unwrap();
+            }
+        }
+    }
+    panic!("event {event} not found");
+}
+
+#[test]
+fn chat_to_responses_stream_emits_codex_event_sequence() {
+    let sse_text = collect_all(ChatToResponsesStream::new(Full::new(frame(&format!(
+        "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        chat_chunk(serde_json::json!({"role":"assistant"}), None),
+        chat_chunk(serde_json::json!({"content":"hel"}), None),
+        chat_chunk(serde_json::json!({"content":"lo"}), None),
+    )))));
+    let names = event_names(&sse_text);
+    assert_eq!(
+        names,
+        vec![
+            "response.created",
+            "response.output_item.added",
+            "response.output_text.delta",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+    );
+    // [DONE] without a finish_reason chunk finalizes as completed with the
+    // full text snapshot.
+    let done = data_payload(&sse_text, "response.output_text.done");
+    assert_eq!(done["text"], "hello");
+    let completed = data_payload(&sse_text, "response.completed");
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["output"][0]["content"][0]["text"], "hello");
+}
+
+#[test]
+fn chat_to_responses_stream_tools_and_usage() {
+    let final_chunk = serde_json::json!({
+        "id": "chatcmpl-x",
+        "object": "chat.completion.chunk",
+        "model": "glm-5.3",
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+    })
+    .to_string();
+    let sse_text = collect_all(ChatToResponsesStream::new(Full::new(frame(&format!(
+        "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: {}\n\n",
+        chat_chunk(
+            serde_json::json!({"tool_calls":[{"index":0,"id":"c1","function":{"name":"shell"}}]}),
+            None,
+        ),
+        chat_chunk(
+            serde_json::json!({"tool_calls":[{"index":0,"function":{"arguments":"{\"cm"}}]}),
+            None,
+        ),
+        chat_chunk(
+            serde_json::json!({"tool_calls":[{"index":0,"function":{"arguments":"d\":\"ls\"}"}}]}),
+            None,
+        ),
+        final_chunk,
+    )))));
+    let added = data_payload(&sse_text, "response.output_item.added");
+    assert_eq!(added["item"]["type"], "function_call");
+    assert_eq!(added["item"]["call_id"], "c1");
+    assert_eq!(added["output_index"], 1);
+    let completed = data_payload(&sse_text, "response.completed");
+    let fc = completed["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["type"] == "function_call")
+        .unwrap();
+    assert_eq!(fc["arguments"], "{\"cmd\":\"ls\"}");
+    assert_eq!(completed["usage"]["total_tokens"], 10);
+}
+
+#[test]
+fn chat_to_responses_stream_error_becomes_failed() {
+    let sse_text = collect_all(ChatToResponsesStream::new(Full::new(frame(
+        "data: {\"error\":{\"message\":\"boom\"}}\n\n",
+    ))));
+    let failed = data_payload(&sse_text, "response.failed");
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(failed["error"]["message"], "boom");
+}

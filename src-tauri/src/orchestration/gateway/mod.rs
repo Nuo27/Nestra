@@ -28,6 +28,7 @@ pub mod convert_responses;
 pub mod forward;
 pub mod protocol_anthropic;
 pub mod protocol_openai;
+pub mod protocol_responses;
 pub mod stream;
 pub mod stream_convert;
 pub mod stream_responses;
@@ -270,13 +271,7 @@ async fn dispatch(
                 .await
         }
         crate::agents::GatewayWire::Responses => {
-            // Codex's wire. The inbound Responses handler is not enabled yet;
-            // answer honestly instead of silently falling to another wire.
-            let mut r = hyper::Response::new(stream::GatewayBody::json_full(serde_json::json!({
-                "error": { "type": "nestra_gateway_error", "message": "responses inbound handler not yet enabled" }
-            })));
-            *r.status_mut() = StatusCode::NOT_IMPLEMENTED;
-            Ok(r)
+            protocol_responses::handle(req, state, agent_id.unwrap().as_str()).await
         }
     };
     Ok(match handled {
