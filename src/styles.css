@@ -92,6 +92,7 @@
   --brand-pi: #7c9cff;
   --brand-zcode: #10a37f;
   --brand-opencode: #c79a4b;
+  --brand-codex: #b08cd8;
   --brand-fallback: #6b6b6b;
 
   /* semantic — token syntax hues */
@@ -184,6 +185,7 @@
   --brand-pi: #4a6fe0;
   --brand-zcode: #0c7f63;
   --brand-opencode: #8a6420;
+  --brand-codex: #7d5ba6;
   --brand-fallback: #55524c;
 
   color-scheme: light;

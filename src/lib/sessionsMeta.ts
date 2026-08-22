@@ -6,6 +6,7 @@ export const PROVIDERS: { id: string; label: string; color: string }[] = [
   { id: "pi-cli", label: "Pi", color: "var(--brand-pi)" },
   { id: "opencode-desktop", label: "OpenCode Desktop", color: "var(--brand-opencode)" },
   { id: "zcode-desktop", label: "ZCode", color: "var(--brand-zcode)" },
+  { id: "codex-desktop", label: "Codex Desktop", color: "var(--brand-codex)" },
 ];
 
 // Agent registry id (from agentList) → the session-provider id its sessions
