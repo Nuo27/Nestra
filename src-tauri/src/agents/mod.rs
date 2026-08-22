@@ -1,18 +1,19 @@
-//! Agent registry + detection + per-agent config adapters — the single source
+//! Agent registry + detection + per-agent integration — the single source
 //! of truth for every coding agent Nestra manages.
 //!
-//! One `AgentSpec` per agent carries its detection strategy, capabilities,
-//! config-format reference, session reader, and skill directory. Adding a new
-//! agent = adding one entry to [`AGENTS`] (plus a `ConfigAdapter` impl only if
-//! its config file uses a brand-new format). No other module needs editing.
+//! One agent = one directory (`agents/<id>/`) holding its `SPEC` (the
+//! registry entry), `config.rs` (ConfigAdapter), `sessions.rs`
+//! (SessionImporter) and `mcp.rs` (MCP provider). [`AGENTS`] below is the
+//! only central list: every subsystem (config writing, session import, MCP
+//! sync, gateway dispatch) derives from it via the spec's constructor hooks.
+//! Adding an agent = one new directory + one line in [`AGENTS`] (+ the
+//! frontend presentation entries).
 //!
 //! Layout:
-//! - `spec`     — the `AGENTS` static registry + describing data types
+//! - `spec`     — describing data types (no agent data lives there)
 //! - `detect`   — auto-detection algorithm (PATH, install paths, soft signals)
-//! - `claude_code`, `opencode`, `pi`, `zcode` — per-agent `ConfigAdapter` impls
-//!
-//! The detection *data* types (`DetectSpec`, `DetectorPath`) live in `spec`
-//! so the dependency graph is one-way: `agents` → `config_writer` (leaf).
+//! - `<agent>/` — per-agent `SPEC` + config adapter + session importer + MCP
+//!   provider
 
 pub mod spec;
 pub mod detect;
@@ -22,12 +23,46 @@ pub mod pi;
 pub mod zcode;
 
 pub use spec::{
-    agent_spec, capability_for, agents, config_ref_for, detect_spec_for, AgentKind, AgentSpec,
-    Capability, ConfigRef, DetectSpec, DetectorPath, SessionRef,
+    AgentKind, AgentSpec, Capability, ConfigRef, DetectSpec, DetectorPath, GatewayWire, SessionRef,
 };
 
 use crate::config_writer::ConfigAdapter;
 use crate::error::AppError;
+
+/// Every agent Nestra manages, in stable display order. Closed list —
+/// detection requires per-agent install-path knowledge that can't be inferred,
+/// so agents are declared here rather than auto-discovered.
+pub static AGENTS: &[&AgentSpec] = &[
+    &claude_code::SPEC,
+    &opencode::SPEC,
+    &pi::SPEC,
+    &zcode::SPEC,
+];
+
+/// Look up every agent, in display order.
+pub fn agents() -> &'static [&'static AgentSpec] {
+    AGENTS
+}
+
+/// Look up one agent by id.
+pub fn agent_spec(id: &str) -> Option<&'static AgentSpec> {
+    AGENTS.iter().find(|a| a.id == id).copied()
+}
+
+/// Convenience: the declared capability for an agent id.
+pub fn capability_for(id: &str) -> Option<&'static Capability> {
+    agent_spec(id).map(|a| &a.capability)
+}
+
+/// Convenience: the detection spec for an agent id.
+pub fn detect_spec_for(id: &str) -> Option<&'static DetectSpec> {
+    agent_spec(id).map(|a| &a.detect)
+}
+
+/// Convenience: the config reference (writer key + path) for an agent id.
+pub fn config_ref_for(id: &str) -> Option<&'static ConfigRef> {
+    agent_spec(id).map(|a| &a.config)
+}
 
 /// Wrap an external library's display-able error as an internal `AppError`.
 /// Used by JSON-parsing call sites in the per-agent adapters.
@@ -36,19 +71,15 @@ pub(crate) fn internal<E: std::fmt::Display>(e: E) -> AppError {
 }
 
 /// Resolve a config adapter by writer key (matches `AgentSpec.config.writer`).
-/// Driven by the `AGENTS` registry: a new agent that reuses an existing
-/// writer key resolves automatically, and a NEW writer key needs its adapter
-/// registered here — `tests::every_manageable_writer_resolves` pins that
-/// every non-empty `config.writer` in the registry resolves.
+/// Derived from the `AGENTS` registry: a writer key resolves iff some agent
+/// declares it, so a new agent needs no edit here —
+/// `tests::every_manageable_writer_resolves` pins that every non-empty
+/// `config.writer` in the registry resolves.
 pub fn adapter_for(writer_key: &str) -> Option<Box<dyn ConfigAdapter>> {
-    // Keep this match in sync with the writer keys in spec.rs AGENTS.
-    match writer_key {
-        "claude-code-cli" => Some(Box::new(claude_code::ClaudeCode)),
-        "opencode" => Some(Box::new(opencode::OpenCode)),
-        "pi-cli" => Some(Box::new(pi::Pi)),
-        "zcode" => Some(Box::new(zcode::ZCode)),
-        _ => None,
-    }
+    AGENTS
+        .iter()
+        .find(|a| a.config.writer == writer_key)
+        .map(|a| (a.adapter)())
 }
 
 /// Every manageable agent's `config.writer` must resolve to an adapter —

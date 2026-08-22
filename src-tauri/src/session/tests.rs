@@ -141,7 +141,7 @@ fn pi_assemble_extracts_id_title_summary_project_and_times() {
 
 #[test]
 fn every_known_provider_has_an_importer() {
-    for id in ALL_PROVIDERS {
+    for id in all_providers() {
         assert!(importer_for(id).is_some(), "{id} has no importer");
     }
 }

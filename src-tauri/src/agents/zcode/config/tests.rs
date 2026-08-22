@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-const FIXTURE: &str = include_str!("../../fixtures/zcode/config.json");
+const FIXTURE: &str = include_str!("../../../fixtures/zcode/config.json");
 
 fn tmp() -> (PathBuf, tempfile::TempDir) {
     let dir = tempfile::Builder::new()

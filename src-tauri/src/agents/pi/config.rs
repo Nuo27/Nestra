@@ -11,7 +11,7 @@
 //!
 //! Format reference: https://pi.dev/docs/latest/models
 
-use super::internal;
+use crate::agents::internal;
 use crate::config_writer::{
     ensure_backup, atomic_write, restore_from_backup, ConfigAdapter, DetectedProvider,
     ModelSelection, ModelsConfig, ProviderKind, ProviderSet,
@@ -20,6 +20,11 @@ use crate::error::{AppError, AppResult};
 use std::path::{Path, PathBuf};
 
 pub struct Pi;
+
+/// Registry constructor for the pi-cli writer — see [super::SPEC].
+pub fn new() -> Box<dyn crate::config_writer::ConfigAdapter> {
+    Box::new(Pi)
+}
 
 fn auth_path(config_path: &Path) -> PathBuf {
     config_path

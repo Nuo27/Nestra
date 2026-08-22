@@ -42,7 +42,7 @@ fn empty_agent() -> AgentSpec {
 /// Build a minimal AgentSpec with the given detect data. Probe only reads
 /// `spec.detect`; the other fields are filled with harmless defaults.
 fn test_agent(id: &'static str, detect: DetectSpec) -> AgentSpec {
-    use crate::agents::{AgentKind, Capability, ConfigRef, SessionRef};
+    use crate::agents::{AgentKind, Capability, ConfigRef, GatewayWire, SessionRef};
     AgentSpec {
         id,
         display_name: id,
@@ -65,6 +65,11 @@ fn test_agent(id: &'static str, detect: DetectSpec) -> AgentSpec {
         session: Some(SessionRef { reader: "", resume_command: None, unsupported_reason: None }),
         skill_dir: None,
         skill_name_matches_dir: false,
+        gateway_wire: GatewayWire::Anthropic,
+        // Probe never constructs these; a stub that panics if ever called.
+        adapter: || unreachable!("test spec adapter"),
+        importer: None,
+        mcp_provider: None,
     }
 }
 

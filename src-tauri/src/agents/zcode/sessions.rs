@@ -13,6 +13,11 @@ use std::path::PathBuf;
 
 pub struct ZCodeImporter;
 
+/// Registry constructor — see [super::SPEC].
+pub fn new() -> Box<dyn crate::session::SessionImporter> {
+    Box::new(ZCodeImporter)
+}
+
 impl SessionImporter for ZCodeImporter {
     fn snapshot(&self) -> AppResult<Vec<(String, i64)>> {
         let db = zcode_db_path();

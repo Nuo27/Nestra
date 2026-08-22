@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::config_writer::{backup_path_for, SwitchContext};
 use std::fs;
 
-const FIXTURE: &str = include_str!("../../fixtures/pi/models-store.json");
+const FIXTURE: &str = include_str!("../../../fixtures/pi/models-store.json");
 
 fn tmp() -> (PathBuf, tempfile::TempDir) {
     let dir = tempfile::Builder::new()

@@ -6,7 +6,7 @@ use serde_json::json;
 use std::fs;
 use std::collections::HashMap;
 
-const FIXTURE: &str = include_str!("../../fixtures/claude_code/settings.json");
+const FIXTURE: &str = include_str!("../../../fixtures/claude_code/settings.json");
 
 fn tmp() -> (PathBuf, tempfile::TempDir) {
     let dir = tempfile::Builder::new()

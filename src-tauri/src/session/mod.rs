@@ -1,13 +1,9 @@
-mod claude;
-mod desktop;
 pub mod handoff;
 mod model;
-mod partdb;
+pub(crate) mod partdb;
 pub mod provider;
-mod pi;
 pub mod semantic;
 pub mod store;
-mod zcode;
 
 pub use model::{Message, MessageWindow, RawFile, Session};
 pub use semantic::{Attachment, McpProvenance, Part, PartPayload, SemanticEvent};
@@ -17,16 +13,17 @@ use serde_json::Value;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-/// All provider ids the session layer knows how to discover/import. The
-/// session registry (`session::provider::default_provider_registry`) is
+/// All provider ids the session layer knows how to discover/import —
+/// every registry agent that declares a session integration. The session
+/// registry (`session::provider::default_provider_registry`) is
 /// a strict subset: only providers with a resumable CLI appear there.
-/// Here we index every provider whose session files Nestra can locate.
-pub const ALL_PROVIDERS: &[&str] = &[
-    "claude-code-cli",
-    "pi-cli",
-    "opencode-desktop",
-    "zcode-desktop",
-];
+pub fn all_providers() -> Vec<&'static str> {
+    crate::agents::agents()
+        .iter()
+        .filter(|a| a.session.is_some())
+        .map(|a| a.id)
+        .collect()
+}
 
 // ============================================================================
 // Importer trait + registry
@@ -51,15 +48,11 @@ pub trait SessionImporter: Send + Sync {
     fn import(&self) -> AppResult<Vec<RawFile>>;
 }
 
-/// Resolve the importer for a provider id. Adding a new provider = one arm here.
+/// Resolve the importer for a provider id. Derived from the `AGENTS`
+/// agent registry via each spec's `importer` constructor hook — the
+/// importers themselves live in `agents/<id>/sessions.rs`.
 fn importer_for(provider_id: &str) -> Option<Box<dyn SessionImporter>> {
-    match provider_id {
-        "claude-code-cli" => Some(Box::new(claude::ClaudeImporter)),
-        "pi-cli" => Some(Box::new(pi::PiImporter)),
-        "opencode-desktop" => Some(Box::new(desktop::OpenCodeDesktopImporter)),
-        "zcode-desktop" => Some(Box::new(zcode::ZCodeImporter)),
-        _ => None,
-    }
+    crate::agents::agent_spec(provider_id).and_then(|a| a.importer.map(|f| f()))
 }
 
 // ============================================================================
@@ -73,7 +66,7 @@ fn parse_iso(s: &str) -> Option<i64> {
         .map(|d| d.timestamp_millis())
 }
 
-pub(super) fn mtime_millis(path: &Path) -> i64 {
+pub(crate) fn mtime_millis(path: &Path) -> i64 {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
@@ -85,7 +78,7 @@ pub(super) fn mtime_millis(path: &Path) -> i64 {
 /// All `.jsonl` files under `dir`, recursively. Providers store sessions at
 /// varying depths (claude: `<project>/<id>.jsonl`), so a flat `read_dir`
 /// never finds them.
-fn jsonl_files_under(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn jsonl_files_under(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;
@@ -380,7 +373,7 @@ pub(crate) fn parse_mcp_tool_name(name: &str) -> Option<McpProvenance> {
 // ============================================================================
 
 /// Result of one JSONL pass: identity + scalar metadata + semantic events.
-struct JsonlParse {
+pub(crate) struct JsonlParse {
     canonical_id: String,
     is_sidechain: bool,
     parent_session_id: Option<String>,
@@ -396,7 +389,7 @@ struct JsonlParse {
 /// One forward pass over a `.jsonl` file producing semantic events + identity.
 /// `provider` is passed only for the resulting `RawFile.provider` tag; identity
 /// resolution is shape-based (not a `match provider`).
-fn parse_jsonl_events(path: &Path) -> AppResult<JsonlParse> {
+pub(crate) fn parse_jsonl_events(path: &Path) -> AppResult<JsonlParse> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
     let stem = path
@@ -752,7 +745,7 @@ fn is_claude_metadata_type(ty: &str) -> bool {
 }
 
 /// Build a `RawFile` from a parsed JSONL result.
-fn rawfile_from_jsonl(path: &Path, p: JsonlParse) -> RawFile {
+pub(crate) fn rawfile_from_jsonl(path: &Path, p: JsonlParse) -> RawFile {
     let project = p
         .cwd
         .as_deref()
@@ -785,7 +778,7 @@ fn rawfile_from_jsonl(path: &Path, p: JsonlParse) -> RawFile {
 // `collect_opencode_raw` below for the SQLite path, so both layouts surface
 // under the single `opencode-desktop` provider.
 
-pub(super) fn opencode_db_path() -> PathBuf {
+pub(crate) fn opencode_db_path() -> PathBuf {
     if let Some(xdg) = dirs::data_local_dir()
         .map(|d| d.join("opencode").join("opencode.db"))
         .filter(|p| p.is_file())
@@ -814,7 +807,7 @@ pub(super) fn opencode_db_path() -> PathBuf {
 /// stores sessions in the same session/message/part + JSON-`data` layout as
 /// ZCode (verified against a real `opencode.db`), so this delegates to the
 /// shared [`partdb`] pipeline.
-pub(super) fn collect_opencode_raw() -> AppResult<Vec<RawFile>> {
+pub(crate) fn collect_opencode_raw() -> AppResult<Vec<RawFile>> {
     let db = opencode_db_path();
     if !db.is_file() {
         return Ok(vec![]);
@@ -824,7 +817,7 @@ pub(super) fn collect_opencode_raw() -> AppResult<Vec<RawFile>> {
 
 // --- shared dir helpers ---------------------------------------------------
 
-pub(super) fn self_dir(dot: &str, rest: &[&str]) -> AppResult<PathBuf> {
+pub(crate) fn self_dir(dot: &str, rest: &[&str]) -> AppResult<PathBuf> {
     let home = crate::db::home_dir()?;
     let mut p = home.join(dot);
     for r in rest {
@@ -833,7 +826,7 @@ pub(super) fn self_dir(dot: &str, rest: &[&str]) -> AppResult<PathBuf> {
     Ok(p)
 }
 
-fn jsonl_snapshot(dir: PathBuf) -> AppResult<Vec<(String, i64)>> {
+pub(crate) fn jsonl_snapshot(dir: PathBuf) -> AppResult<Vec<(String, i64)>> {
     if !dir.exists() {
         return Ok(vec![]);
     }
@@ -843,7 +836,7 @@ fn jsonl_snapshot(dir: PathBuf) -> AppResult<Vec<(String, i64)>> {
         .collect())
 }
 
-fn import_jsonl_dir(dir: PathBuf) -> AppResult<Vec<RawFile>> {
+pub(crate) fn import_jsonl_dir(dir: PathBuf) -> AppResult<Vec<RawFile>> {
     if !dir.exists() {
         return Ok(vec![]);
     }
@@ -1138,12 +1131,13 @@ fn derive_header(
 /// `resume_command` field and `build_resume_command` stay consistent — these
 /// must match the templates in `provider.rs::default_provider_registry`.
 /// (Pi/OpenCode use `--session`, not the older `--resume`/`--resume-id`.)
+/// Single source: the `SessionRef.resume_command` template in the agent
+/// registry (previously a second hardcoded map here that had to be kept in
+/// sync with it).
 fn resume_command_for(provider: &str) -> Option<&'static str> {
-    match provider {
-        "claude-code-cli" => Some("claude --resume {id}"),
-        "pi-cli" => Some("pi --session {id}"),
-        _ => None,
-    }
+    crate::agents::agent_spec(provider)
+        .and_then(|a| a.session)
+        .and_then(|s| s.resume_command)
 }
 
 // ============================================================================

@@ -11,7 +11,7 @@
 //! happens in ZCode's Model Providers UI — Nestra writes the entry, it does
 //! not touch ZCode's selection keys in `setting.json`.
 
-use super::internal;
+use crate::agents::internal;
 use crate::config_writer::{
     atomic_write, ensure_backup, restore_from_backup, ConfigAdapter, DetectedProvider,
     GatewayAlias, ModelSelection, ModelsConfig, ProviderKind, ProviderSet,
@@ -23,6 +23,11 @@ use std::path::Path;
 const MANAGED_PREFIX: &str = "nestra-";
 
 pub struct ZCode;
+
+/// Registry constructor for the zcode writer — see [super::SPEC].
+pub fn new() -> Box<dyn crate::config_writer::ConfigAdapter> {
+    Box::new(ZCode)
+}
 
 impl ConfigAdapter for ZCode {
     fn accepts(&self) -> &'static [ProviderKind] {

@@ -230,11 +230,10 @@ pub async fn spawn(
 /// Route one inbound request to the matching protocol handler. This is the
 /// gateway's dispatch core — it identifies the agent from the request path
 /// prefix (the config writer embeds `/<agent-id>/v1/...` into the base_url)
-/// and hands off to the right protocol handler.
-///
-/// Protocol mapping:
-///   - `claude-code-cli`, `zcode-desktop` → Anthropic Messages (`/v1/messages`)
-///   - `opencode-desktop`, `pi-cli` → OpenAI Chat Completions (`/v1/chat/completions`)
+/// and hands off to the protocol handler for the agent's declared
+/// [`GatewayWire`](crate::agents::GatewayWire) (Anthropic Messages for
+/// claude-code-cli/zcode-desktop, Chat Completions for
+/// opencode-desktop/pi-cli).
 ///
 /// Requests without a recognized agent prefix fall through to the Anthropic
 /// handler (backward-compat with prefix-less Claude Code config — the
@@ -254,14 +253,19 @@ async fn dispatch(
 
     let path = req.uri().path().to_string();
     let agent_id = extract_agent_id(&path);
-    let handled = match agent_id.as_deref() {
-        Some("opencode-desktop") | Some("pi-cli") => {
+    let wire = agent_id
+        .as_deref()
+        .and_then(crate::agents::agent_spec)
+        .map(|s| s.gateway_wire)
+        .unwrap_or(crate::agents::GatewayWire::Anthropic);
+    let handled = match wire {
+        crate::agents::GatewayWire::Chat => {
             protocol_openai::handle(req, state, agent_id.unwrap().as_str()).await
         }
         // claude-code-cli (explicit prefix) or None (prefix-less request
         // to /v1/messages) → Anthropic path. Default the agent id to
         // "claude-code-cli" when no prefix was present.
-        _ => {
+        crate::agents::GatewayWire::Anthropic => {
             protocol_anthropic::handle(req, state, agent_id.as_deref().unwrap_or("claude-code-cli"))
                 .await
         }
@@ -332,10 +336,10 @@ fn internal_error() -> hyper::Response<stream::GatewayBody> {
 fn extract_agent_id(path: &str) -> Option<String> {
     let trimmed = path.strip_prefix('/')?;
     let first = trimmed.split('/').next()?;
+    if crate::agents::agents().iter().any(|a| a.id == first) {
+        return Some(first.to_string());
+    }
     match first {
-        "claude-code-cli" | "opencode-desktop" | "pi-cli" | "zcode-desktop" => {
-            Some(first.to_string())
-        }
         "claude-code" => Some("claude-code-cli".to_string()),
         "pi" => Some("pi-cli".to_string()),
         _ => None,

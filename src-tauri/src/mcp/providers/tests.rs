@@ -1,4 +1,7 @@
 use super::*;
+use crate::agents::claude_code::mcp::ClaudeCode;
+use crate::agents::opencode::mcp::OpenCode;
+use crate::agents::zcode::mcp::ZCode;
 use std::path::Path;
 
 #[test]

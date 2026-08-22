@@ -8,7 +8,7 @@
 //! guarantees a one-click revert. Full AST-preserving JSONC editing is a
 //! future enhancement.
 
-use super::internal;
+use crate::agents::internal;
 use crate::config_writer::{
     ensure_backup, atomic_write, restore_from_backup, ConfigAdapter, DetectedProvider,
     ModelSelection, ModelsConfig, ProviderKind, ProviderSet, SwitchContext,
@@ -17,6 +17,11 @@ use crate::error::{AppError, AppResult};
 use std::path::Path;
 
 pub struct OpenCode;
+
+/// Registry constructor for the opencode writer — see [super::SPEC].
+pub fn new() -> Box<dyn crate::config_writer::ConfigAdapter> {
+    Box::new(OpenCode)
+}
 
 impl ConfigAdapter for OpenCode {
     fn accepts(&self) -> &'static [ProviderKind] {

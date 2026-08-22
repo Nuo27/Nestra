@@ -1,7 +1,7 @@
 //! Claude Code config writer — `~/.claude/settings.json`, owns the `env` block.
 //! Anthropic protocol only.
 
-use super::internal;
+use crate::agents::internal;
 use crate::config_writer::{
     ensure_backup, atomic_write, restore_from_backup, ConfigAdapter, ModelSelection,
     ModelsConfig, ProviderKind, ProviderSet,
@@ -11,6 +11,11 @@ use std::collections::HashSet;
 use std::path::Path;
 
 pub struct ClaudeCode;
+
+/// Registry constructor for the claude-code-cli writer — see [super::SPEC].
+pub fn new() -> Box<dyn crate::config_writer::ConfigAdapter> {
+    Box::new(ClaudeCode)
+}
 
 /// Keys Nestra owns inside `env`. Never overwritten by advanced-env merges.
 const RESERVED: &[&str] = &[

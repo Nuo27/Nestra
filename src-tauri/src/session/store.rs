@@ -10,25 +10,25 @@ use rusqlite::{params, Connection};
 
 use super::model::MessageWindow;
 use super::{AssembledSession, Message, Session};
-use super::{normalize_with_parts, provider_snapshot, ALL_PROVIDERS};
+use super::{all_providers, normalize_with_parts, provider_snapshot};
 
 /// Reconcile every provider against disk, reparsing only the ones that changed.
 pub fn reconcile_all(conn: &Connection) -> AppResult<()> {
-    for p in ALL_PROVIDERS {
+    for p in all_providers() {
         if let Err(e) = reconcile_provider(conn, p) {
-            tracing::warn!(provider = *p, error = %e, "session reconcile failed");
+            tracing::warn!(provider = p, error = %e, "session reconcile failed");
         }
     }
     prune_unknown_providers(conn)?;
     Ok(())
 }
 
-/// Delete rows whose provider is no longer in [`ALL_PROVIDERS`] — e.g. the
+/// Delete rows whose provider is no longer in [`super::all_providers`] — e.g. the
 /// pre-rename `claude-code`/`pi` ids linger as duplicate sessions after a
 /// registry rename. There is no data migration by policy; the closed provider
 /// list is the authority.
 fn prune_unknown_providers(conn: &Connection) -> AppResult<()> {
-    let known: Vec<String> = ALL_PROVIDERS.iter().map(|p| p.to_string()).collect();
+    let known: Vec<String> = all_providers().iter().map(|p| p.to_string()).collect();
     for table in ["session", "session_message", "session_part", "session_source"] {
         let placeholders = std::iter::repeat("?").take(known.len()).collect::<Vec<_>>().join(",");
         conn.execute(

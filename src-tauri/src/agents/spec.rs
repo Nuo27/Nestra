@@ -1,208 +1,33 @@
-//! The `AGENTS` static registry and the data types that describe one agent.
+//! The data types that describe one agent — the shape of an [`AgentSpec`]
+//! and everything it references.
 //!
 //! `Capability` carries UI-agnostic booleans describing what an agent can do
 //! (manageable, supports provider configuration, supports sessions, etc.).
 //! Wire-format questions (`supported_protocols`, `model_selection`) live on
 //! the `ConfigAdapter` trait, not here.
+//!
+//! The registry itself (`AGENTS`) is assembled in `agents/mod.rs` from each
+//! agent module's `SPEC` — this file holds no agent data.
 
-/// Every agent Nestra manages, in stable display order. Closed list —
-/// detection requires per-agent install-path knowledge that can't be inferred,
-/// so agents are declared here rather than auto-discovered.
-pub fn agents() -> &'static [AgentSpec] {
-    &AGENTS
-}
-
-/// Look up one agent by id.
-pub fn agent_spec(id: &str) -> Option<&'static AgentSpec> {
-    AGENTS.iter().find(|a| a.id == id)
-}
-
-/// Convenience: the declared capability for an agent id.
-pub fn capability_for(id: &str) -> Option<&'static Capability> {
-    agent_spec(id).map(|a| &a.capability)
-}
-
-/// Convenience: the detection spec for an agent id.
-pub fn detect_spec_for(id: &str) -> Option<&'static DetectSpec> {
-    agent_spec(id).map(|a| &a.detect)
-}
-
-/// Convenience: the config reference (writer key + path) for an agent id.
-pub fn config_ref_for(id: &str) -> Option<&'static ConfigRef> {
-    agent_spec(id).map(|a| &a.config)
-}
-
-pub static AGENTS: &[AgentSpec] = &[
-    AgentSpec {
-        id: "claude-code-cli",
-        display_name: "Claude Code",
-        kind: "claude-code-cli",
-        agent_kind: AgentKind::Cli,
-        detect: DetectSpec {
-            binary_candidates: &["claude"],
-            install_paths: &[],
-            config_relative: Some(".claude"),
-            skip_version_probe: false,
-        },
-        capability: Capability {
-            manageable: true,
-            supports_provider_configuration: true,
-            supports_multiple_providers: false,
-            supports_provider_injection: true,
-            supports_factory_restore: true,
-            supports_sessions: true,
-            supports_mcp: true,
-            supports_mcp_enabled: false,
-            supports_skills: true,
-            supports_gateway: true,
-        },
-        config: ConfigRef {
-            writer: "claude-code-cli",
-            relative_path: ".claude/settings.json",
-        },
-        session: Some(SessionRef {
-            reader: "claude-code-cli",
-            resume_command: Some("claude --resume {id}"),
-            unsupported_reason: None,
-        }),
-        skill_dir: Some(".claude/skills"),
-        skill_name_matches_dir: false,
-    },
-    AgentSpec {
-        id: "opencode-desktop",
-        display_name: "OpenCode Desktop",
-        kind: "opencode-desktop",
-        agent_kind: AgentKind::Desktop,
-        detect: DetectSpec {
-            binary_candidates: &[],
-            install_paths: &[
-                DetectorPath::PlatformLocalAppData("Programs/OpenCode/OpenCode.exe"),
-                DetectorPath::PlatformAppData("OpenCode"),
-                DetectorPath::HomeRelative("Applications/OpenCode.app"),
-            ],
-            // Shares config with the CLI; probe so a "configured" badge shows
-            // even without the Desktop binary on disk.
-            config_relative: Some(".config/opencode"),
-            skip_version_probe: false,
-        },
-        capability: Capability {
-            manageable: true,
-            supports_provider_configuration: true,
-            supports_multiple_providers: true,
-            supports_provider_injection: true,
-            supports_factory_restore: true,
-            supports_sessions: true,
-            supports_mcp: true,
-            supports_mcp_enabled: true,
-            supports_skills: true,
-            supports_gateway: true,
-        },
-        config: ConfigRef {
-            writer: "opencode",
-            relative_path: ".config/opencode/opencode.json",
-        },
-        session: Some(SessionRef {
-            reader: "opencode-desktop",
-            resume_command: None,
-            unsupported_reason: Some("OpenCode Desktop sessions are read-only — resume from within the OpenCode app"),
-        }),
-        skill_dir: Some(".config/opencode/skills"),
-        // OpenCode requires the SKILL.md frontmatter `name` to equal the skill
-        // directory name (and be lowercase-alphanumeric + single hyphens), else
-        // it silently drops the skill. Nestra copies land at `<dir>/<id>`, so
-        // the dir name is always compliant; this flag makes the sync rewrite
-        // the copied frontmatter `name` to the id. Claude Code/Pi are lenient
-        // and keep the user's display name.
-        skill_name_matches_dir: true,
-    },
-    AgentSpec {
-        id: "pi-cli",
-        display_name: "Pi",
-        kind: "pi-cli",
-        agent_kind: AgentKind::Cli,
-        detect: DetectSpec {
-            binary_candidates: &["pi"],
-            install_paths: &[],
-            config_relative: Some(".pi/agent"),
-            skip_version_probe: false,
-        },
-        capability: Capability {
-            manageable: true,
-            supports_provider_configuration: true,
-            supports_multiple_providers: true,
-            supports_provider_injection: true,
-            supports_factory_restore: true,
-            supports_sessions: true,
-            supports_mcp: true,
-            supports_mcp_enabled: false,
-            supports_skills: true,
-            supports_gateway: true,
-        },
-        config: ConfigRef {
-            writer: "pi-cli",
-            relative_path: ".pi/agent/models.json",
-        },
-        session: Some(SessionRef {
-            reader: "pi-cli",
-            resume_command: Some("pi --session {id}"),
-            unsupported_reason: None,
-        }),
-        skill_dir: Some(".agents/skills"),
-        skill_name_matches_dir: false,
-    },
-    AgentSpec {
-        id: "zcode-desktop",
-        display_name: "ZCode",
-        kind: "zcode-desktop",
-        agent_kind: AgentKind::Desktop,
-        detect: DetectSpec {
-            // The agent CLI ships bundled inside the Electron app
-            // (`resources/glm/zcode.cjs`) and is not on PATH — detection is by
-            // install location, like OpenCode Desktop.
-            binary_candidates: &[],
-            install_paths: &[
-                DetectorPath::PlatformLocalAppData("Programs/ZCode/ZCode.exe"),
-                DetectorPath::PlatformAppData("ZCode"),
-                DetectorPath::HomeRelative("Applications/ZCode.app"),
-            ],
-            config_relative: Some(".zcode"),
-            skip_version_probe: true,
-        },
-        capability: Capability {
-            manageable: true,
-            supports_provider_configuration: true,
-            supports_multiple_providers: false,
-            supports_provider_injection: true,
-            supports_factory_restore: true,
-            supports_sessions: true,
-            supports_mcp: true,
-            // `~/.zcode/cli/config.json` MCP servers carry a per-server
-            // `enabled` field, so the written-but-disabled state is expressible.
-            supports_mcp_enabled: true,
-            supports_skills: true,
-            supports_gateway: true,
-        },
-        config: ConfigRef {
-            writer: "zcode",
-            relative_path: ".zcode/v2/config.json",
-        },
-        session: Some(SessionRef {
-            reader: "zcode-desktop",
-            // The resumable CLI is bundled inside the app and not on PATH, so
-            // a copied `zcode --resume <id>` wouldn't run — sessions are
-            // read-only, resumed from within the ZCode app.
-            resume_command: None,
-            unsupported_reason: Some("ZCode sessions are read-only — resume from within the ZCode app"),
-        }),
-        skill_dir: Some(".zcode/skills"),
-        skill_name_matches_dir: false,
-    },
-];
+use crate::config_writer::ConfigAdapter;
+use crate::mcp::providers::Provider as McpProvider;
+use crate::session::SessionImporter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentKind {
     Cli,
     Desktop,
+}
+
+/// The inbound wire protocol an agent speaks when pointed at the Nestra
+/// gateway. Gateway dispatch derives from this — one enum, no per-agent
+/// match arms in the gateway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayWire {
+    /// Anthropic Messages (`POST /v1/messages`).
+    Anthropic,
+    /// OpenAI Chat Completions (`POST /v1/chat/completions`).
+    Chat,
 }
 
 /// Where to look for an agent on disk. `binary_candidates` are checked via
@@ -302,7 +127,8 @@ pub struct SessionRef {
     pub unsupported_reason: Option<&'static str>,
 }
 
-/// One agent's full description. The unit of registration in [`AGENTS`].
+/// One agent's full description. The unit of registration in
+/// [`crate::agents::AGENTS`]; one `SPEC` constant per agent module.
 #[derive(Debug, Clone)]
 pub struct AgentSpec {
     pub id: &'static str,
@@ -320,6 +146,15 @@ pub struct AgentSpec {
     /// the skill id (= dir name). Required by OpenCode, which drops skills whose
     /// frontmatter `name` ≠ directory name.
     pub skill_name_matches_dir: bool,
+    /// Inbound wire this agent speaks to the gateway (see [`GatewayWire`]).
+    pub gateway_wire: GatewayWire,
+    /// Constructs the agent's [`ConfigAdapter`]. Present for every registry
+    /// agent; `manageable()` is derived from `config.writer` being non-empty.
+    pub adapter: fn() -> Box<dyn ConfigAdapter>,
+    /// Session importer constructor; `Some` iff `capability.supports_sessions`.
+    pub importer: Option<fn() -> Box<dyn SessionImporter>>,
+    /// MCP config provider constructor; `Some` iff `capability.supports_mcp`.
+    pub mcp_provider: Option<fn() -> Box<dyn McpProvider>>,
 }
 
 impl AgentSpec {
@@ -328,6 +163,3 @@ impl AgentSpec {
         !self.config.writer.is_empty()
     }
 }
-
-#[cfg(test)]
-mod tests;

@@ -10,7 +10,7 @@
 //! sole purpose is to surface a user's Desktop history in the session
 //! list so it can be browsed and deleted.
 
-use super::{import_jsonl_dir, jsonl_snapshot, mtime_millis, SessionImporter};
+use crate::session::{import_jsonl_dir, jsonl_snapshot, mtime_millis, SessionImporter};
 use crate::db;
 use crate::error::AppResult;
 use crate::session::RawFile;
@@ -22,13 +22,18 @@ use std::path::PathBuf;
 /// and the JSONL session dirs. Read-only / not resumable.
 pub struct OpenCodeDesktopImporter;
 
+/// Registry constructor — see [super::SPEC].
+pub fn new() -> Box<dyn crate::session::SessionImporter> {
+    Box::new(OpenCodeDesktopImporter)
+}
+
 impl SessionImporter for OpenCodeDesktopImporter {
     fn snapshot(&self) -> AppResult<Vec<(String, i64)>> {
         let mut out: Vec<(String, i64)> = Vec::new();
         // SQLite db (primary Desktop store). `is_file` (not `exists`): a
         // directory named opencode.db would otherwise be counted as a store
         // and re-parsed on every reconcile.
-        let db = super::opencode_db_path();
+        let db = crate::session::opencode_db_path();
         if db.is_file() {
             out.push((db.to_string_lossy().to_string(), mtime_millis(&db)));
         }
@@ -52,7 +57,7 @@ impl SessionImporter for OpenCodeDesktopImporter {
 /// helper (same logic the CLI importer uses). A failure to
 /// open the db is non-fatal — the JSONL path still runs.
 fn collect_opencode_safe() -> Vec<RawFile> {
-    super::collect_opencode_raw().unwrap_or_default()
+    crate::session::collect_opencode_raw().unwrap_or_default()
 }
 
 fn opencode_desktop_dirs() -> Vec<PathBuf> {

@@ -604,7 +604,7 @@ fn mark_onboarding_if_needed(agent_id: &str) {
         return;
     }
     if let Ok(home) = db::home_dir() {
-        if let Err(e) = agents::claude_code::mark_onboarding_complete(&home) {
+        if let Err(e) = agents::claude_code::config::mark_onboarding_complete(&home) {
             tracing::warn!("failed to mark claude-code onboarding complete: {e}");
         }
     }

@@ -24,7 +24,7 @@ use std::path::Path;
 /// Read every session out of a part-style SQLite db. One `RawFile` per session
 /// row (path is the db file itself). Missing tables → empty vec, not an error
 /// (wrong/older layout = nothing to import).
-pub(super) fn collect(db: &Path) -> AppResult<Vec<RawFile>> {
+pub(crate) fn collect(db: &Path) -> AppResult<Vec<RawFile>> {
     let conn = match rusqlite::Connection::open_with_flags(
         db,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
