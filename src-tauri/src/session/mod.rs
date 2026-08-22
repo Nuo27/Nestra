@@ -60,7 +60,7 @@ fn importer_for(provider_id: &str) -> Option<Box<dyn SessionImporter>> {
 // ============================================================================
 
 /// Parse an ISO-8601 / RFC-3339 timestamp to unix millis.
-fn parse_iso(s: &str) -> Option<i64> {
+pub(crate) fn parse_iso(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|d| d.timestamp_millis())

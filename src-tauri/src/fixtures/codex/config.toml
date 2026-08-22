@@ -1,0 +1,38 @@
+# Distilled from a real Codex Desktop config (secrets removed): desktop
+# state, marketplaces, plugins, mcp_servers and projects sections must all
+# survive a Nestra write byte-for-byte (modulo the keys Nestra owns).
+model = "glm-4.7"
+model_reasoning_effort = "medium"
+
+[features]
+goals = true
+rmcp_client = true
+
+[desktop]
+show-context-window-usage = true
+conversationDetailMode = "STEPS_COMMANDS"
+
+[marketplaces.openai-bundled]
+last_updated = "2026-08-07T22:56:20Z"
+source_type = "local"
+source = '\\?\C:\Users\me\.codex\.tmp\bundled-marketplaces\openai-bundled'
+
+[plugins."visualize@openai-bundled"]
+enabled = true
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "http://127.0.0.1:57321/v1"
+
+[mcp_servers.codegraph]
+args = ["serve", "--mcp"]
+command = "codegraph"
+env = { }
+
+[mcp_servers.unity]
+url = "http://127.0.0.1:8080/mcp"
+
+[projects."c:\\users\\me\\demo"]
+trust_level = "trusted"

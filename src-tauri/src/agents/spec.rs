@@ -28,6 +28,8 @@ pub enum GatewayWire {
     Anthropic,
     /// OpenAI Chat Completions (`POST /v1/chat/completions`).
     Chat,
+    /// OpenAI Responses (`POST /v1/responses`) — Codex's only wire.
+    Responses,
 }
 
 /// Where to look for an agent on disk. `binary_candidates` are checked via

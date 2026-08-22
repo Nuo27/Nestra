@@ -135,11 +135,12 @@ fn migration_adds_factory_and_status_detail_columns_and_seeds() {
     // The agent table is seeded from the registry: exactly the declared
     // agents are present, every one as a `missing`-status placeholder
     // until detection runs.
-    let registry_ids: Vec<String> = crate::agents::agents()
+    let mut registry_ids: Vec<String> = crate::agents::agents()
         .iter()
         .map(|a| a.id.to_string())
         .collect();
-    assert_eq!(ids, registry_ids, "agent table must mirror the registry");
+    registry_ids.sort();
+    assert_eq!(ids, registry_ids, "agent table must mirror the registry (set-wise)");
     for row in list_agents(&conn).unwrap() {
         assert_eq!(row.status, "missing");
     }

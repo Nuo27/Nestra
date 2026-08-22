@@ -18,6 +18,7 @@
 pub mod spec;
 pub mod detect;
 pub mod claude_code;
+pub mod codex;
 pub mod opencode;
 pub mod pi;
 pub mod zcode;
@@ -37,6 +38,7 @@ pub static AGENTS: &[&AgentSpec] = &[
     &opencode::SPEC,
     &pi::SPEC,
     &zcode::SPEC,
+    &codex::SPEC,
 ];
 
 /// Look up every agent, in display order.

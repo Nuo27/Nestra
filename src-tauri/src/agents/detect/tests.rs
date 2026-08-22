@@ -127,8 +127,8 @@ fn opencode_desktop_found_via_app_data() {
 }
 
 #[test]
-fn detector_registry_has_four_entries() {
-    assert_eq!(agents().len(), 4);
+fn detector_registry_has_five_entries() {
+    assert_eq!(agents().len(), 5);
     let ids: Vec<&str> = agents().iter().map(|d| d.id).collect();
     assert!(ids.contains(&"claude-code-cli"));
     assert!(ids.contains(&"opencode-desktop"));

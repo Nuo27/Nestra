@@ -1,8 +1,8 @@
 use super::*;
 
 #[test]
-fn registry_has_four_agents() {
-    assert_eq!(agents().len(), 4);
+fn registry_has_five_agents() {
+    assert_eq!(agents().len(), 5);
 }
 
 #[test]
@@ -45,7 +45,13 @@ fn resumable_agents_have_resume_command_and_reader() {
 #[test]
 fn known_agents_present() {
     let ids: Vec<&str> = agents().iter().map(|a| a.id).collect();
-    for expected in ["claude-code-cli", "opencode-desktop", "pi-cli", "zcode-desktop"] {
+    for expected in [
+        "claude-code-cli",
+        "opencode-desktop",
+        "pi-cli",
+        "zcode-desktop",
+        "codex-desktop",
+    ] {
         assert!(ids.contains(&expected), "missing {expected}");
     }
 }

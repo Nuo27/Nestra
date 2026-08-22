@@ -42,6 +42,10 @@ thiserror = "2"
 url = "2"
 which = "6"
 jsonc-parser = { version = "0.26", features = ["serde"] }
+# Codex config is TOML (`~/.codex/config.toml`); toml_edit edits it
+# surgically (format + comments preserved), the analog of jsonc-parser for
+# opencode.
+toml_edit = "0.22"
 # Nestra orchestration identity (task_id / request_id are UUIDs).
 uuid = { version = "1", features = ["v4", "serde"] }
 # Local gateway: an HTTP server the agent points at (via a stable alias

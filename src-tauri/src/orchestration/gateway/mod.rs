@@ -269,6 +269,15 @@ async fn dispatch(
             protocol_anthropic::handle(req, state, agent_id.as_deref().unwrap_or("claude-code-cli"))
                 .await
         }
+        crate::agents::GatewayWire::Responses => {
+            // Codex's wire. The inbound Responses handler is not enabled yet;
+            // answer honestly instead of silently falling to another wire.
+            let mut r = hyper::Response::new(stream::GatewayBody::json_full(serde_json::json!({
+                "error": { "type": "nestra_gateway_error", "message": "responses inbound handler not yet enabled" }
+            })));
+            *r.status_mut() = StatusCode::NOT_IMPLEMENTED;
+            Ok(r)
+        }
     };
     Ok(match handled {
         Ok(resp) => resp,
