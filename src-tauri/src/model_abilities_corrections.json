@@ -29,5 +29,9 @@
   "opencode-go/qwen3.7-max": { "api": "anthropic" },
   "opencode-go/qwen3.7-plus": { "api": "anthropic" },
   "opencode-go/qwen3.6-plus": { "api": "anthropic" },
-  "opencode-go/qwen3.5-plus": { "api": "anthropic" }
+  "opencode-go/qwen3.5-plus": { "api": "anthropic" },
+  "opencode-go/ox-alpha-free": {
+    "api": "openai-comp",
+    "limit": { "context": 1048576, "output": 131072 }
+  }
 }

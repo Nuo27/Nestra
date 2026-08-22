@@ -588,7 +588,7 @@ fn build_switch_context(
     // set, so the UI's "Reset" button is a pure delete of the override row.
     let model_abilities = {
         let conn = parts.db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-        let _ = crate::model_abilities::refresh_if_stale(&conn);
+        let _ = crate::model_abilities::refresh(&conn, false);
         let defaults = crate::model_abilities::load_index(&conn)
             .map(|idx| crate::model_abilities::subset_for(&idx, &models.ids()))
             .unwrap_or_default();

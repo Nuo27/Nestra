@@ -508,22 +508,27 @@ pub fn load_corrections() -> HashMap<String, ModelAbilities> {
 }
 
 /// Refresh the cache from models.dev if it's older than [`TTL_MS`], or
-/// absent. **Network failure is never fatal** — on error the existing
+/// absent — unless `force` is set, which skips the TTL check (used by the
+/// explicit "Fetch models" button: a brand-new model may already be listed
+/// upstream while the local cache is still inside its 7-day window).
+/// **Network failure is never fatal** — on error the existing
 /// cache (if any) is kept and this returns `Ok(())`.
-/// Refresh the models.dev cache when it's stale. NOTE: the fetch runs while
+/// NOTE: the fetch runs while
 /// the caller holds the DB lock (the write targets the same connection) —
 /// a slow network could stall other DB commands. Mitigations: the TTL check
 /// makes this rare, a process-wide fetch-dedupe prevents concurrent call
 /// sites from stacking fetches, and the timeout bounds the worst case.
-pub fn refresh_if_stale(conn: &rusqlite::Connection) -> AppResult<()> {
-    if let Some(cached) = db::get_setting(conn, CACHE_KEY)? {
-        let fetched_at = cached
-            .get("fetched_at")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let now = chrono::Utc::now().timestamp_millis();
-        if now - fetched_at < TTL_MS {
-            return Ok(()); // fresh enough
+pub fn refresh(conn: &rusqlite::Connection, force: bool) -> AppResult<()> {
+    if !force {
+        if let Some(cached) = db::get_setting(conn, CACHE_KEY)? {
+            let fetched_at = cached
+                .get("fetched_at")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let now = chrono::Utc::now().timestamp_millis();
+            if now - fetched_at < TTL_MS {
+                return Ok(()); // fresh enough
+            }
         }
     }
     // Dedupe: several call sites may enter within the same window — only one
@@ -958,6 +963,21 @@ mod tests {
             .expect("MiniMax-M3 should match a correction entry");
         assert_eq!(a.limit.as_ref().unwrap().context, 1_000_000, "context must be 1M per MiniMax docs");
         assert_eq!(a.limit.as_ref().unwrap().output, 128_000);
+    }
+
+    #[test]
+    fn corrections_cover_opencode_go_ox_alpha_free_from_bare_id() {
+        // models.dev doesn't list ox-alpha at all and OpenCode Zen's /models
+        // is ids-only, so the bundled correction is the only ability source.
+        // The endpoint's fetched id is bare ("ox-alpha-free") — it must
+        // tail-match the "opencode-go/ox-alpha-free" key. Limit figures are
+        // the vendor's own (mirrored on OpenRouter as stealth/ox-alpha).
+        let corrections = load_corrections();
+        let a = abilities_for(&corrections, "ox-alpha-free")
+            .expect("bare go id should tail-match the correction entry");
+        assert_eq!(a.limit.as_ref().unwrap().context, 1_048_576);
+        assert_eq!(a.limit.as_ref().unwrap().output, 131_072);
+        assert_eq!(a.api.as_deref(), Some("openai-comp"));
     }
 
     #[test]

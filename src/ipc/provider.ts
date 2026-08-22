@@ -107,5 +107,14 @@ export const endpointCreateWithPreset = (input: {
     apiKey: input.apiKey,
     quotaQuery: input.quotaQuery,
   });
+/** Result of the "Fetch models" button. `resolved` = abilities the local
+ *  models.dev chain already covers (display-only fallback until saved);
+ *  `hints` = provider-declared fields for models the local chain can't
+ *  resolve — merged into the override draft so Save persists them. */
+export interface FetchedModels {
+  models: string[];
+  resolved: Record<string, ModelAbilities>;
+  hints: Record<string, ModelAbilities>;
+}
 export const endpointFetchModels = (id: string) =>
-  invoke<string[]>("endpoint_fetch_models", { id });
+  invoke<FetchedModels>("endpoint_fetch_models", { id });

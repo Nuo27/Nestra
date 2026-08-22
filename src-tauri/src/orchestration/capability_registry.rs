@@ -61,7 +61,7 @@ pub fn rebuild_endpoint(conn: &Connection, endpoint_id: &str) -> AppResult<usize
 /// `api` dialect (which wire a model is officially served on) and context
 /// fixes — without this merge the catalog would lack `api` entirely and
 /// wire selection would silently fall back to the endpoint protocol.
-fn merged_index(conn: &Connection) -> AppResult<HashMap<String, crate::model_abilities::ModelAbilities>> {
+pub(crate) fn merged_index(conn: &Connection) -> AppResult<HashMap<String, crate::model_abilities::ModelAbilities>> {
     Ok(crate::model_abilities::merge_into(
         crate::model_abilities::load_index(conn)?,
         crate::model_abilities::load_corrections(),

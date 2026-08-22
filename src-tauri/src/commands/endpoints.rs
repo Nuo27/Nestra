@@ -362,7 +362,7 @@ pub async fn endpoint_set_api_key(
         db::set_endpoint_models(&conn, &id, &cached_str)?;
         db::mark_endpoint_key(&conn, &id, true, "valid")?;
         // Opportunistic models.dev ability-cache refresh (best-effort).
-        let _ = crate::model_abilities::refresh_if_stale(&conn);
+        let _ = crate::model_abilities::refresh(&conn, false);
         tracing::info!(
             endpoint = %id, protocol = %primary_protocol,
             "api key set + validated"
@@ -519,7 +519,7 @@ pub async fn endpoint_create_with_preset(
                 secrets::set(&id, &api_key)?;
                 db::set_endpoint_models(&conn, &id, &cached_str)?;
                 db::mark_endpoint_key(&conn, &id, true, "valid")?;
-                let _ = crate::model_abilities::refresh_if_stale(&conn);
+                let _ = crate::model_abilities::refresh(&conn, false);
                 tracing::info!(
                     endpoint = %id, protocol = %primary_protocol,
                     "preset endpoint created + key validated"
@@ -565,7 +565,7 @@ fn validate_key_against_protocols(
     let mut primary_protocol = String::new();
     for proto in protocols {
         match fetch_models_http(&proto.protocol, &proto.base_url, key) {
-            Ok(mut models) => {
+            Ok((mut models, _hints)) => {
                 primary_protocol = proto.protocol.clone();
                 all_models.append(&mut models);
                 break;
@@ -672,9 +672,66 @@ fn build_models_json(all_models: Vec<String>) -> AppResult<String> {
     Ok(serde_json::to_string(&cached)?)
 }
 
+/// Parse ability hints out of one `/models` response entry (OpenRouter /
+/// OpenAI-compatible shape: `context_length`, `top_provider
+/// .max_completion_tokens`, `supported_parameters`, `architecture
+/// .input_modalities`). Only fields the response actually reports are set —
+/// never invents defaults. `None` when the entry carries nothing usable
+/// (plain OpenAI/Anthropic responses return ids only).
+fn parse_models_entry(m: &serde_json::Value) -> Option<crate::model_abilities::ModelAbilities> {
+    use crate::model_abilities::{ModelAbilities, ModelLimit};
+    let limit = m
+        .get("context_length")
+        .and_then(|v| v.as_u64())
+        .map(|context| {
+            let output = m
+                .get("top_provider")
+                .and_then(|t| t.get("max_completion_tokens"))
+                .and_then(|v| v.as_u64())
+                .or_else(|| m.get("max_completion_tokens").and_then(|v| v.as_u64()))
+                // Output unreported (usually means "unlimited") — reuse the
+                // gateway's conservative placeholder rather than dropping
+                // the context too.
+                .unwrap_or(8_192);
+            ModelLimit { context, output, input: None }
+        });
+    let has_param = |name: &str| {
+        m.get("supported_parameters")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().any(|p| p.as_str() == Some(name)))
+            .unwrap_or(false)
+    };
+    let tool_call = has_param("tools").then_some(true);
+    let reasoning = has_param("reasoning").then_some(true);
+    let attachment = m
+        .get("architecture")
+        .and_then(|a| a.get("input_modalities"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().any(|x| x.as_str() == Some("image")))
+        .unwrap_or(false)
+        .then_some(true);
+    if limit.is_none() && tool_call.is_none() && reasoning.is_none() && attachment.is_none() {
+        return None;
+    }
+    Some(ModelAbilities {
+        reasoning,
+        tool_call,
+        attachment,
+        temperature: None,
+        limit,
+        modalities: None,
+        api: None,
+    })
+}
+
 /// GET the provider's model list. Iterates protocol rows, returns the union
-/// of all model ids.
-fn fetch_models_http(protocol: &str, base_url: &str, key: &str) -> AppResult<Vec<String>> {
+/// of all model ids plus any ability hints the response declares (see
+/// [`parse_models_entry`]).
+fn fetch_models_http(
+    protocol: &str,
+    base_url: &str,
+    key: &str,
+) -> AppResult<(Vec<String>, HashMap<String, crate::model_abilities::ModelAbilities>)> {
     let kind = if protocol == "anthropic" {
         crate::config_writer::ProviderKind::Anthropic
     } else {
@@ -692,27 +749,39 @@ fn fetch_models_http(protocol: &str, base_url: &str, key: &str) -> AppResult<Vec
     let value: serde_json::Value = resp
         .into_json()
         .map_err(|e| AppError::Http(format!("models parse failed: {e}")))?;
-    let ids = value
-        .get("data")
-        .and_then(|d| d.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|m| {
-                    m.get("id")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    Ok(ids)
+    let mut ids: Vec<String> = Vec::new();
+    let mut hints: HashMap<String, crate::model_abilities::ModelAbilities> = HashMap::new();
+    if let Some(arr) = value.get("data").and_then(|d| d.as_array()) {
+        for m in arr {
+            let Some(id) = m.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            ids.push(String::from(id));
+            if let Some(hint) = parse_models_entry(m) {
+                hints.insert(String::from(id), hint);
+            }
+        }
+    }
+    Ok((ids, hints))
+}
+
+/// Result of the "Fetch models" button: the union of upstream model ids, the
+/// abilities the local chain (models.dev cache + corrections) already
+/// resolves for them (display-only fallback until the models are saved), and
+/// provider-declared hints for models the local chain CANNOT resolve (the
+/// frontend merges these into the override draft so Save persists them).
+#[derive(Serialize)]
+pub struct FetchedModels {
+    pub models: Vec<String>,
+    pub resolved: HashMap<String, crate::model_abilities::ModelAbilities>,
+    pub hints: HashMap<String, crate::model_abilities::ModelAbilities>,
 }
 
 #[tauri::command]
 pub async fn endpoint_fetch_models(
     state: State<'_, crate::AppState>,
     id: String,
-) -> AppResult<Vec<String>> {
+) -> AppResult<FetchedModels> {
     let db = state.db.clone();
     run_blocking(move || {
         let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
@@ -721,20 +790,46 @@ pub async fn endpoint_fetch_models(
         drop(conn);
         let key = secrets::get(&id)?.unwrap_or_default();
         let mut all: Vec<String> = Vec::new();
+        let mut raw_hints: HashMap<String, crate::model_abilities::ModelAbilities> =
+            HashMap::new();
         for proto in &endpoint.protocols {
-            if let Ok(mut ids) = fetch_models_http(&proto.protocol, &proto.base_url, &key) {
+            if let Ok((mut ids, hints)) = fetch_models_http(&proto.protocol, &proto.base_url, &key) {
                 all.append(&mut ids);
+                // A dual-protocol endpoint may report the same id on both
+                // wires — merge instead of clobbering.
+                for (mid, hint) in hints {
+                    match raw_hints.remove(&mid) {
+                        Some(prev) => {
+                            raw_hints.insert(
+                                mid,
+                                crate::model_abilities::merge_field_overrides(prev, hint),
+                            );
+                        }
+                        None => {
+                            raw_hints.insert(mid, hint);
+                        }
+                    }
+                }
             }
         }
         all.sort();
         all.dedup();
-        // Opportunistic: refresh the models.dev ability cache while we're
-        // already hitting the network. Best-effort — ignore errors so a
-        // models.dev outage never blocks the model list.
-        if let Ok(conn) = db.lock() {
-            let _ = crate::model_abilities::refresh_if_stale(&conn);
-        }
-        Ok(all)
+        // The user explicitly asked for a fetch — force the models.dev cache
+        // past its 7-day TTL so brand-new models resolve locally when listed.
+        // Best-effort — ignore errors so a models.dev outage never blocks the
+        // model list.
+        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        let _ = crate::model_abilities::refresh(&conn, true);
+        let base = crate::orchestration::capability_registry::merged_index(&conn)?;
+        let resolved = crate::model_abilities::subset_for(&base, &all);
+        // Keep hints only for models the local chain can't cover — a hint on
+        // a resolvable model would freeze provider data into the override
+        // layer and mask future models.dev/corrections updates.
+        let hints = raw_hints
+            .into_iter()
+            .filter(|(mid, _)| crate::model_abilities::abilities_for(&base, mid).is_none())
+            .collect();
+        Ok(FetchedModels { models: all, resolved, hints })
     })
     .await
 }
@@ -805,5 +900,100 @@ pub async fn endpoint_fetch_quota(
         Ok(quota)
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model_abilities::ModelLimit;
+
+    #[test]
+    fn parse_models_entry_reads_openrouter_shape() {
+        let v = serde_json::json!({
+            "id": "openai/gpt-4o",
+            "context_length": 128_000,
+            "architecture": { "input_modalities": ["text", "image"] },
+            "top_provider": { "max_completion_tokens": 16_384 },
+            "supported_parameters": ["tools", "reasoning", "structured_outputs"],
+        });
+        let h = parse_models_entry(&v).expect("hint");
+        assert_eq!(
+            h.limit,
+            Some(ModelLimit { context: 128_000, output: 16_384, input: None })
+        );
+        assert_eq!(h.tool_call, Some(true));
+        assert_eq!(h.reasoning, Some(true));
+        assert_eq!(h.attachment, Some(true));
+        assert_eq!(h.temperature, None);
+    }
+
+    #[test]
+    fn parse_models_entry_defaults_missing_output_to_placeholder() {
+        let v = serde_json::json!({ "id": "x", "context_length": 200_000 });
+        let h = parse_models_entry(&v).expect("hint");
+        assert_eq!(
+            h.limit,
+            Some(ModelLimit { context: 200_000, output: 8_192, input: None })
+        );
+    }
+
+    #[test]
+    fn parse_models_entry_id_only_returns_none() {
+        // Plain OpenAI/Anthropic `/models` entries carry no ability fields.
+        let v = serde_json::json!({ "id": "claude-sonnet-4-5", "display_name": "Sonnet" });
+        assert!(parse_models_entry(&v).is_none());
+    }
+
+    #[test]
+    fn parse_models_entry_missing_context_drops_limit() {
+        let v = serde_json::json!({
+            "id": "x",
+            "supported_parameters": ["tools"],
+        });
+        let h = parse_models_entry(&v).expect("hint");
+        assert_eq!(h.limit, None);
+        assert_eq!(h.tool_call, Some(true));
+    }
+
+    /// The hint filter in `endpoint_fetch_models`: hints survive only for
+    /// models the local chain (models.dev + corrections) cannot resolve.
+    #[test]
+    fn hints_filter_drops_locally_resolvable_models() {
+        let base = crate::model_abilities::build_index(&serde_json::json!({
+            "anthropic/claude-sonnet-4-5": {
+                "id": "claude-sonnet-4-5",
+                "limit": { "context": 200_000, "output": 16_384 },
+            }
+        }));
+        let raw_hints: HashMap<String, _> = [(
+            "claude-sonnet-4-5".to_string(),
+            crate::model_abilities::ModelAbilities {
+                limit: Some(ModelLimit { context: 1, output: 1, input: None }),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect();
+        let hints: HashMap<_, _> = raw_hints
+            .into_iter()
+            .filter(|(mid, _)| crate::model_abilities::abilities_for(&base, mid).is_none())
+            .collect();
+        assert!(hints.is_empty(), "resolvable model must not become an override");
+
+        let raw_hints: HashMap<String, _> = [(
+            "brand-new-model".to_string(),
+            crate::model_abilities::ModelAbilities {
+                limit: Some(ModelLimit { context: 256_000, output: 8_192, input: None }),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect();
+        let hints: HashMap<_, _> = raw_hints
+            .into_iter()
+            .filter(|(mid, _)| crate::model_abilities::abilities_for(&base, mid).is_none())
+            .collect();
+        assert!(hints.contains_key("brand-new-model"));
+    }
 }
 

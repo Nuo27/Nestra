@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { RefreshCw } from "lucide-react";
-import { endpointFetchModels, type EndpointInfo, type ModelAbilities } from "../../ipc";
+import { endpointFetchModels, type EndpointInfo, type FetchedModels, type ModelAbilities } from "../../ipc";
 import type { FormState } from "../../lib/providerForm";
 import { Card } from "../controls/Card";
 import { Button } from "../controls/Button";
@@ -28,16 +28,23 @@ export function ProviderModelsCard({
   onPatch: (patch: Partial<FormState>) => void;
 }) {
   const { t } = useTranslation();
-  const [fetched, setFetched] = useState<string[] | null>(null);
+  const [fetched, setFetched] = useState<FetchedModels | null>(null);
   const fetchMut = useMutation({
     mutationFn: () => endpointFetchModels(endpoint.id),
-    onSuccess: (ids) => {
-      setFetched(ids);
-      onPatch({ models_available: ids });
+    onSuccess: (res) => {
+      setFetched(res);
+      // Provider-declared hints for models the local models.dev chain can't
+      // resolve: seed them into the override draft (existing user edits win)
+      // so Save persists real limits instead of shipping name-only entries.
+      const abilities = { ...form.model_abilities };
+      for (const [id, hint] of Object.entries(res.hints)) {
+        if (!abilities[id]) abilities[id] = hint;
+      }
+      onPatch({ models_available: res.models, model_abilities: abilities });
     },
   });
 
-  const suggestions = fetched ?? endpoint.models?.available ?? [];
+  const suggestions = fetched?.models ?? endpoint.models?.available ?? [];
   const tiers: { field: keyof FormState; labelKey: string }[] = [
     { field: "models_haiku", labelKey: "providerEdit.tierHaiku" },
     { field: "models_sonnet", labelKey: "providerEdit.tierSonnet" },
@@ -94,7 +101,10 @@ export function ProviderModelsCard({
     }
     onPatch({ model_abilities: next });
   };
-  const defaults = endpoint.model_abilities_defaults ?? {};
+  // Fetched-but-unsaved models resolve against the fresh models.dev pull —
+  // layer it under the saved defaults so the disclosure shows values for
+  // them immediately (saved state wins; Save + reload re-reads it anyway).
+  const defaults = { ...(fetched?.resolved ?? {}), ...(endpoint.model_abilities_defaults ?? {}) };
 
   return (
     <Card
