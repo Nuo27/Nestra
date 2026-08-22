@@ -55,24 +55,7 @@ pub fn adapter_for(writer_key: &str) -> Option<Box<dyn ConfigAdapter>> {
 /// a typo or a new writer key silently disables config writing for that
 /// agent otherwise.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agents::agents;
-
-    #[test]
-    fn every_manageable_writer_resolves() {
-        let unresolved: Vec<&'static str> = agents()
-            .iter()
-            .filter(|a| a.manageable())
-            .map(|a| a.config.writer)
-            .filter(|w| adapter_for(w).is_none())
-            .collect();
-        assert!(
-            unresolved.is_empty(),
-            "manageable writer keys without an adapter: {unresolved:?}"
-        );
-    }
-}
+mod tests;
 
 /// Reveal `path` in the OS file manager.
 ///
