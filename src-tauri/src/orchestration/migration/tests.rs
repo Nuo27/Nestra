@@ -37,23 +37,56 @@ fn bad_request_never_migrates_or_retries() {
     assert_eq!(d, MigrationDecision::Surface);
 }
 
-// ---- side-effect risk always surfaces ----
+// ---- side-effect risk: surface only once generation bytes flowed ----
 
 #[test]
-fn side_effect_risk_surfaces_even_for_migratable_class() {
-    // A quota-exhausted failure on a tool-calling request → surface, not migrate.
-    let d = decide(
+fn side_effect_risk_surfaces_once_generation_started() {
+    // Mid-flight failure of a tool-calling request → surface, not re-execute.
+    for class in [
         FailureClass::QuotaExhausted,
-        1,
-        false,
-        true,
-        true,
-        ep(),
-    );
-    assert_eq!(d, MigrationDecision::Surface);
-    // Same for temp-5xx with retries left.
+        FailureClass::RateLimit,
+        FailureClass::Temp5xx,
+        FailureClass::Timeout,
+    ] {
+        for attempts in [1, MAX_RETRIES] {
+            let d = decide(class, attempts, true, true, true, ep());
+            assert_eq!(
+                d,
+                MigrationDecision::Surface,
+                "{class:?} attempts={attempts}: tool-carrying request that already streamed must surface"
+            );
+        }
+    }
+}
+
+#[test]
+fn side_effect_risk_before_response_bytes_replays_per_class() {
+    // A pre-response failure produced nothing observable — the tool-carrying
+    // request replays per the normal taxonomy. (Coding agents attach tools to
+    // virtually every request; gating on side_effect_risk alone would disable
+    // retry/migration for all real agent traffic.)
+    let d = decide(FailureClass::QuotaExhausted, 1, false, true, true, ep());
+    match d {
+        MigrationDecision::Migrate { reason, generation_broken, .. } => {
+            assert_eq!(reason, MigrationReason::QuotaExhausted);
+            assert!(!generation_broken);
+        }
+        other => panic!("expected Migrate, got {other:?}"),
+    }
     let d = decide(FailureClass::Temp5xx, 1, false, true, true, ep());
-    assert_eq!(d, MigrationDecision::Surface);
+    match d {
+        MigrationDecision::RetrySame { generation_broken, .. } => assert!(!generation_broken),
+        other => panic!("expected RetrySame, got {other:?}"),
+    }
+    let d = decide(FailureClass::Temp5xx, MAX_RETRIES, false, true, true, ep());
+    match d {
+        MigrationDecision::Migrate { reason, .. } => {
+            assert_eq!(reason, MigrationReason::RetriesExhausted)
+        }
+        other => panic!("expected Migrate (retries exhausted), got {other:?}"),
+    }
+    // Auth/BadRequest stay surfaced regardless (covered by the Auth test's
+    // side=true loop).
 }
 
 // ---- QuotaExhausted migrates immediately ----

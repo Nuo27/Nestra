@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Trans } from "react-i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
 import {
   endpointList,
   type EndpointInfo,
@@ -14,6 +14,7 @@ import {
   detectedRoles,
   type RoutingPolicyRow,
   type RoutingPolicyInput,
+  type RouteTarget,
 } from "../../ipc/orchestration";
 import { qk } from "../../lib/queries";
 import { useUI } from "../../stores/ui";
@@ -26,15 +27,15 @@ import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { Badge } from "../ui/badge";
 import { Skeleton } from "../ui/skeleton";
-import { OrderedChain } from "../controls/OrderedChain";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { AffinityScope, type AffinityScopeValue } from "./AffinityScope";
 import { RoleKey } from "./RoleKey";
 
 /// Per-agent routing-policy editor. Lists every `routing_policy` row for the
-/// agent (keyed by role — `*` is the catch-all), and lets the user edit each:
-/// preferred + fallback endpoint chains, allowed-model globs, affinity scope,
-/// migrate-on-quota, and inject-cache-control. Endpoint options come from the
-/// live endpoints list so chains reference real ids.
+/// agent (keyed by role — `*` is the mandatory catch-all), and lets the user
+/// edit each: the ORDERED (provider, model) route-target list (the router
+/// serves the first healthy entry and failures walk the list), affinity
+/// scope, migrate-on-quota, and inject-cache-control.
 ///
 /// Roles are free-form keys (the backend keys them by
 /// `SubagentRole::as_policy_key()`); the editor surfaces whatever rows exist
@@ -77,9 +78,7 @@ export function RoutingPolicyEditor({ agentId }: { agentId: string }) {
       routingPolicyUpsert({
         agent_id: agentId,
         role,
-        preferred_endpoints: null,
-        fallback_endpoints: null,
-        allowed_models: null,
+        route_targets: [],
         migrate_on_quota: true,
         inject_cache_control: false,
         affinity_scope: "task",
@@ -97,7 +96,7 @@ export function RoutingPolicyEditor({ agentId }: { agentId: string }) {
 
   // Guarded role-add: `routingPolicyUpsert` is ON CONFLICT DO UPDATE, so
   // adding a role that already exists would silently OVERWRITE the whole row
-  // (preferred/fallback/allowed_models wiped). Refuse instead.
+  // (targets wiped). Refuse instead.
   const addRole = (role: string) => {
     const r = role.trim();
     if (!r) return;
@@ -139,18 +138,14 @@ export function RoutingPolicyEditor({ agentId }: { agentId: string }) {
   }
 
   if (policies.length === 0) {
-    // No rows persisted yet — but routing is NOT idle: the backend serves the
-    // synthetic catch-all default (`store::RoutingPolicyRow::default_for`):
-    // migrate_on_quota=true, inject_cache_control=false, task affinity. Render
-    // that default as an editable preview so the user sees what is ACTUALLY in
-    // effect and can save it (persisting a row) or tune it. `onDelete` is
-    // omitted because a not-yet-persisted default has nothing to delete.
+    // No rows persisted yet — routing FAILS CLOSED for this agent until a
+    // `*` row with targets exists (the router no longer synthesizes a
+    // routing default from bindings). Render the empty catch-all as an
+    // editable draft so the user can configure it in place.
     const defaultRow: RoutingPolicyRow = {
       agent_id: agentId,
       role: "*",
-      preferred_endpoints: null,
-      fallback_endpoints: null,
-      allowed_models: null,
+      route_targets: [],
       migrate_on_quota: true,
       inject_cache_control: false,
       affinity_scope: "task",
@@ -286,7 +281,7 @@ function DetectedRolesStrip({
 /// Budget-tier preset strip. Claude Code sends each of its model env slots
 /// (haiku/sonnet/opus) as a distinct id, so the gateway can classify a
 /// request's tier and match a `tier:*` policy row — e.g. steer background
-/// haiku-tier traffic to a cheaper endpoint. Only rendered for agents whose
+/// haiku-tier traffic to a cheaper target. Only rendered for agents whose
 /// requests classify (Claude Code); the lookup order is exact role → tier →
 /// `*` catch-all.
 function TierPresets({
@@ -386,20 +381,16 @@ function PolicyRow({
 }) {
   const { t } = useTranslation();
   // Local draft state mirrors the row; "Save" commits via onSave.
-  const [preferred, setPreferred] = useState<string[]>(policy.preferred_endpoints ?? []);
-  const [fallback, setFallback] = useState<string[]>(policy.fallback_endpoints ?? []);
-  const [allowedModels, setAllowedModels] = useState<string[]>(
-    policy.allowed_models ?? [],
-  );
+  const [targets, setTargets] = useState<RouteTarget[]>(policy.route_targets);
   const [migrateOnQuota, setMigrateOnQuota] = useState(policy.migrate_on_quota);
   const [injectCache, setInjectCache] = useState(policy.inject_cache_control);
   const [affinity, setAffinity] = useState<AffinityScopeValue>(policy.affinity_scope);
 
+  // The `*` catch-all is the mandatory default policy — it cannot be
+  // deleted, only cleared (the backend refuses the delete too).
   const isCatchAll = policy.role === "*";
   const dirty =
-    JSON.stringify(preferred) !== JSON.stringify(policy.preferred_endpoints ?? []) ||
-    JSON.stringify(fallback) !== JSON.stringify(policy.fallback_endpoints ?? []) ||
-    JSON.stringify(allowedModels) !== JSON.stringify(policy.allowed_models ?? []) ||
+    JSON.stringify(targets) !== JSON.stringify(policy.route_targets) ||
     migrateOnQuota !== policy.migrate_on_quota ||
     injectCache !== policy.inject_cache_control ||
     affinity !== policy.affinity_scope;
@@ -408,9 +399,7 @@ function PolicyRow({
     onSave({
       agent_id: policy.agent_id,
       role: policy.role,
-      preferred_endpoints: preferred.length > 0 ? preferred : null,
-      fallback_endpoints: fallback.length > 0 ? fallback : null,
-      allowed_models: allowedModels.length > 0 ? allowedModels : null,
+      route_targets: targets,
       migrate_on_quota: migrateOnQuota,
       inject_cache_control: injectCache,
       affinity_scope: affinity,
@@ -430,7 +419,7 @@ function PolicyRow({
         </div>
         <ButtonGroup className="shrink-0" space="loose">
           <Button variant="primary" size="sm" loading={pending} disabled={!dirty} onClick={save}>{t("common.save")}</Button>
-          {onDelete && (
+          {!isCatchAll && onDelete && (
             <Button variant="ghost" size="sm" onClick={onDelete}>
               <Trash2 data-icon size={13} />
             </Button>
@@ -438,37 +427,12 @@ function PolicyRow({
         </ButtonGroup>
       </div>
 
-      <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <Field
-          label={t("routingPolicy.preferred")}
-          hint={t("routingPolicy.preferredHint")}
-        >
-          <EndpointChainPicker
-            value={preferred}
-            onChange={setPreferred}
-            endpoints={endpoints}
-            placeholder={t("routingPolicy.preferredPlaceholder")}
-          />
-        </Field>
-        <Field
-          label={t("routingPolicy.fallback")}
-          hint={t("routingPolicy.fallbackHint")}
-        >
-          <EndpointChainPicker
-            value={fallback}
-            onChange={setFallback}
-            endpoints={endpoints}
-            placeholder={t("routingPolicy.fallbackPlaceholder")}
-          />
-        </Field>
-      </div>
-
       <div className="mt-4">
         <Field
-          label={t("routingPolicy.allowedModels")}
-          hint={t("routingPolicy.allowedModelsHint")}
+          label={t("routingPolicy.targets")}
+          hint={t("routingPolicy.targetsHint")}
         >
-          <GlobEditor value={allowedModels} onChange={setAllowedModels} />
+          <TargetChain value={targets} onChange={setTargets} endpoints={endpoints} />
         </Field>
       </div>
 
@@ -495,94 +459,152 @@ function PolicyRow({
   );
 }
 
-/// Ordered multi-select over the live providers list. Each chosen provider
-/// renders as a removable chip in priority order; unchosen ones appear in the
-/// add dropdown. Preserves order (the priority of the preferred/fallback
-/// chain). The provider's DEFAULT model rides along (dropdown hint + row
-/// tooltip) — routing serves exactly that model, so it must be visible at
-/// pick time. Thin wrapper over the shared `OrderedChain`.
-function EndpointChainPicker({
+/// The ordered (provider, model) route-target list. Each row is an inline
+/// provider select + a model select filtered to that provider's models,
+/// with up/down/delete controls; the add row picks any provider (its
+/// default model pre-fills). Order is priority — the router serves the
+/// first healthy entry and failures walk down.
+function TargetChain({
   value,
   onChange,
   endpoints,
-  placeholder,
 }: {
-  value: string[];
-  onChange: (next: string[]) => void;
+  value: RouteTarget[];
+  onChange: (next: RouteTarget[]) => void;
   endpoints: EndpointInfo[];
-  placeholder: string;
 }) {
   const { t } = useTranslation();
-  const labelFor = (id: string) =>
-    endpoints.find((e) => e.id === id)?.display_name ?? id;
-  // The model the router will actually serve from this provider — its
-  // models_json default.
-  const defaultModel = (id: string) =>
-    endpoints.find((e) => e.id === id)?.models?.default ?? "";
-  const titleFor = (id: string) => {
-    const model = defaultModel(id);
-    return model
-      ? t("routingPolicy.defaultModelTip", { model })
-      : t("routingPolicy.defaultModelNone");
+  const modelsFor = (id: string): string[] => {
+    const ep = endpoints.find((e) => e.id === id);
+    const list = ep?.models?.available ?? [];
+    const def = ep?.models?.default;
+    // Default model first so the picker opens on the provider's serving
+    // default even when the list is alphabetical.
+    return def && !list.includes(def) ? [def, ...list] : list;
   };
-  return (
-    <OrderedChain
-      ids={value}
-      labelFor={labelFor}
-      titleFor={titleFor}
-      onMove={(from, to) => {
-        const next = [...value];
-        const [item] = next.splice(from, 1);
-        next.splice(to, 0, item);
-        onChange(next);
-      }}
-      onRemove={(id) => onChange(value.filter((x) => x !== id))}
-      onAdd={(id) => onChange([...value, id])}
-      addChoices={endpoints
-        .filter((e) => !value.includes(e.id))
-        .map((e) => ({
-          id: e.id,
-          label: e.display_name,
-          hint: e.models?.default || undefined,
-        }))}
-      emptyHint={placeholder}
-      surface
-    />
-  );
-}
+  const defaultModelFor = (id: string): string =>
+    endpoints.find((e) => e.id === id)?.models?.default
+      ?? endpoints.find((e) => e.id === id)?.models?.available?.[0]
+      ?? "";
 
-/// Comma-separated glob editor for allowed_models. The parent owns the list;
-/// this keeps a LOCAL text state so typing `a, ` (a trailing comma) doesn't
-/// round-trip into `a` and swallow the separator — the parsed list is only
-/// reported on change, and external updates reset the text. `key` remounts
-/// the editor when the parent's list identity changes (external load).
-function GlobEditor({
-  value,
-  onChange,
-}: {
-  value: string[];
-  onChange: (next: string[]) => void;
-}) {
-  const { t } = useTranslation();
-  const [text, setText] = useState(value.join(", "));
-  // External load (policy switched / draft reset): re-seed the text.
-  useEffect(() => {
-    setText(value.join(", "));
-  }, [value]);
+  const move = (from: number, to: number) => {
+    if (to < 0 || to >= value.length) return;
+    const next = [...value];
+    const [item] = next.splice(from, 1);
+    next.splice(to, 0, item);
+    onChange(next);
+  };
+  const addChoices = endpoints.filter(
+    (e) => !value.some((v) => v.endpoint === e.id),
+  );
+
   return (
-    <Input
-      value={text}
-      onChange={(e) => {
-        setText(e.target.value);
-        onChange(
-          e.target.value
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean),
-        );
-      }}
-      placeholder={t("routingPolicy.globPlaceholder")}
-      className="font-mono"
-    />
+    <div className="space-y-1.5">
+      {value.length === 0 && (
+        <div className="rounded border border-dashed border-border bg-inset px-3 py-2 text-2xs text-subtle">
+          {t("routingPolicy.targetsEmpty")}
+        </div>
+      )}
+      {value.map((target, i) => (
+        <div
+          key={`${target.endpoint}:${i}`}
+          className="flex items-center gap-1.5 rounded border border-border bg-inset px-1.5 py-1"
+        >
+          <span className="w-5 shrink-0 text-center font-mono text-2xs text-subtle tabular">
+            {i + 1}
+          </span>
+          <Select
+            value={target.endpoint}
+            onValueChange={(ep) => {
+              const next = [...value];
+              // Provider switch keeps a valid model: the provider's default.
+              next[i] = { endpoint: ep, model: defaultModelFor(ep) };
+              onChange(next);
+            }}
+          >
+            <SelectTrigger className="h-7 flex-1 font-mono text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {endpoints.map((e) => (
+                <SelectItem key={e.id} value={e.id} className="font-mono text-xs">
+                  {e.display_name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={target.model}
+            onValueChange={(model) => {
+              const next = [...value];
+              next[i] = { endpoint: target.endpoint, model };
+              onChange(next);
+            }}
+          >
+            <SelectTrigger className="h-7 flex-1 font-mono text-xs">
+              <SelectValue placeholder={t("routingPolicy.modelPlaceholder")} />
+            </SelectTrigger>
+            <SelectContent>
+              {modelsFor(target.endpoint).map((m) => (
+                <SelectItem key={m} value={m} className="font-mono text-xs">
+                  {m}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div className="flex shrink-0 items-center">
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={i === 0}
+              onClick={() => move(i, i - 1)}
+              aria-label={t("routingPolicy.moveUp")}
+            >
+              <ArrowUp data-icon size={13} />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={i === value.length - 1}
+              onClick={() => move(i, i + 1)}
+              aria-label={t("routingPolicy.moveDown")}
+            >
+              <ArrowDown data-icon size={13} />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onChange(value.filter((_, j) => j !== i))}
+              aria-label={t("routingPolicy.removeTarget")}
+            >
+              <Trash2 data-icon size={13} />
+            </Button>
+          </div>
+        </div>
+      ))}
+      {addChoices.length > 0 && (
+        <div className="flex items-center gap-1.5">
+          <Select
+            value=""
+            onValueChange={(ep) => {
+              if (!ep) return;
+              onChange([...value, { endpoint: ep, model: defaultModelFor(ep) }]);
+            }}
+          >
+            <SelectTrigger className="h-7 flex-1 font-mono text-xs">
+              <SelectValue placeholder={t("routingPolicy.addTarget")} />
+            </SelectTrigger>
+            <SelectContent>
+              {addChoices.map((e) => (
+                <SelectItem key={e.id} value={e.id} className="font-mono text-xs">
+                  {e.display_name}
+                  {e.models?.default ? ` · ${e.models.default}` : ""}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+    </div>
   );
 }

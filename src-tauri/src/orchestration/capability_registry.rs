@@ -57,13 +57,19 @@ pub fn rebuild_endpoint(conn: &Connection, endpoint_id: &str) -> AppResult<usize
     rebuild_one(conn, &base_index, &ep)
 }
 
-/// models.dev cache < bundled corrections. Corrections carry the per-model
-/// `api` dialect (which wire a model is officially served on) and context
-/// fixes — without this merge the catalog would lack `api` entirely and
-/// wire selection would silently fall back to the endpoint protocol.
+/// models.dev cache < pi.dev catalogs < bundled corrections < per-endpoint
+/// user overrides. Corrections carry the per-model `api` dialect (which wire
+/// a model is officially served on) and context fixes; pi.dev carries
+/// richer limits for providers models.dev under-reports (opencode-go's own
+/// /models is ids-only). Without this merge the catalog would lack `api`
+/// entirely for models.dev-absent providers and wire selection would
+/// silently fall back to the endpoint protocol.
 pub(crate) fn merged_index(conn: &Connection) -> AppResult<HashMap<String, crate::model_abilities::ModelAbilities>> {
-    Ok(crate::model_abilities::merge_into(
-        crate::model_abilities::load_index(conn)?,
+    Ok(crate::model_abilities::merge_into_tail(
+        crate::model_abilities::merge_into_tail(
+            crate::model_abilities::load_index(conn)?,
+            crate::model_abilities::load_pi_index(conn)?,
+        ),
         crate::model_abilities::load_corrections(),
     ))
 }

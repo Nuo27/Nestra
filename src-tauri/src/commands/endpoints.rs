@@ -363,6 +363,7 @@ pub async fn endpoint_set_api_key(
         db::mark_endpoint_key(&conn, &id, true, "valid")?;
         // Opportunistic models.dev ability-cache refresh (best-effort).
         let _ = crate::model_abilities::refresh(&conn, false);
+        refresh_pi_ability_caches(&conn, &endpoint.protocols);
         tracing::info!(
             endpoint = %id, protocol = %primary_protocol,
             "api key set + validated"
@@ -520,6 +521,7 @@ pub async fn endpoint_create_with_preset(
                 db::set_endpoint_models(&conn, &id, &cached_str)?;
                 db::mark_endpoint_key(&conn, &id, true, "valid")?;
                 let _ = crate::model_abilities::refresh(&conn, false);
+                refresh_pi_ability_caches(&conn, &endpoint.protocols);
                 tracing::info!(
                     endpoint = %id, protocol = %primary_protocol,
                     "preset endpoint created + key validated"
@@ -546,6 +548,23 @@ pub async fn endpoint_create_with_preset(
         }
     })
     .await
+}
+
+
+/// Refresh the pi.dev catalog cache for any endpoint whose protocol base_url
+/// matches a known pi.dev provider (see `model_abilities::
+/// pi_catalog_for_base_url`). Best-effort — network failure keeps the cache.
+fn refresh_pi_ability_caches(conn: &rusqlite::Connection, protocols: &[crate::db::ProtocolEntry]) {
+    let mut refreshed: Vec<&str> = Vec::new();
+    for proto in protocols {
+        if let Some(provider_id) = crate::model_abilities::pi_catalog_for_base_url(&proto.base_url) {
+            if refreshed.contains(&provider_id) {
+                continue;
+            }
+            refreshed.push(provider_id);
+            let _ = crate::model_abilities::refresh_pi(conn, provider_id, false);
+        }
+    }
 }
 
 /// Try each `(protocol, base_url)` pair against the upstream `/models`

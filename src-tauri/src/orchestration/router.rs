@@ -1,29 +1,29 @@
 //! The orchestration router — resolves a [`TaskContext`] to a [`ResolvedRoute`].
 //!
-//! The resolution algorithm runs against the policy table + capability
-//! registry + an in-memory health + affinity store, so it is fully testable
-//! and the orchestration surface can show a dry-run resolution preview. The
-//! gateway is what actually *uses* the route at request time.
+//! The resolution algorithm runs against the policy table + an in-memory
+//! health + affinity store, so it is fully testable and the orchestration
+//! surface can show a dry-run resolution preview. The gateway is what actually
+//! *uses* the route at request time.
 //!
 //! ## Resolution order
 //!
 //! 1. **Explicit** — the Task's `requested_provider` + `requested_model`, if
-//!    both are set and the endpoint is healthy + eligible. Honors a user/agent
+//!    both are set and the endpoint is healthy + quota-ok. Honors a user/agent
 //!    pin without further ranking.
 //! 2. **Affinity** — for a task-grain affinity scope, reuse the last route
-//!    used by this `task_id` if it is still healthy + quota-ok + eligible.
-//!    This is the cache-friendly path (keeping a task on one provider is what
-//!    makes prompt-cache creation amortize). Session-grain affinity is a
-//!    weaker hint, used only when task id is unknown.
-//! 3. **Capability** — rank capability-eligible endpoints by (cost, latency,
-//!    cache locality) and pick the best. Cost/latency data is not yet modeled,
-//!    so the ranking is deterministic-but-stable: policy
-//!    `preferred_endpoints` order first, then configured-endpoint order.
+//!    used by this `task_id` if it is still healthy + quota-ok. This is the
+//!    cache-friendly path (keeping a task on one provider is what makes
+//!    prompt-cache creation amortize). Session-grain affinity is a weaker
+//!    hint, used only when task id is unknown.
+//! 3. **Policy targets** — the role's ordered `route_targets` list (explicit
+//!    `(endpoint, model)` pins); the first entry that exists and is healthy +
+//!    quota-ok wins. Failures walk the list: the migration loop marks failed
+//!    endpoints on the context and re-resolves. No capability filtering —
+//!    an explicit target is the user's intent.
 //! 4. **Fail closed** — `RouteReason::NoEligible` with no endpoint.
 //!
 //! Health and quota signals gate every step: a degraded or quota-exhausted
-//! endpoint is skipped unless it is the *only* option AND policy allows
-//! last-resort use.
+//! endpoint is skipped.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -35,10 +35,9 @@ use crate::config_writer::ProviderKind;
 use crate::db;
 use crate::error::{AppError, AppResult};
 
-use super::capability_registry;
 use super::health::ProviderHealth;
 use super::identity::{
-    CapabilityReq, CacheStrategy, CredentialHandle, ResolvedRoute, RouteReason, TaskContext,
+    CacheStrategy, CredentialHandle, ResolvedRoute, RouteReason, TaskContext,
 };
 use super::quota_state::QuotaState;
 use super::store;
@@ -308,16 +307,13 @@ pub fn resolve(ctx: &TaskContext, inputs: &RouterInputs<'_>) -> AppResult<Resolv
     )?;
     let scope = AffinityScope::from_policy_str(&policy.affinity_scope);
 
-    // 1. Explicit pin (highest priority). Policy still applies: the pinned
-    // endpoint must be capable of the request AND its model must pass the
-    // policy's allowed-models whitelist — an explicit pin bypassing both
-    // would let any pinned (endpoint, model) dodge routing policy.
+    // 1. Explicit pin (highest priority). Health + quota still gate it; there
+    // is no capability or model-list filtering — an explicit pin is the
+    // caller's stated intent.
     if let (Some(ep), Some(model)) = (&ctx.requested_provider, &ctx.requested_model) {
         if endpoint_exists(inputs.conn, ep)?
             && !inputs.health.is_degraded(ep)
             && !inputs.quota.is_exhausted(ep)
-            && model_eligible_for_req(inputs.conn, ep, model, &ctx.required_capabilities)?
-            && model_allowed(&policy.allowed_models, model)
         {
             let route = build_route(ctx, ep, model, RouteReason::Explicit, inputs, policy.inject_cache_control)?;
             inputs.affinity.record(inputs.conn, ctx, ep, model);
@@ -330,7 +326,6 @@ pub fn resolve(ctx: &TaskContext, inputs: &RouterInputs<'_>) -> AppResult<Resolv
         if endpoint_exists(inputs.conn, &ep)?
             && !inputs.health.is_degraded(&ep)
             && !inputs.quota.is_exhausted(&ep)
-            && model_eligible_for_req(inputs.conn, &ep, &model, &ctx.required_capabilities)?
         {
             let route = build_route(ctx, &ep, &model, RouteReason::Affinity, inputs, policy.inject_cache_control)?;
             // Affinity hit re-records (refreshes at_ms).
@@ -339,8 +334,11 @@ pub fn resolve(ctx: &TaskContext, inputs: &RouterInputs<'_>) -> AppResult<Resolv
         }
     }
 
-    // 3. Capability-ranked selection over the policy's candidate lists.
-    if let Some((ep, model, reason)) = pick_by_capability(ctx, &policy, inputs)? {
+    // 3. Policy targets: the role's ordered (endpoint, model) list; the
+    // first entry that exists and is healthy + quota-ok wins. Endpoints
+    // that already failed on THIS request (migration loop) are skipped so
+    // a re-resolve walks the list forward.
+    if let Some((ep, model, reason)) = pick_by_targets(ctx, &policy, inputs)? {
         let route = build_route(ctx, &ep, &model, reason, inputs, policy.inject_cache_control)?;
         inputs.affinity.record(inputs.conn, ctx, &ep, &model);
         return Ok(route);
@@ -402,147 +400,78 @@ pub fn steady_state(
     })
 }
 
-/// Append `list` to `candidates`, skipping ids already present. Order-
-/// preserving dedup so the policy's preferred chain wins ties.
-fn extend_dedup(list: &[String], candidates: &mut Vec<String>) {
-    for id in list {
-        if !candidates.iter().any(|c| c == id) {
-            candidates.push(id.clone());
-        }
-    }
-}
-
-/// Parse a `["a","b"]`-style JSON-string column into a `Vec<String>`. `None`
-/// / malformed / non-array yields `None` (treated as "no list" by callers).
-fn parse_json_array(s: Option<&str>) -> Option<Vec<String>> {
-    let s = s?;
-    let arr: Vec<String> = serde_json::from_str(s).ok()?;
-    Some(arr)
-}
-
-/// Walk the policy's preferred → fallback endpoint chains (in order), then
-/// the agent's bound endpoints, and return the first `(endpoint, model)` that
-/// is healthy, quota-ok, and capability-eligible. Returns the matching reason
-/// (`Capability` for a fresh pick). Returns `None` when nothing qualifies.
-fn pick_by_capability(
+/// Walk the policy's ordered route-target list and return the first
+/// `(endpoint, model)` whose endpoint exists, is healthy, quota-ok, and has
+/// not already failed on this request (migration exclusion). No capability
+/// filtering — an explicit target is the user's stated intent. `None` when
+/// the list is empty or nothing qualifies.
+fn pick_by_targets(
     ctx: &TaskContext,
     policy: &store::RoutingPolicyRow,
     inputs: &RouterInputs<'_>,
 ) -> AppResult<Option<(String, String, RouteReason)>> {
-    // Build the ordered candidate endpoint list: policy preferred → fallback →
-    // all agent-bound endpoints (deduped). This is the pool we rank. The policy
-    // stores these as JSON-string columns (`preferred_endpoints` etc.); parse
-    // them into real arrays at the boundary.
-    let mut candidates: Vec<String> = Vec::new();
-    if let Some(pref) = parse_json_array(policy.preferred_endpoints.as_deref()) {
-        extend_dedup(&pref, &mut candidates);
-    }
-    if let Some(fall) = parse_json_array(policy.fallback_endpoints.as_deref()) {
-        extend_dedup(&fall, &mut candidates);
-    }
-    // Always include the agent's bound endpoints as a last-resort pool so a
-    // policy with no explicit lists still routes.
-    let bindings = db::list_bindings(inputs.conn, &ctx.agent_id)?;
-    let bound: Vec<String> = bindings.iter().map(|b| b.endpoint_id.clone()).collect();
-    extend_dedup(&bound, &mut candidates);
-
-    // Capability-eligible (endpoint, model) pairs across ALL endpoints, then
-    // intersect with the candidate order so preferred endpoints win ties.
-    let eligible = capability_registry::eligible_models(inputs.conn, &ctx.required_capabilities)?;
-    for ep_id in &candidates {
-        if inputs.health.is_degraded(ep_id) || inputs.quota.is_exhausted(ep_id) {
+    for target in policy.targets() {
+        if ctx.failed_endpoints.iter().any(|e| e == &target.endpoint) {
             continue;
         }
-        // Routing semantics: the endpoint's DEFAULT model is preferred — read
-        // live from `models_json.default` (no catalog staleness) — but if the
-        // default is missing, capability-ineligible, or excluded by the
-        // policy's allowed-models glob, ANOTHER of the endpoint's eligible
-        // models must still qualify. (The old code checked only the default
-        // and then skipped the whole endpoint, even when a valid model sat
-        // right behind it.)
-        let default_m = endpoint_default_model(inputs.conn, ep_id)?;
-        let mut models: Vec<&String> = eligible
-            .iter()
-            .filter(|(e, _, _)| e == ep_id)
-            .map(|(_, m, _)| m)
-            .collect();
-        models.sort_by_key(|m| usize::from(default_m.as_deref() != Some(m.as_str())));
-        for m in models {
-            // Enforce the policy's allowed-models glob list, when set.
-            if !model_allowed(&policy.allowed_models, m) {
-                continue;
-            }
-            return Ok(Some((ep_id.clone(), m.clone(), RouteReason::Capability)));
+        if !endpoint_exists(inputs.conn, &target.endpoint)? {
+            tracing::warn!(
+                agent = %ctx.agent_id,
+                endpoint = %target.endpoint,
+                "routing: policy target references a missing endpoint — skipping"
+            );
+            continue;
         }
+        if inputs.health.is_degraded(&target.endpoint) || inputs.quota.is_exhausted(&target.endpoint) {
+            continue;
+        }
+        return Ok(Some((
+            target.endpoint.clone(),
+            target.model.clone(),
+            RouteReason::Policy,
+        )));
     }
     Ok(None)
 }
 
-/// Read the endpoint's `default` model id from its `models_json` (live DB
-/// read — no catalog staleness). `None` when unset/malformed.
-fn endpoint_default_model(
-    conn: &rusqlite::Connection,
-    endpoint_id: &str,
-) -> AppResult<Option<String>> {
-    let Some(ep) = db::get_endpoint(conn, endpoint_id)? else {
-        return Ok(None);
-    };
-    let Some(json) = ep.models_json.as_deref() else {
-        return Ok(None);
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
-        return Ok(None);
-    };
-    Ok(v.get("default")
-        .and_then(|s| s.as_str())
-        .map(String::from)
-        .filter(|s| !s.is_empty()))
-}
-
-/// `true` when `model` passes the policy's `allowed_models` globs. `None` (no
-/// list) means "any model allowed". A glob supports a trailing `*` wildcard
-/// (e.g. `claude-*`); other patterns match literally.
-fn model_allowed(allowed: &Option<String>, model: &str) -> bool {
-    let Some(json) = allowed else {
-        return true; // no list = any
-    };
-    let Ok(arr): std::result::Result<Vec<String>, _> = serde_json::from_str(json) else {
-        return true; // malformed list = permissive (don't block routing on bad data)
-    };
-    if arr.is_empty() {
-        return true;
-    }
-    arr.iter().any(|pat| {
-        if let Some(prefix) = pat.strip_suffix('*') {
-            model.starts_with(prefix)
-        } else {
-            model == pat
+/// Pure-read answer to "if the current endpoint fails, is there anywhere
+/// else to go?" — the policy's route targets minus `excluding`, filtered by
+/// the same health/quota/existence gates as [`pick_by_targets`]. The
+/// migration loop uses this to FAST-FAIL: with no remaining target (a
+/// single-target policy, or everything else already failed), retrying the
+/// same endpoint just burns latency — surface the error promptly instead.
+/// No affinity side effects.
+pub fn failover_targets(
+    inputs: &RouterInputs<'_>,
+    ctx: &TaskContext,
+    excluding: &[String],
+) -> AppResult<Vec<store::RouteTarget>> {
+    let policy = store::routing_policy_for(
+        inputs.conn,
+        &ctx.agent_id,
+        &ctx.policy_role_key(),
+        ctx.budget_tier.as_ref(),
+    )?;
+    let mut remaining = Vec::new();
+    for target in policy.targets() {
+        if excluding.iter().any(|e| e == &target.endpoint) {
+            continue;
         }
-    })
+        if !endpoint_exists(inputs.conn, &target.endpoint)? {
+            continue;
+        }
+        if inputs.health.is_degraded(&target.endpoint)
+            || inputs.quota.is_exhausted(&target.endpoint)
+        {
+            continue;
+        }
+        remaining.push(target);
+    }
+    Ok(remaining)
 }
 
 fn endpoint_exists(conn: &Connection, endpoint_id: &str) -> AppResult<bool> {
     Ok(db::get_endpoint(conn, endpoint_id)?.is_some())
-}
-
-/// Re-validate that a model still satisfies the capability request (affinity
-/// reuse must not hand back an ineligible model after policy/capability edits).
-fn model_eligible_for_req(
-    conn: &Connection,
-    endpoint_id: &str,
-    model: &str,
-    req: &CapabilityReq,
-) -> AppResult<bool> {
-    for row in store::list_model_catalog(conn, endpoint_id)? {
-        if row.model_id == model {
-            let abilities: crate::model_abilities::ModelAbilities =
-                serde_json::from_str(&row.abilities_json).unwrap_or_default();
-            return Ok(capability_registry::satisfies(req, &abilities));
-        }
-    }
-    // Model not in catalog → treat as eligible (don't break affinity on a
-    // cold catalog; the gateway will surface a real upstream error if any).
-    Ok(true)
 }
 
 /// Build a [`ResolvedRoute`] for a chosen `(endpoint, model)`, resolving the

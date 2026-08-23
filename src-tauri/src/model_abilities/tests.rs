@@ -384,6 +384,13 @@ fn corrections_cover_opencode_go_ox_alpha_free_from_bare_id() {
     // The endpoint's fetched id is bare ("ox-alpha-free") — it must
     // tail-match the "opencode-go/ox-alpha-free" key. Limit figures are
     // the vendor's own (mirrored on OpenRouter as stealth/ox-alpha).
+    // The wire is Chat Completions — the vendor's own docs declare it
+    // (`https://opencode.ai/docs/go`: chat/completions +
+    // @ai-sdk/openai-compatible). The free model's tool-carrying streams DO
+    // intermittently terminate in-band (`finish_reason: "network_error"` on
+    // a 200); the gateway's first-event probe turns that into a retryable
+    // failure that walks the policy's route-target list rather than a wire
+    // override here.
     let corrections = load_corrections();
     let a = abilities_for(&corrections, "ox-alpha-free")
         .expect("bare go id should tail-match the correction entry");
@@ -514,4 +521,72 @@ fn parse_modalities_drops_unknown_tokens_silently() {
     });
     let mods = parse_modalities(&v).expect("at least one valid token survives");
     assert_eq!(mods.input, vec![Modality::Text]);
+}
+// ---- pi.dev catalog source ----
+
+#[test]
+fn pi_index_maps_limits_reasoning_and_api_dialect() {
+    let catalog = serde_json::json!({
+        "ox-alpha-free": {
+            "id": "ox-alpha-free", "name": "Ox Alpha Free", "api": "openai-completions",
+            "reasoning": true,
+            "contextWindow": 1000000, "maxTokens": 131072,
+            "cost": {"input": 0, "output": 0}
+        },
+        "grok-4.5": {
+            "id": "grok-4.5", "api": "openai-responses",
+            "contextWindow": 500000, "maxTokens": 500000
+        },
+        "weird": {"id": "weird", "api": "google-generative"},
+        "empty": {"id": "empty", "name": "Nothing"}
+    });
+    let idx = build_pi_index("opencode-go", &catalog);
+    let a = &idx["opencode-go/ox-alpha-free"];
+    assert_eq!(a.limit.as_ref().unwrap().context, 1_000_000);
+    assert_eq!(a.limit.as_ref().unwrap().output, 131_072);
+    assert_eq!(a.reasoning, Some(true));
+    assert_eq!(a.api.as_deref(), Some("openai-comp"));
+    assert_eq!(idx["opencode-go/grok-4.5"].api.as_deref(), Some("response-api"));
+    // Unknown api vocabulary → field unset (not a wrong guess); entries with
+    // nothing usable are dropped entirely.
+    assert!(!idx.contains_key("opencode-go/weird"), "unknown api + nothing else → dropped");
+    assert!(!idx.contains_key("opencode-go/empty"));
+}
+
+#[test]
+fn pi_layer_sits_between_models_dev_and_corrections() {
+    // The full merge ladder for one model: models.dev says 256k, pi.dev says
+    // 1M, corrections say the api dialect + 1M — the catalog merge order is
+    // models.dev < pi.dev < corrections.
+    let mut base = HashMap::new();
+    base.insert(
+        "ox-alpha-free".into(),
+        ModelAbilities { limit: Some(crate::model_abilities::ModelLimit {
+            context: 256_000, output: 32_000, input: None,
+        }), ..Default::default() },
+    );
+    let mut pi = HashMap::new();
+    pi.insert(
+        "opencode-go/ox-alpha-free".into(),
+        ModelAbilities { limit: Some(crate::model_abilities::ModelLimit {
+            context: 1_000_000, output: 131_072, input: None,
+        }), ..Default::default() },
+    );
+    let corrections = load_corrections();
+    let merged = crate::model_abilities::merge_into_tail(
+        crate::model_abilities::merge_into_tail(base, pi),
+        corrections,
+    );
+    let a = abilities_for(&merged, "ox-alpha-free").unwrap();
+    assert_eq!(a.limit.as_ref().unwrap().context, 1_048_576, "corrections win");
+    assert_eq!(a.limit.as_ref().unwrap().output, 131_072);
+    assert_eq!(a.api.as_deref(), Some("openai-comp"));
+}
+
+#[test]
+fn pi_catalog_host_matching() {
+    assert_eq!(pi_catalog_for_base_url("https://opencode.ai/zen/go/v1"), Some("opencode-go"));
+    assert_eq!(pi_catalog_for_base_url("https://api.minimaxi.com/anthropic"), Some("minimax-cn"));
+    assert_eq!(pi_catalog_for_base_url("https://api.z.ai/api/paas/v4"), Some("zai"));
+    assert_eq!(pi_catalog_for_base_url("https://api.openai.com/v1"), None);
 }

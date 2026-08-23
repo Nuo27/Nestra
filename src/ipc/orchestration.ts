@@ -6,9 +6,9 @@
 // DDL in `src-tauri/src/schema.rs` (the routing_policy / logical_session /
 // run / task / route_request / route_migration / model_catalog tables).
 //
-// The store persists preferred/fallback/allowed-models as serialized JSON
-// strings (Option<String> columns); the wrappers below parse them into typed
-// arrays at the boundary so consumers never touch raw JSON.
+// The store persists the ordered route-target list as a serialized JSON
+// string (an Option<String> column); the wrappers below parse it into typed
+// objects at the boundary so consumers never touch raw JSON.
 // ──────────────────────────────────────────────────────────────────────────
 
 import { invoke } from "@tauri-apps/api/core";
@@ -16,26 +16,35 @@ import type { ModelAbilities } from "./index";
 
 // ---- invoke wrappers (routing_policy — the only wired surface) -----------
 
+/// One ordered (endpoint, model) pin. The router serves the first healthy
+/// entry; failures walk the list. Mirrors `store::RouteTarget`.
+export interface RouteTarget {
+  endpoint: string;
+  model: string;
+}
+
 /** Raw row shape straight from the Rust `RoutingPolicyRow` (JSON-string cols). */
 interface RoutingPolicyRowRaw {
   agent_id: string;
   role: string;
-  preferred_endpoints: string | null;
-  fallback_endpoints: string | null;
-  allowed_models: string | null;
+  route_targets: string | null;
   migrate_on_quota: boolean;
   inject_cache_control: boolean;
   affinity_scope: "task" | "session" | "none";
   updated_at: number;
 }
 
-function parseArr(s: string | null): string[] | null {
-  if (s == null) return null;
+function parseTargets(s: string | null): RouteTarget[] {
+  if (s == null) return [];
   try {
     const v = JSON.parse(s);
-    return Array.isArray(v) ? v.map(String) : null;
+    if (!Array.isArray(v)) return [];
+    return v
+      .filter((x): x is { endpoint: string; model: string } =>
+        typeof x?.endpoint === "string" && typeof x?.model === "string")
+      .map((x) => ({ endpoint: x.endpoint, model: x.model }));
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -43,9 +52,7 @@ function fromRaw(r: RoutingPolicyRowRaw): RoutingPolicyRow {
   return {
     agent_id: r.agent_id,
     role: r.role,
-    preferred_endpoints: parseArr(r.preferred_endpoints),
-    fallback_endpoints: parseArr(r.fallback_endpoints),
-    allowed_models: parseArr(r.allowed_models),
+    route_targets: parseTargets(r.route_targets),
     migrate_on_quota: r.migrate_on_quota,
     inject_cache_control: r.inject_cache_control,
     affinity_scope: r.affinity_scope,
@@ -243,10 +250,10 @@ export async function detectedRoles(
 /// Mirrors `RoutingPolicyRow` (store.rs:31-48).
 export interface RoutingPolicyRow {
   agent_id: string;
-  role: string; // "*" | "main" | "claude:{name}" | "pi:{role}" | "opencode:{name}"
-  preferred_endpoints: string[] | null; // priority order; null = no preference
-  fallback_endpoints: string[] | null; // null = derive from all enabled
-  allowed_models: string[] | null; // model-id globs; null = any
+  role: string; // "*" | "tier:{haiku|sonnet|opus}" | "claude:{name}" | "pi:{role}" | "opencode:{name}"
+  /// Ordered (endpoint, model) pins; the router serves the first healthy
+  /// entry and failures walk the list. Empty = routing fails closed.
+  route_targets: RouteTarget[];
   migrate_on_quota: boolean;
   inject_cache_control: boolean; // gates the AnthropicExplicit cache strategy
   affinity_scope: "task" | "session" | "none";
@@ -255,14 +262,11 @@ export interface RoutingPolicyRow {
 
 /// Frontend-facing input for `routing_policy_upsert`. Same shape as
 /// `RoutingPolicyRow` minus the server-set `updated_at` (the command stamps it).
-/// List fields are real arrays here — the command serializes them into the
 /// store's JSON-string columns at the boundary.
 export interface RoutingPolicyInput {
   agent_id: string;
   role: string;
-  preferred_endpoints: string[] | null;
-  fallback_endpoints: string[] | null;
-  allowed_models: string[] | null;
+  route_targets: RouteTarget[];
   migrate_on_quota: boolean;
   inject_cache_control: boolean;
   affinity_scope: "task" | "session" | "none";

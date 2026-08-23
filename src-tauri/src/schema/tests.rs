@@ -465,3 +465,83 @@ fn build_v1_drops_legacy_indexes_and_creates_new() {
         assert!(names.iter().any(|n| n == keep), "{keep} should exist");
     }
 }
+#[test]
+fn build_v1_migrates_legacy_routing_policy_to_route_targets() {
+    let conn = Connection::open_in_memory().unwrap();
+    build_v1(&conn).unwrap();
+    // Simulate a pre-route-targets install: rebuild the legacy table shape
+    // and seed rows exercising every conversion rule.
+    conn.execute_batch(
+        "DROP TABLE routing_policy;
+         CREATE TABLE routing_policy (
+           agent_id             TEXT NOT NULL,
+           role                 TEXT NOT NULL,
+           preferred_endpoints  TEXT,
+           fallback_endpoints   TEXT,
+           allowed_models       TEXT,
+           migrate_on_quota     INTEGER NOT NULL DEFAULT 1,
+           inject_cache_control INTEGER NOT NULL DEFAULT 0,
+           affinity_scope       TEXT NOT NULL DEFAULT 'task',
+           updated_at           INTEGER NOT NULL,
+           PRIMARY KEY (agent_id, role)
+         );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO provider_endpoint (id, kind, display_name, has_api_key, status, models_json)
+         VALUES ('ep-a','custom','A',1,'valid',?1), ('ep-b','custom','B',1,'valid',?2)",
+        rusqlite::params![
+            r#"{"available":["m-a1","m-a2"],"default":"m-a2"}"#,
+            r#"{"available":["m-b1"]}"#   // no default → first available
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO routing_policy (agent_id, role, preferred_endpoints, fallback_endpoints,
+                                    allowed_models, migrate_on_quota, inject_cache_control,
+                                    affinity_scope, updated_at)
+         VALUES ('pi-cli','*','[\"ep-a\",\"ep-gone\"]','[\"ep-b\"]','[\"m-*\"]',1,1,'session',42)",
+        [],
+    )
+    .unwrap();
+
+    build_v1(&conn).unwrap();
+
+    // Old columns are gone; the new column answers the converted shape.
+    let has_legacy: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('routing_policy')
+             WHERE name IN ('preferred_endpoints','fallback_endpoints','allowed_models')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(has_legacy, 0);
+    let (targets, migrate, inject, affinity, updated): (String, i64, i64, String, i64) = conn
+        .query_row(
+            "SELECT route_targets, migrate_on_quota, inject_cache_control, affinity_scope,
+                    updated_at
+             FROM routing_policy WHERE agent_id='pi-cli' AND role='*'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&targets).unwrap();
+    assert_eq!(
+        parsed,
+        vec![
+            serde_json::json!({"endpoint":"ep-a","model":"m-a2"}), // default model
+            serde_json::json!({"endpoint":"ep-b","model":"m-b1"}), // fallback appended, first available
+        ],
+        "preferred order preserved, missing endpoint skipped, fallback appended"
+    );
+    assert_eq!((migrate, inject, updated), (1, 1, 42));
+    assert_eq!(affinity, "session");
+
+    // Idempotent: a second build is a no-op.
+    build_v1(&conn).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT count(*) FROM routing_policy", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1);
+}

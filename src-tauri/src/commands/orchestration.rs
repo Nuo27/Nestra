@@ -6,53 +6,52 @@ use tauri::State;
 // ===========================================================================
 // Orchestration — routing policy.
 //
-// User-editable routing policies: per agent + subagent role → preferred
-// endpoint chain. The store layer (`orchestration::store`) holds the full
-// data model (run/task/route_request/route_migration/model_catalog), which
-// the gateway runtime populates as it proxies requests. Command input uses
-// `Vec<String>` for the endpoint/model lists and converts to the store's JSON
-// `Option<String>` columns at this boundary.
+// User-editable routing policies: per agent + subagent role → ordered
+// (endpoint, model) route-target list. The store layer (`orchestration::store`)
+// holds the full data model (run/task/route_request/route_migration/
+// model_catalog), which the gateway runtime populates as it proxies requests.
 // ===========================================================================
 
-/// Frontend-facing routing-policy shape. The list fields are `Vec<String>`
-/// (vs. the store's serialized `Option<String>` JSON columns) so the IPC
-/// boundary stays typed and ergonomic. `None` preserves the store semantics
-/// ("no preference" / "derive from all enabled" / "any model").
+/// Frontend-facing routing-policy shape. `route_targets` is a typed ordered
+/// list (vs. the store's serialized JSON column) so the IPC boundary stays
+/// ergonomic. An empty list is preserved as `None` ("no targets" — routing
+/// fails closed for the role until one is added).
 #[derive(serde::Deserialize)]
 pub struct RoutingPolicyInput {
     pub agent_id: String,
     pub role: String,
-    pub preferred_endpoints: Option<Vec<String>>,
-    pub fallback_endpoints: Option<Vec<String>>,
-    pub allowed_models: Option<Vec<String>>,
+    pub route_targets: Vec<RouteTargetInput>,
     pub migrate_on_quota: bool,
     pub inject_cache_control: bool,
     pub affinity_scope: String,
 }
 
+/// One ordered (endpoint, model) pin.
+#[derive(serde::Deserialize)]
+pub struct RouteTargetInput {
+    pub endpoint: String,
+    pub model: String,
+}
+
 impl RoutingPolicyInput {
     fn into_row(self) -> AppResult<crate::orchestration::store::RoutingPolicyRow> {
+        let targets: Vec<crate::orchestration::store::RouteTarget> = self
+            .route_targets
+            .into_iter()
+            .map(|t| crate::orchestration::store::RouteTarget {
+                endpoint: t.endpoint,
+                model: t.model,
+            })
+            .collect();
         Ok(crate::orchestration::store::RoutingPolicyRow {
             agent_id: self.agent_id,
             role: self.role,
-            preferred_endpoints: json_opt(self.preferred_endpoints)?,
-            fallback_endpoints: json_opt(self.fallback_endpoints)?,
-            allowed_models: json_opt(self.allowed_models)?,
+            route_targets: Some(serde_json::to_string(&targets)?),
             migrate_on_quota: self.migrate_on_quota,
             inject_cache_control: self.inject_cache_control,
             affinity_scope: self.affinity_scope,
             updated_at: chrono::Utc::now().timestamp_millis(),
         })
-    }
-}
-
-/// Serialize an optional `Vec<String>` into the `Option<String>` JSON column
-/// shape the store expects. `None` stays `None` (preserves "no preference");
-/// `Some(vec)` becomes `Some(serde_json::to_string(vec)?)`.
-fn json_opt(v: Option<Vec<String>>) -> AppResult<Option<String>> {
-    match v {
-        None => Ok(None),
-        Some(list) => Ok(Some(serde_json::to_string(&list)?)),
     }
 }
 
@@ -90,6 +89,14 @@ pub async fn routing_policy_delete(
     agent_id: String,
     role: String,
 ) -> AppResult<bool> {
+    // The `*` catch-all is the mandatory default policy — a role that matches
+    // no specific row must always have somewhere to land (or fail closed
+    // honestly), and un-deleting it from the UI is the only supported flow.
+    if role == "*" {
+        return Err(AppError::Validation(
+            "the '*' catch-all policy cannot be deleted — clear its targets instead".into(),
+        ));
+    }
     let db = state.db.clone();
     let role_clone = role.clone();
     let agent_for_db = agent_id.clone();

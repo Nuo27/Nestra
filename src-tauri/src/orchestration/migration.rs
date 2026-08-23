@@ -13,8 +13,8 @@
 //!
 //! ## The decision table
 //!
-//! | Class | gen not started, retries left | gen started | side-effect risk |
-//! |-------|------------------------------|------------|------------------|
+//! | Class | gen not started, retries left | gen started | side-effect risk & gen started |
+//! |-------|------------------------------|------------|---------------------------------|
 //! | Auth | Surface | Surface | Surface |
 //! | BadRequest | Surface | Surface | Surface |
 //! | QuotaExhausted | Migrate (if policy) else Surface | Migrate\* (gen_broken) | Surface |
@@ -22,8 +22,12 @@
 //! | RateLimit/Temp5xx/Timeout, retries exhausted | Migrate (if policy) else Surface | Migrate\* (gen_broken) | Surface |
 //!
 //! \* `gen started` forces `generation_broken = true` on the next attempt
-//!   (whether retry or migrate). `side_effect_risk` forces Surface to avoid
-//!   double-executing a tool/external action whose success is unconfirmed.
+//!   (whether retry or migrate). `side_effect_risk` ALSO forces Surface, but
+//!   only once response bytes were received: a pre-response failure (503,
+//!   timeout, connect error) produced nothing observable, so a tool-carrying
+//!   request replays per its class — and since coding agents attach tools to
+//!   virtually every request, gating on `side_effect_risk` alone would disable
+//!   retry/migration for all real agent traffic.
 
 use std::time::Duration;
 
@@ -117,7 +121,8 @@ pub enum MigrationDecision {
 ///   `generation_broken` on the next attempt.
 /// - `side_effect_risk`: **state 3** — true if the request body declared
 ///   tools/functions (may trigger tool execution upstream). Forces `Surface`
-///   to avoid double-execution.
+///   once generation bytes were received; a pre-response failure produced
+///   nothing observable, so the request replays per its class.
 /// - `policy_allows_migrate`: from `routing_policy.migrate_on_quota` (and the
 ///   broader migration toggle). When false, migratable failures `Surface`.
 /// - `from_endpoint_id`: the endpoint that just failed (recorded on the
@@ -132,9 +137,11 @@ pub fn decide(
 ) -> MigrationDecision {
     // State 3: side-effect risk with unconfirmed finalization → never blind-retry.
     // (The protocol handler only calls decide() on a failure, so success is by
-    // definition unconfirmed here.) This wins over everything: a tool-calling
+    // definition unconfirmed here.) This only bites once response bytes were
+    // received: before that, nothing observable happened upstream and replay is
+    // safe — the request follows its class. After bytes flowed, a tool-calling
     // request that failed mid-flight is surfaced, not re-executed.
-    if side_effect_risk {
+    if side_effect_risk && generation_started {
         return MigrationDecision::Surface;
     }
 
@@ -198,10 +205,11 @@ pub fn decide(
 /// `tools` array. OpenAI: non-empty `tools` OR `functions` array. A request
 /// with no tools is treated as side-effect-free (safe to retry/migrate).
 ///
-/// This is intentionally conservative: a tool-calling request that fails
-/// mid-flight might have already executed the tool upstream, so we surface
-/// rather than risk a double-execution. Non-tool requests (most chat turns)
-/// retry/migrate freely.
+/// This is intentionally conservative once generation has started: a
+/// tool-calling request that fails mid-flight might have already executed the
+/// tool upstream, so we surface rather than risk a double-execution. A
+/// pre-response failure (`generation_started == false`) produced nothing
+/// observable, so even tool-carrying requests replay per their class.
 pub fn body_has_side_effect_risk(body: &[u8]) -> bool {
     // Stream-parse: we only need to know whether `tools`/`functions` is a
     // non-empty top-level array — building a full JSON tree per request on

@@ -27,18 +27,25 @@ use super::identity::{RouteReason, TaskLifecycle};
 /// cache-injection toggles, and the affinity scope from here.
 ///
 /// `role = "*"` is the catch-all default policy used when no per-role row
-/// matches a Task's [`super::SubagentRole`].
+/// One entry of a policy's ordered route-target list: an explicit
+/// (endpoint, model) pin. The router serves the first healthy, quota-ok
+/// entry; failures walk the list in order.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RouteTarget {
+    pub endpoint: String,
+    pub model: String,
+}
+
+/// A routing-policy row. The policy layer's persisted shape (`routing_policy`
+/// table). `routing_policy_for` resolves the agent/role/tier lookup chain and
+/// synthesizes a default row on miss.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingPolicyRow {
     pub agent_id: String,
     pub role: String,
-    /// JSON array of endpoint ids in priority order. `None` = no preference.
-    pub preferred_endpoints: Option<String>,
-    /// JSON array of endpoint ids to try on migration. `None` = derive from
-    /// all enabled endpoints.
-    pub fallback_endpoints: Option<String>,
-    /// JSON array of model-id globs the policy allows, or `None` for "any".
-    pub allowed_models: Option<String>,
+    /// JSON array of [`RouteTarget`] in priority order, or `None` for an
+    /// empty list (routing fails closed for a role with no targets).
+    pub route_targets: Option<String>,
     pub migrate_on_quota: bool,
     pub inject_cache_control: bool,
     /// `"task"` | `"session"` | `"none"`. Task-grain affinity is the default
@@ -52,37 +59,39 @@ impl RoutingPolicyRow {
         Self {
             agent_id: agent_id.to_string(),
             role: role.to_string(),
-            preferred_endpoints: None,
-            fallback_endpoints: None,
-            allowed_models: None,
+            route_targets: None,
             migrate_on_quota: true,
             inject_cache_control: false,
             affinity_scope: "task".to_string(),
             updated_at: now,
         }
     }
+
+    /// Parse `route_targets` into typed targets; empty on `None`/malformed.
+    pub fn targets(&self) -> Vec<RouteTarget> {
+        self.route_targets
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<RouteTarget>>(s).ok())
+            .unwrap_or_default()
+    }
 }
 
 pub fn upsert_routing_policy(conn: &Connection, row: &RoutingPolicyRow) -> AppResult<()> {
     conn.execute(
         "INSERT INTO routing_policy
-           (agent_id, role, preferred_endpoints, fallback_endpoints, allowed_models,
+           (agent_id, role, route_targets,
             migrate_on_quota, inject_cache_control, affinity_scope, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(agent_id, role) DO UPDATE SET
-           preferred_endpoints   = excluded.preferred_endpoints,
-           fallback_endpoints    = excluded.fallback_endpoints,
-           allowed_models        = excluded.allowed_models,
-           migrate_on_quota      = excluded.migrate_on_quota,
-           inject_cache_control  = excluded.inject_cache_control,
-           affinity_scope        = excluded.affinity_scope,
-           updated_at            = excluded.updated_at",
+           route_targets        = excluded.route_targets,
+           migrate_on_quota     = excluded.migrate_on_quota,
+           inject_cache_control = excluded.inject_cache_control,
+           affinity_scope       = excluded.affinity_scope,
+           updated_at           = excluded.updated_at",
         rusqlite::params![
             row.agent_id,
             row.role,
-            row.preferred_endpoints,
-            row.fallback_endpoints,
-            row.allowed_models,
+            row.route_targets,
             row.migrate_on_quota as i64,
             row.inject_cache_control as i64,
             row.affinity_scope,
@@ -131,7 +140,7 @@ fn routing_policy_exact(
     role: &str,
 ) -> AppResult<Option<RoutingPolicyRow>> {
     let mut stmt = conn.prepare(
-        "SELECT agent_id, role, preferred_endpoints, fallback_endpoints, allowed_models,
+        "SELECT agent_id, role, route_targets,
                 migrate_on_quota, inject_cache_control, affinity_scope, updated_at
          FROM routing_policy WHERE agent_id = ?1 AND role = ?2",
     )?;
@@ -140,13 +149,11 @@ fn routing_policy_exact(
         Some(r) => Ok(Some(RoutingPolicyRow {
             agent_id: r.get(0)?,
             role: r.get(1)?,
-            preferred_endpoints: r.get(2)?,
-            fallback_endpoints: r.get(3)?,
-            allowed_models: r.get(4)?,
-            migrate_on_quota: r.get::<_, i64>(5)? != 0,
-            inject_cache_control: r.get::<_, i64>(6)? != 0,
-            affinity_scope: r.get(7)?,
-            updated_at: r.get(8)?,
+            route_targets: r.get(2)?,
+            migrate_on_quota: r.get::<_, i64>(3)? != 0,
+            inject_cache_control: r.get::<_, i64>(4)? != 0,
+            affinity_scope: r.get(5)?,
+            updated_at: r.get(6)?,
         })),
         None => Ok(None),
     }
@@ -154,7 +161,7 @@ fn routing_policy_exact(
 
 pub fn list_routing_policies(conn: &Connection, agent_id: &str) -> AppResult<Vec<RoutingPolicyRow>> {
     let mut stmt = conn.prepare(
-        "SELECT agent_id, role, preferred_endpoints, fallback_endpoints, allowed_models,
+        "SELECT agent_id, role, route_targets,
                 migrate_on_quota, inject_cache_control, affinity_scope, updated_at
          FROM routing_policy WHERE agent_id = ?1 ORDER BY role",
     )?;
@@ -162,13 +169,11 @@ pub fn list_routing_policies(conn: &Connection, agent_id: &str) -> AppResult<Vec
         Ok(RoutingPolicyRow {
             agent_id: r.get(0)?,
             role: r.get(1)?,
-            preferred_endpoints: r.get(2)?,
-            fallback_endpoints: r.get(3)?,
-            allowed_models: r.get(4)?,
-            migrate_on_quota: r.get::<_, i64>(5)? != 0,
-            inject_cache_control: r.get::<_, i64>(6)? != 0,
-            affinity_scope: r.get(7)?,
-            updated_at: r.get(8)?,
+            route_targets: r.get(2)?,
+            migrate_on_quota: r.get::<_, i64>(3)? != 0,
+            inject_cache_control: r.get::<_, i64>(4)? != 0,
+            affinity_scope: r.get(5)?,
+            updated_at: r.get(6)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)

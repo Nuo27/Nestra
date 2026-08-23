@@ -1,4 +1,5 @@
 use super::*;
+use crate::orchestration::capability_registry;
 
 fn seed_endpoint(
     conn: &Connection,
@@ -28,6 +29,31 @@ fn seed_binding(conn: &Connection, agent_id: &str, endpoint_id: &str) {
         rusqlite::params![agent_id, endpoint_id],
     )
     .unwrap();
+}
+
+/// Seed a routing policy with ordered (endpoint, model) targets.
+fn seed_policy(conn: &Connection, agent_id: &str, role: &str, targets: &[(&str, &str)]) {
+    let row = store::RoutingPolicyRow {
+        agent_id: agent_id.into(),
+        role: role.into(),
+        route_targets: Some(
+            serde_json::to_string(
+                &targets
+                    .iter()
+                    .map(|(ep, m)| store::RouteTarget {
+                        endpoint: ep.to_string(),
+                        model: m.to_string(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        ),
+        migrate_on_quota: true,
+        inject_cache_control: false,
+        affinity_scope: "task".into(),
+        updated_at: chrono::Utc::now().timestamp_millis(),
+    };
+    store::upsert_routing_policy(conn, &row).unwrap();
 }
 
 /// Test harness owning the stores so borrows in `RouterInputs` outlive the
@@ -73,7 +99,6 @@ impl TestEnv {
 fn explicit_pin_wins_when_endpoint_healthy() {
     let env = TestEnv::new();
     seed_endpoint(&env.conn, "ep-1", "anthropic", "https://api.anthropic.com", "claude-sonnet");
-    capability_registry::rebuild(&env.conn).unwrap();
 
     let mut ctx = TaskContext::new_task("claude-code-cli", None);
     ctx.requested_provider = Some("ep-1".into());
@@ -86,43 +111,165 @@ fn explicit_pin_wins_when_endpoint_healthy() {
 }
 
 #[test]
-fn explicit_pin_falls_through_when_degraded() {
+fn no_policy_targets_fails_closed() {
+    // A role with no policy row (and no `*` row) synthesizes an empty
+    // policy — routing must fail closed, not fall back to bindings.
     let env = TestEnv::new();
     seed_endpoint(&env.conn, "ep-1", "anthropic", "https://x", "m-1");
     seed_binding(&env.conn, "claude-code-cli", "ep-1");
-    capability_registry::rebuild(&env.conn).unwrap();
 
-    // Degrade ep-1 with 3 migratable failures.
-    for _ in 0..3 {
-        env.health.record(
-            "ep-1",
-            crate::orchestration::health::HealthOutcome::Fail(
-                crate::orchestration::health::FailureClass::QuotaExhausted,
-            ),
-            429,
-        );
-    }
-
-    let mut ctx = TaskContext::new_task("claude-code-cli", None);
-    ctx.requested_provider = Some("ep-1".into());
-    ctx.requested_model = Some("m-1".into());
-    // ep-1 is degraded AND it's the only candidate → fail closed.
+    let ctx = TaskContext::new_task("claude-code-cli", None);
     let r = resolve(&ctx, &env.inputs()).unwrap();
     assert_eq!(r.reason, RouteReason::NoEligible);
     assert!(r.endpoint_id.is_empty());
 }
 
 #[test]
+fn empty_target_list_fails_closed() {
+    // The `*` row exists but carries no targets — same honest outcome.
+    let env = TestEnv::new();
+    seed_endpoint(&env.conn, "ep-1", "anthropic", "https://x", "m-1");
+    seed_policy(&env.conn, "claude-code-cli", "*", &[]);
+
+    let ctx = TaskContext::new_task("claude-code-cli", None);
+    let r = resolve(&ctx, &env.inputs()).unwrap();
+    assert_eq!(r.reason, RouteReason::NoEligible);
+}
+
+#[test]
+fn first_healthy_target_wins_in_order() {
+    let env = TestEnv::new();
+    seed_endpoint(&env.conn, "ep-1", "openai-comp", "https://x", "m-1");
+    seed_endpoint(&env.conn, "ep-2", "openai-comp", "https://y", "m-2");
+    seed_policy(
+        &env.conn,
+        "claude-code-cli",
+        "*",
+        &[("ep-1", "m-1"), ("ep-2", "m-2")],
+    );
+
+    let ctx = TaskContext::new_task("claude-code-cli", None);
+    let r = resolve(&ctx, &env.inputs()).unwrap();
+    assert_eq!(r.reason, RouteReason::Policy);
+    assert_eq!(r.endpoint_id, "ep-1");
+    assert_eq!(r.model, "m-1");
+}
+
+#[test]
+fn target_model_is_honored_verbatim() {
+    // The target's model is the user's explicit intent — even when it is
+    // NOT the endpoint's default model.
+    let env = TestEnv::new();
+    seed_endpoint(&env.conn, "z-ai", "openai-comp", "https://api.z.ai/api/paas/v4", "glm-4.7");
+    seed_policy(&env.conn, "opencode-desktop", "*", &[("z-ai", "glm-5.2")]);
+
+    let mut ctx = TaskContext::new_task("opencode-desktop", None);
+    ctx.protocol_hint = Some(ProviderKind::Openai);
+    let r = resolve(&ctx, &env.inputs()).unwrap();
+    assert_eq!(r.model, "glm-5.2");
+    assert_eq!(r.reason, RouteReason::Policy);
+}
+
+#[test]
+fn quota_exhausted_target_is_skipped() {
+    let env = TestEnv::new();
+    seed_endpoint(&env.conn, "ep-1", "openai-comp", "https://x", "m-1");
+    seed_endpoint(&env.conn, "ep-2", "openai-comp", "https://y", "m-2");
+    seed_policy(
+        &env.conn,
+        "claude-code-cli",
+        "*",
+        &[("ep-1", "m-1"), ("ep-2", "m-2")],
+    );
+
+    env.quota.mark_exhausted("ep-1", Some("5h window elapsed".into()));
+
+    let ctx = TaskContext::new_task("claude-code-cli", None);
+    let r = resolve(&ctx, &env.inputs()).unwrap();
+    assert_eq!(r.endpoint_id, "ep-2");
+    assert_eq!(r.model, "m-2");
+}
+
+#[test]
+fn degraded_target_is_skipped() {
+    let env = TestEnv::new();
+    seed_endpoint(&env.conn, "ep-1", "openai-comp", "https://x", "m-1");
+    seed_endpoint(&env.conn, "ep-2", "openai-comp", "https://y", "m-2");
+    seed_policy(
+        &env.conn,
+        "claude-code-cli",
+        "*",
+        &[("ep-1", "m-1"), ("ep-2", "m-2")],
+    );
+    for _ in 0..3 {
+        env.health.record(
+            "ep-1",
+            crate::orchestration::health::HealthOutcome::Fail(
+                crate::orchestration::health::FailureClass::Temp5xx,
+            ),
+            503,
+        );
+    }
+
+    let ctx = TaskContext::new_task("claude-code-cli", None);
+    let r = resolve(&ctx, &env.inputs()).unwrap();
+    assert_eq!(r.endpoint_id, "ep-2");
+}
+
+#[test]
+fn failed_endpoint_exclusion_walks_forward() {
+    // The migration loop marks failed endpoints on the context — a
+    // re-resolve must walk PAST them in the target list (this is how
+    // failover walks the ordered list without waiting for health degrade).
+    let env = TestEnv::new();
+    seed_endpoint(&env.conn, "ep-1", "openai-comp", "https://x", "m-1");
+    seed_endpoint(&env.conn, "ep-2", "openai-comp", "https://y", "m-2");
+    seed_policy(
+        &env.conn,
+        "claude-code-cli",
+        "*",
+        &[("ep-1", "m-1"), ("ep-2", "m-2")],
+    );
+
+    let mut ctx = TaskContext::new_task("claude-code-cli", None);
+    ctx.failed_endpoints.push("ep-1".into());
+    let r = resolve(&ctx, &env.inputs()).unwrap();
+    assert_eq!(r.endpoint_id, "ep-2");
+
+    // All targets excluded → fail closed.
+    let mut ctx = TaskContext::new_task("claude-code-cli", None);
+    ctx.failed_endpoints.push("ep-1".into());
+    ctx.failed_endpoints.push("ep-2".into());
+    let r = resolve(&ctx, &env.inputs()).unwrap();
+    assert_eq!(r.reason, RouteReason::NoEligible);
+}
+
+#[test]
+fn missing_endpoint_target_is_skipped_with_warning() {
+    let env = TestEnv::new();
+    seed_endpoint(&env.conn, "ep-2", "openai-comp", "https://y", "m-2");
+    seed_policy(
+        &env.conn,
+        "claude-code-cli",
+        "*",
+        &[("ep-gone", "m-x"), ("ep-2", "m-2")],
+    );
+
+    let ctx = TaskContext::new_task("claude-code-cli", None);
+    let r = resolve(&ctx, &env.inputs()).unwrap();
+    assert_eq!(r.endpoint_id, "ep-2");
+}
+
+#[test]
 fn affinity_reuses_previous_route_for_same_task() {
     let env = TestEnv::new();
     seed_endpoint(&env.conn, "ep-1", "anthropic", "https://x", "m-1");
-    seed_binding(&env.conn, "claude-code-cli", "ep-1");
-    capability_registry::rebuild(&env.conn).unwrap();
+    seed_policy(&env.conn, "claude-code-cli", "*", &[("ep-1", "m-1")]);
 
-    // First request: capability pick records affinity.
+    // First request: policy pick records affinity.
     let ctx1 = TaskContext::new_task("claude-code-cli", None);
     let r1 = resolve(&ctx1, &env.inputs()).unwrap();
-    assert_eq!(r1.reason, RouteReason::Capability);
+    assert_eq!(r1.reason, RouteReason::Policy);
     assert_eq!(r1.endpoint_id, "ep-1");
 
     // Second request for the SAME task_id → affinity hit.
@@ -134,36 +281,17 @@ fn affinity_reuses_previous_route_for_same_task() {
 }
 
 #[test]
-fn subagent_role_policy_wins_over_tier_and_bound_default() {
-    // The tier layer (added between exact role and `*`) must not weaken
-    // subagent role routing: a claude:researcher request resolves via the
-    // researcher policy's preferred endpoint even when the request also
-    // carries a classifiable haiku tier AND a tier:haiku row exists.
+fn subagent_role_policy_wins_over_tier_and_wildcard() {
+    // The tier layer (between exact role and `*`) must not weaken subagent
+    // role routing: a claude:researcher request resolves via the researcher
+    // policy's first target even when a tier:haiku row and a `*` row exist.
     let env = TestEnv::new();
-    seed_endpoint(&env.conn, "ep-bound", "anthropic", "https://x", "m-bound");
     seed_endpoint(&env.conn, "ep-researcher", "anthropic", "https://y", "m-researcher");
     seed_endpoint(&env.conn, "ep-tier", "anthropic", "https://z", "m-tier");
-    seed_binding(&env.conn, "claude-code-cli", "ep-bound");
-    capability_registry::rebuild(&env.conn).unwrap();
-
-    let now = chrono::Utc::now().timestamp_millis();
-    for (role, ep) in [("claude:researcher", "ep-researcher"), ("tier:haiku", "ep-tier")] {
-        store::upsert_routing_policy(
-            &env.conn,
-            &store::RoutingPolicyRow {
-                agent_id: "claude-code-cli".into(),
-                role: role.into(),
-                preferred_endpoints: Some(format!(r#"["{ep}"]"#).into()),
-                fallback_endpoints: None,
-                allowed_models: None,
-                migrate_on_quota: true,
-                inject_cache_control: false,
-                affinity_scope: "task".into(),
-                updated_at: now,
-            },
-        )
-        .unwrap();
-    }
+    seed_endpoint(&env.conn, "ep-wild", "anthropic", "https://w", "m-wild");
+    seed_policy(&env.conn, "claude-code-cli", "claude:researcher", &[("ep-researcher", "m-researcher")]);
+    seed_policy(&env.conn, "claude-code-cli", "tier:haiku", &[("ep-tier", "m-tier")]);
+    seed_policy(&env.conn, "claude-code-cli", "*", &[("ep-wild", "m-wild")]);
 
     let mut ctx = TaskContext::new_task("claude-code-cli", None);
     ctx.subagent_role = crate::orchestration::identity::SubagentRole::ClaudeAgent {
@@ -179,106 +307,11 @@ fn subagent_role_policy_wins_over_tier_and_bound_default() {
     ctx.budget_tier = Some(crate::orchestration::identity::BudgetTier::Haiku);
     let r = resolve(&ctx, &env.inputs()).unwrap();
     assert_eq!(r.endpoint_id, "ep-tier");
-}
 
-#[test]
-fn openai_inbound_with_anthropic_only_row_bridges_to_messages() {
-    // A chat-wire agent bound to a single-row (anthropic) endpoint must
-    // resolve the Anthropic wire so the OpenAI handler can bridge — the
-    // 404 "page not found" case (MiniMax-M3 on `…/anthropic`).
-    let env = TestEnv::new();
-    seed_endpoint(&env.conn, "ep-a", "anthropic", "https://api.minimaxi.com/anthropic", "MiniMax-M3");
-    seed_binding(&env.conn, "opencode-desktop", "ep-a");
-    capability_registry::rebuild(&env.conn).unwrap();
-
-    let mut ctx = TaskContext::new_task("opencode-desktop", None);
-    ctx.protocol_hint = Some(ProviderKind::Openai);
-    let r = resolve(&ctx, &env.inputs()).unwrap();
-    assert_eq!(r.endpoint_id, "ep-a");
-    assert_eq!(r.protocol, ProviderKind::Anthropic, "chat inbound follows the anthropic row");
-}
-
-#[test]
-fn openai_inbound_keeps_chat_when_openai_row_exists() {
-    // Regression: a chat-wire agent on an endpoint WITH an openai row
-    // stays native Chat (no bridge).
-    let env = TestEnv::new();
-    // anthropic + openai-comp rows on the SAME base (mock-style dual row).
-    seed_endpoint(&env.conn, "ep-a", "anthropic", "https://x", "m-1");
-    env.conn
-        .execute(
-            "INSERT INTO endpoint_protocol (endpoint_id, protocol, base_url)
-                 VALUES ('ep-a','openai-comp','https://x')",
-            [],
-        )
-        .unwrap();
-    seed_binding(&env.conn, "opencode-desktop", "ep-a");
-    capability_registry::rebuild(&env.conn).unwrap();
-
-    let mut ctx = TaskContext::new_task("opencode-desktop", None);
-    ctx.protocol_hint = Some(ProviderKind::Openai);
-    let r = resolve(&ctx, &env.inputs()).unwrap();
-    assert_eq!(r.protocol, ProviderKind::Openai, "openai row present → native chat wire");
-}
-
-#[test]
-fn allowed_models_glob_filters_capability_pick() {
-    let env = TestEnv::new();
-    seed_endpoint(&env.conn, "ep-1", "openai-comp", "https://x", "gpt-4o");
-    seed_binding(&env.conn, "claude-code-cli", "ep-1");
-    capability_registry::rebuild(&env.conn).unwrap();
-
-    // Policy: only allow `claude-*`. ep-1 only has `gpt-4o` → no match.
-    let now = chrono::Utc::now().timestamp_millis();
-    store::upsert_routing_policy(
-        &env.conn,
-        &store::RoutingPolicyRow {
-            agent_id: "claude-code-cli".into(),
-            role: "*".into(),
-            preferred_endpoints: None,
-            fallback_endpoints: None,
-            allowed_models: Some(r#"["claude-*"]"#.into()),
-            migrate_on_quota: true,
-            inject_cache_control: false,
-            affinity_scope: "task".into(),
-            updated_at: now,
-        },
-    )
-    .unwrap();
-
+    // No tier → the `*` catch-all.
     let ctx = TaskContext::new_task("claude-code-cli", None);
     let r = resolve(&ctx, &env.inputs()).unwrap();
-    assert_eq!(r.reason, RouteReason::NoEligible, "gpt-4o blocked by claude-* glob");
-}
-
-#[test]
-fn quota_exhausted_endpoint_is_skipped() {
-    let env = TestEnv::new();
-    seed_endpoint(&env.conn, "ep-1", "openai-comp", "https://x", "m-1");
-    seed_endpoint(&env.conn, "ep-2", "openai-comp", "https://y", "m-2");
-    seed_binding(&env.conn, "claude-code-cli", "ep-1");
-    seed_binding(&env.conn, "claude-code-cli", "ep-2");
-    capability_registry::rebuild(&env.conn).unwrap();
-
-    env.quota.mark_exhausted("ep-1", Some("5h window elapsed".into()));
-
-    let ctx = TaskContext::new_task("claude-code-cli", None);
-    let r = resolve(&ctx, &env.inputs()).unwrap();
-    // ep-1 exhausted → router skips to ep-2.
-    assert_eq!(r.endpoint_id, "ep-2");
-    assert_eq!(r.reason, RouteReason::Capability);
-}
-
-#[test]
-fn model_allowed_helper() {
-    assert!(model_allowed(&None, "anything"));
-    assert!(model_allowed(&Some(r#"[]"#.into()), "anything")); // empty = permissive
-    assert!(model_allowed(&Some(r#"["claude-*"]"#.into()), "claude-sonnet"));
-    assert!(!model_allowed(&Some(r#"["claude-*"]"#.into()), "gpt-4o"));
-    assert!(model_allowed(&Some(r#"["gpt-4o"]"#.into()), "gpt-4o"));
-    assert!(!model_allowed(&Some(r#"["gpt-4o"]"#.into()), "gpt-4o-mini"));
-    // Malformed JSON = permissive (never block on bad data).
-    assert!(model_allowed(&Some("not json".into()), "x"));
+    assert_eq!(r.endpoint_id, "ep-wild");
 }
 
 /// Overwrite an endpoint's `models_json` and rebuild the catalog.
@@ -291,78 +324,12 @@ fn seed_endpoint_models(conn: &Connection, id: &str, models_json: &str) {
     capability_registry::rebuild(conn).unwrap();
 }
 
-/// Overwrite `models_json` WITHOUT rebuilding the catalog — proves the
-/// router reads the default live instead of the cached catalog.
-fn set_models_no_rebuild(conn: &Connection, id: &str, models_json: &str) {
-    conn.execute(
-        "UPDATE provider_endpoint SET models_json = ?2 WHERE id = ?1",
-        rusqlite::params![id, models_json],
-    )
-    .unwrap();
-}
-
 fn add_protocol_row(conn: &Connection, id: &str, protocol: &str, base_url: &str) {
     conn.execute(
         "INSERT INTO endpoint_protocol (endpoint_id, protocol, base_url) VALUES (?1,?2,?3)",
         rusqlite::params![id, protocol, base_url],
     )
     .unwrap();
-}
-
-/// Routing semantics: the first eligible provider serves its DEFAULT
-/// model. glm-4.7 sorts before glm-5.2 alphabetically — the default must
-/// still win (regression: the old code picked the alphabetical-first
-/// catalog model and ignored `models_json.default`).
-#[test]
-fn capability_pick_prefers_endpoint_default_model() {
-    let env = TestEnv::new();
-    seed_endpoint(&env.conn, "z-ai", "openai-comp", "https://api.z.ai/api/paas/v4", "glm-4.7");
-    seed_binding(&env.conn, "opencode-desktop", "z-ai");
-    seed_endpoint_models(
-        &env.conn,
-        "z-ai",
-        r#"{"available":["glm-4.7","glm-5.2"],"default":"glm-5.2"}"#,
-    );
-
-    let mut ctx = TaskContext::new_task("opencode-desktop", None);
-    ctx.requested_model = Some("nestra".into());
-    ctx.protocol_hint = Some(ProviderKind::Openai);
-    let route = resolve(&ctx, &env.inputs()).unwrap();
-
-    assert_eq!(route.endpoint_id, "z-ai");
-    assert_eq!(route.model, "glm-5.2", "default must win over alphabetical-first");
-    assert_eq!(route.reason, RouteReason::Capability);
-}
-
-/// A default-model edit on the Provider page takes effect on the NEXT
-/// request — the router reads `models_json.default` live (no catalog
-/// rebuild, no gateway restart).
-#[test]
-fn default_model_edit_takes_effect_without_catalog_rebuild() {
-    let env = TestEnv::new();
-    seed_endpoint(&env.conn, "ep-1", "openai-comp", "http://127.0.0.1:8787", "glm-5.2");
-    seed_binding(&env.conn, "opencode-desktop", "ep-1");
-    seed_endpoint_models(
-        &env.conn,
-        "ep-1",
-        r#"{"available":["glm-4.7","glm-5.2"],"default":"glm-5.2"}"#,
-    );
-
-    let mut ctx = TaskContext::new_task("opencode-desktop", None);
-    ctx.protocol_hint = Some(ProviderKind::Openai);
-    assert_eq!(resolve(&ctx, &env.inputs()).unwrap().model, "glm-5.2");
-
-    // Flip the default to a model already in the catalog — NO rebuild.
-    set_models_no_rebuild(
-        &env.conn,
-        "ep-1",
-        r#"{"available":["glm-4.7","glm-5.2"],"default":"glm-4.7"}"#,
-    );
-    // A NEW task (fresh task_id) — the old task's affinity would reuse the
-    // prior route by design.
-    let mut ctx2 = TaskContext::new_task("opencode-desktop", None);
-    ctx2.protocol_hint = Some(ProviderKind::Openai);
-    assert_eq!(resolve(&ctx2, &env.inputs()).unwrap().model, "glm-4.7");
 }
 
 /// The upstream base_url follows the inbound direction: an OpenAI-shape
@@ -373,8 +340,8 @@ fn protocol_hint_picks_matching_endpoint_row() {
     let env = TestEnv::new();
     seed_endpoint(&env.conn, "z-ai", "anthropic", "https://api.z.ai/api/anthropic", "glm-5.2");
     add_protocol_row(&env.conn, "z-ai", "openai-comp", "https://api.z.ai/api/paas/v4");
-    seed_binding(&env.conn, "opencode-desktop", "z-ai");
     seed_endpoint_models(&env.conn, "z-ai", r#"{"available":["glm-5.2"],"default":"glm-5.2"}"#);
+    seed_policy(&env.conn, "opencode-desktop", "*", &[("z-ai", "glm-5.2")]);
 
     let mut openai_ctx = TaskContext::new_task("opencode-desktop", None);
     openai_ctx.protocol_hint = Some(ProviderKind::Openai);
@@ -383,15 +350,16 @@ fn protocol_hint_picks_matching_endpoint_row() {
         "https://api.z.ai/api/paas/v4"
     );
 
-    let mut anthropic_ctx = TaskContext::new_task("opencode-desktop", None);
+    let mut anthropic_ctx = TaskContext::new_task("claude-code-cli", None);
     anthropic_ctx.protocol_hint = Some(ProviderKind::Anthropic);
+    seed_policy(&env.conn, "claude-code-cli", "*", &[("z-ai", "glm-5.2")]);
     assert_eq!(
         resolve(&anthropic_ctx, &env.inputs()).unwrap().base_url,
         "https://api.z.ai/api/anthropic"
     );
 
     // No hint → historical first-row behavior.
-    let bare_ctx = TaskContext::new_task("opencode-desktop", None);
+    let bare_ctx = TaskContext::new_task("claude-code-cli", None);
     assert_eq!(
         resolve(&bare_ctx, &env.inputs()).unwrap().base_url,
         "https://api.z.ai/api/anthropic"
@@ -409,8 +377,8 @@ fn same_gateway_dual_rows_prefer_openai_for_anthropic_inbound() {
     let env = TestEnv::new();
     seed_endpoint(&env.conn, "opencode-go", "anthropic", "https://opencode.ai/zen/go/v1", "deepseek-v4-flash");
     add_protocol_row(&env.conn, "opencode-go", "openai-comp", "https://opencode.ai/zen/go/v1");
-    seed_binding(&env.conn, "claude-code-cli", "opencode-go");
-    seed_binding(&env.conn, "opencode-desktop", "opencode-go");
+    seed_policy(&env.conn, "claude-code-cli", "*", &[("opencode-go", "deepseek-v4-flash")]);
+    seed_policy(&env.conn, "opencode-desktop", "*", &[("opencode-go", "deepseek-v4-flash")]);
     seed_endpoint_models(
         &env.conn,
         "opencode-go",
@@ -442,7 +410,7 @@ fn distinct_base_urls_keep_direction_matched_row() {
     let env = TestEnv::new();
     seed_endpoint(&env.conn, "deepseek", "anthropic", "https://api.deepseek.com/anthropic", "deepseek-chat");
     add_protocol_row(&env.conn, "deepseek", "openai-comp", "https://api.deepseek.com/v1");
-    seed_binding(&env.conn, "claude-code-cli", "deepseek");
+    seed_policy(&env.conn, "claude-code-cli", "*", &[("deepseek", "deepseek-chat")]);
     seed_endpoint_models(
         &env.conn,
         "deepseek",
@@ -462,7 +430,7 @@ fn distinct_base_urls_keep_direction_matched_row() {
 fn protocol_hint_falls_back_to_first_row_when_no_match() {
     let env = TestEnv::new();
     seed_endpoint(&env.conn, "mock-a", "anthropic", "http://127.0.0.1:8787", "claude-haiku-4-5");
-    seed_binding(&env.conn, "pi-cli", "mock-a");
+    seed_policy(&env.conn, "pi-cli", "*", &[("mock-a", "claude-haiku-4-5")]);
     seed_endpoint_models(
         &env.conn,
         "mock-a",
@@ -487,13 +455,13 @@ fn set_catalog_api(conn: &Connection, endpoint: &str, model: &str, api: &str) {
 }
 
 /// A responses-class model (grok-4.5) on an Anthropic inbound resolves to
-/// the Responses wire — the chat wire is broken upstream for it (503).
+/// the Responses wire.
 #[test]
 fn wire_responses_class_routes_to_responses_api() {
     let env = TestEnv::new();
     seed_endpoint(&env.conn, "opencode-go", "anthropic", "https://opencode.ai/zen/go/v1", "grok-4.5");
     add_protocol_row(&env.conn, "opencode-go", "openai-comp", "https://opencode.ai/zen/go/v1");
-    seed_binding(&env.conn, "claude-code-cli", "opencode-go");
+    seed_policy(&env.conn, "claude-code-cli", "*", &[("opencode-go", "grok-4.5")]);
     seed_endpoint_models(
         &env.conn,
         "opencode-go",
@@ -516,7 +484,7 @@ fn wire_openai_class_routes_to_chat() {
     let env = TestEnv::new();
     seed_endpoint(&env.conn, "opencode-go", "anthropic", "https://opencode.ai/zen/go/v1", "kimi-k3");
     add_protocol_row(&env.conn, "opencode-go", "openai-comp", "https://opencode.ai/zen/go/v1");
-    seed_binding(&env.conn, "claude-code-cli", "opencode-go");
+    seed_policy(&env.conn, "claude-code-cli", "*", &[("opencode-go", "kimi-k3")]);
     seed_endpoint_models(
         &env.conn,
         "opencode-go",
@@ -530,59 +498,33 @@ fn wire_openai_class_routes_to_chat() {
     assert_eq!(route.protocol, ProviderKind::Openai);
 }
 
-/// A chat inbound only switches wire for responses-class models;
-/// anthropic-class and unknown models stay on Chat (they accept it).
+/// Explicit targets are the user's intent — capability gating no longer
+/// overrides them (the vision/text-only capability filter was abolished
+/// with the route-target model; abilities are display data now).
 #[test]
-fn wire_chat_inbound_switches_only_for_responses_class() {
+fn explicit_target_bypasses_capability_gating() {
     let env = TestEnv::new();
-    seed_endpoint(&env.conn, "opencode-go", "anthropic", "https://opencode.ai/zen/go/v1", "deepseek-v4-flash");
-    add_protocol_row(&env.conn, "opencode-go", "openai-comp", "https://opencode.ai/zen/go/v1");
-    seed_binding(&env.conn, "opencode-desktop", "opencode-go");
-    seed_endpoint_models(
-        &env.conn,
-        "opencode-go",
-        r#"{"available":["deepseek-v4-flash","grok-4.5"],"default":"deepseek-v4-flash"}"#,
-    );
+    seed_endpoint(&env.conn, "ep-text", "anthropic", "https://t", "m-text");
+    seed_policy(&env.conn, "claude-code-cli", "*", &[("ep-text", "m-text")]);
+    env.conn
+        .execute(
+            "UPDATE provider_endpoint SET model_abilities_json = ?2 WHERE id = 'ep-text'",
+            rusqlite::params!["ep-text", r#"{"m-text":{"modalities":{"input":["text"]}}}"#],
+        )
+        .unwrap();
+    capability_registry::rebuild(&env.conn).unwrap();
 
-    // deepseek-v4-flash: anthropic-class (corrections) → stays Chat.
-    let mut ds_ctx = TaskContext::new_task("opencode-desktop", None);
-    ds_ctx.protocol_hint = Some(ProviderKind::Openai);
-    ds_ctx.requested_model = Some("deepseek-v4-flash".into());
-    ds_ctx.requested_provider = Some("opencode-go".into());
-    let route = resolve(&ds_ctx, &env.inputs()).unwrap();
-    assert_eq!(route.protocol, ProviderKind::Openai);
-
-    // grok-4.5: responses-class → Chat inbound also switches to Responses.
-    set_catalog_api(&env.conn, "opencode-go", "grok-4.5", "response-api");
-    let mut gr_ctx = TaskContext::new_task("opencode-desktop", None);
-    gr_ctx.protocol_hint = Some(ProviderKind::Openai);
-    gr_ctx.requested_model = Some("grok-4.5".into());
-    gr_ctx.requested_provider = Some("opencode-go".into());
-    let route = resolve(&gr_ctx, &env.inputs()).unwrap();
-    assert_eq!(route.protocol, ProviderKind::Responses);
-}
-
-/// Unknown api (no corrections/overrides) follows the row protocol —
-/// historical behavior preserved.
-#[test]
-fn wire_unknown_api_follows_row() {
-    let env = TestEnv::new();
-    seed_endpoint(&env.conn, "ep-1", "anthropic", "https://api.example.com", "m-1");
-    add_protocol_row(&env.conn, "ep-1", "openai-comp", "https://api.example.com/v1");
-    seed_binding(&env.conn, "claude-code-cli", "ep-1");
-    seed_endpoint_models(&env.conn, "ep-1", r#"{"available":["m-1"],"default":"m-1"}"#);
-
-    // Distinct base_urls → direction-matched anthropic row → Anthropic wire.
-    let mut a_ctx = TaskContext::new_task("claude-code-cli", None);
-    a_ctx.protocol_hint = Some(ProviderKind::Anthropic);
-    let r = resolve(&a_ctx, &env.inputs()).unwrap();
-    assert_eq!(r.protocol, ProviderKind::Anthropic);
-
-    let mut o_ctx = TaskContext::new_task("opencode-desktop", None);
-    o_ctx.protocol_hint = Some(ProviderKind::Openai);
-    seed_binding(&env.conn, "opencode-desktop", "ep-1");
-    let r = resolve(&o_ctx, &env.inputs()).unwrap();
-    assert_eq!(r.protocol, ProviderKind::Openai);
+    // An image-bearing request still routes to the explicit target — the
+    // upstream (not the router) is the authority on what it can serve.
+    let body = br#"{"model":"m-text","messages":[{"role":"user","content":[
+             {"type":"text","text":"see"},{"type":"image","source":{"data":"x"}}]}]}"#;
+    let mut ctx = TaskContext::new_task("claude-code-cli", None);
+    ctx.required_capabilities =
+        capability_registry::derive_capability_req(body, ProviderKind::Anthropic);
+    assert!(ctx.required_capabilities.vision);
+    let r = resolve(&ctx, &env.inputs()).unwrap();
+    assert_eq!(r.endpoint_id, "ep-text");
+    assert_eq!(r.model, "m-text");
 }
 
 #[test]
@@ -625,44 +567,4 @@ fn affinity_persist_is_debounced() {
         )
         .unwrap();
     assert_eq!(n, 0, "debounced record must skip the setting write");
-}
-
-#[test]
-fn capability_req_routes_vision_away_from_text_only_model() {
-    let env = TestEnv::new();
-    seed_endpoint(&env.conn, "ep-text", "anthropic", "https://t", "m-text");
-    seed_endpoint(&env.conn, "ep-vis", "anthropic", "https://v", "m-vis");
-    seed_binding(&env.conn, "claude-code-cli", "ep-text");
-    seed_binding(&env.conn, "claude-code-cli", "ep-vis");
-    // ep-text's model reports text-only input; ep-vis's reports text+image.
-    for (id, abilities) in [
-        ("ep-text", r#"{"m-text":{"modalities":{"input":["text"]}}}"#),
-        ("ep-vis", r#"{"m-vis":{"modalities":{"input":["text","image"]}}}"#),
-    ] {
-        env.conn
-            .execute(
-                "UPDATE provider_endpoint SET model_abilities_json = ?2 WHERE id = ?1",
-                rusqlite::params![id, abilities],
-            )
-            .unwrap();
-    }
-    capability_registry::rebuild(&env.conn).unwrap();
-
-    // An image-bearing request derives vision=true and must not resolve
-    // onto the text-only model (Smart Gateway fix 2 activating the
-    // previously inert capability stage).
-    let body = br#"{"model":"m-text","messages":[{"role":"user","content":[
-             {"type":"text","text":"see"},{"type":"image","source":{"data":"x"}}]}]}"#;
-    let mut ctx = TaskContext::new_task("claude-code-cli", None);
-    ctx.required_capabilities =
-        capability_registry::derive_capability_req(body, ProviderKind::Anthropic);
-    assert!(ctx.required_capabilities.vision);
-    let r = resolve(&ctx, &env.inputs()).unwrap();
-    assert_eq!(r.endpoint_id, "ep-vis", "vision request excludes the text-only model");
-
-    // A text-only request stays eligible for the text-only model.
-    let mut ctx2 = TaskContext::new_task("claude-code-cli", None);
-    ctx2.requested_model = Some("m-text".into());
-    let r2 = resolve(&ctx2, &env.inputs()).unwrap();
-    assert_eq!(r2.model, "m-text");
 }

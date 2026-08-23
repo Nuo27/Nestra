@@ -163,6 +163,37 @@ fn parse_entry(v: &serde_json::Value) -> Option<ModelAbilities> {
     Some(ModelAbilities { reasoning, tool_call, attachment, temperature, limit, modalities, api })
 }
 
+/// Merge override layers onto a base index keyed by TAIL segment: an
+/// override key `opencode-go/ox-alpha-free` applies to any base key whose
+/// normalized tail is `ox-alpha-free` (models.dev indexes bare ids, the
+/// pi.dev/corrections layers use `<provider>/<id>` — `abilities_for`'s
+/// direct-key lookup would otherwise SHADOW the prefixed layers entirely).
+/// Overrides win field-by-field; an override with no base counterpart keeps
+/// its own key (tail lookup still resolves it).
+pub fn merge_into_tail(
+    base: HashMap<String, ModelAbilities>,
+    overrides: HashMap<String, ModelAbilities>,
+) -> HashMap<String, ModelAbilities> {
+    let mut out = base;
+    for (key, ov) in overrides {
+        let tail = normalize(key.rsplit('/').next().unwrap_or(&key));
+        let target = out
+            .keys()
+            .find(|bk| normalize(bk.rsplit('/').next().unwrap_or(bk)) == tail)
+            .cloned();
+        match target {
+            Some(existing_key) => {
+                let cur = out.remove(&existing_key).unwrap();
+                out.insert(existing_key, merge_field_overrides(cur, ov));
+            }
+            None => {
+                out.insert(key, ov);
+            }
+        }
+    }
+    out
+}
+
 /// Parse models.dev's `modalities: { input: [...], output: [...] }` shape
 /// into the typed form. Drops any unknown tokens silently — the OpenCode
 /// schema enum is closed (`text|audio|image|video|pdf`), and we'd rather
@@ -582,6 +613,147 @@ pub fn load_index(conn: &rusqlite::Connection) -> AppResult<HashMap<String, Mode
     };
     let json = cached.get("json").cloned().unwrap_or(serde_json::Value::Null);
     Ok(build_index(&json))
+}
+
+// ===========================================================================
+// pi.dev provider catalogs — a secondary ability source between models.dev
+// and the bundled corrections. pi.dev carries richer limits than models.dev
+// for some providers (notably opencode-go, whose own /models is ids-only);
+// the merge layering is models.dev < pi.dev < corrections < user overrides.
+// Scope: limits + api dialect only (cost/modalities/thinking maps stay out).
+// ===========================================================================
+
+/// `setting_kv` key for the pi.dev catalog cache.
+const PI_CACHE_KEY: &str = "pi_dev_cache";
+
+/// pi.dev's catalog base URL (community-maintained by the pi authors).
+const PI_CATALOG_BASE: &str = "https://pi.dev/api/models/providers";
+
+/// Host fragment → pi.dev provider id for the providers with a verified
+/// catalog. An endpoint's base_url is matched against this table at
+/// model-list refresh time; custom endpoints on the same hosts benefit too.
+pub fn pi_catalog_for_base_url(base_url: &str) -> Option<&'static str> {
+    let url = base_url.to_lowercase();
+    if url.contains("opencode.ai") {
+        Some("opencode-go")
+    } else if url.contains("minimaxi.com") || url.contains("minimax.chat") {
+        Some("minimax-cn")
+    } else if url.contains("api.z.ai") || url.contains("zhipuai") || url.contains("bigmodel.cn") {
+        Some("zai")
+    } else {
+        None
+    }
+}
+
+/// Map pi's api vocabulary onto ours. Unknown values yield `None` (leave the
+/// field unset — corrections/models.dev may still supply it).
+fn map_pi_api(v: &str) -> Option<String> {
+    match v {
+        "openai-completions" | "openai" => Some("openai-comp".into()),
+        "openai-responses" => Some("response-api".into()),
+        "anthropic" => Some("anthropic".into()),
+        _ => None,
+    }
+}
+
+/// Parse one pi.dev model entry: `contextWindow`/`maxTokens` → limit,
+/// `reasoning`, `api` (mapped). `None` when the entry carries none of them.
+fn parse_pi_entry(v: &serde_json::Value) -> Option<ModelAbilities> {
+    let reasoning = v.get("reasoning").and_then(|x| x.as_bool());
+    let limit = match (
+        v.get("contextWindow").and_then(|c| c.as_u64()),
+        v.get("maxTokens").and_then(|m| m.as_u64()),
+    ) {
+        (Some(context), Some(output)) => Some(ModelLimit { context, output, input: None }),
+        _ => None,
+    };
+    let api = v
+        .get("api")
+        .and_then(|x| x.as_str())
+        .and_then(map_pi_api);
+    if reasoning.is_none() && limit.is_none() && api.is_none() {
+        return None;
+    }
+    Some(ModelAbilities { reasoning, tool_call: None, attachment: None, temperature: None, limit, modalities: None, api })
+}
+
+/// Build the abilities index from one pi.dev provider catalog. Keys are
+/// `<provider>/<model-id>` (matching the corrections key convention) so
+/// `abilities_for`'s tail-match resolves bare endpoint model ids against it.
+pub fn build_pi_index(provider_id: &str, json: &serde_json::Value) -> HashMap<String, ModelAbilities> {
+    let mut map = HashMap::new();
+    let Some(obj) = json.as_object() else {
+        return map;
+    };
+    for (model_id, entry) in obj {
+        if let Some(a) = parse_pi_entry(entry) {
+            map.insert(format!("{provider_id}/{model_id}"), a);
+        }
+    }
+    map
+}
+
+/// Refresh the cached pi.dev catalog for `provider_id` when stale (same
+/// TTL/dedupe/never-fatal contract as the models.dev refresh).
+pub fn refresh_pi(conn: &rusqlite::Connection, provider_id: &str, force: bool) -> AppResult<()> {
+    let mut cache: serde_json::Value = db::get_setting(conn, PI_CACHE_KEY)?
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !force {
+        let fresh = cache
+            .get(provider_id)
+            .and_then(|e| e.get("fetched_at"))
+            .and_then(|v| v.as_i64())
+            .map(|at| chrono::Utc::now().timestamp_millis() - at < TTL_MS)
+            .unwrap_or(false);
+        if fresh {
+            return Ok(());
+        }
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(10))
+        .build();
+    let url = format!("{PI_CATALOG_BASE}/{provider_id}");
+    let body = match agent.get(&url).call() {
+        Ok(resp) => resp.into_string().unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(provider = provider_id, error = %e, "pi.dev catalog fetch failed; keeping existing cache");
+            return Ok(());
+        }
+    };
+    let json: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(provider = provider_id, error = %e, "pi.dev catalog unparseable; keeping existing cache");
+            return Ok(());
+        }
+    };
+    if !json.is_object() {
+        return Ok(());
+    }
+    cache[provider_id] = serde_json::json!({
+        "fetched_at": chrono::Utc::now().timestamp_millis(),
+        "json": json,
+    });
+    db::set_setting(conn, PI_CACHE_KEY, &cache)?;
+    Ok(())
+}
+
+/// Load the pi.dev abilities index across every cached provider (no
+/// network). Empty map when no cache exists.
+pub fn load_pi_index(conn: &rusqlite::Connection) -> AppResult<HashMap<String, ModelAbilities>> {
+    let mut map = HashMap::new();
+    let Some(cache) = db::get_setting(conn, PI_CACHE_KEY)? else {
+        return Ok(map);
+    };
+    let Some(obj) = cache.as_object() else {
+        return Ok(map);
+    };
+    for (provider_id, entry) in obj {
+        let json = entry.get("json").cloned().unwrap_or(serde_json::Value::Null);
+        map.extend(build_pi_index(provider_id, &json));
+    }
+    Ok(map)
 }
 
 #[cfg(test)]

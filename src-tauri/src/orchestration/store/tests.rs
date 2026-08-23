@@ -23,9 +23,7 @@ fn routing_policy_upsert_get_fallback() {
         &RoutingPolicyRow {
             agent_id: "claude-code-cli".into(),
             role: "claude:researcher".into(),
-            preferred_endpoints: Some(r#"["ep-1"]"#.into()),
-            fallback_endpoints: Some(r#"["ep-2"]"#.into()),
-            allowed_models: None,
+            route_targets: Some(r#"[{\"endpoint\":\"ep-1\",\"model\":\"m\"},{\"endpoint\":\"ep-2\",\"model\":\"m\"}]"#.into()),
             migrate_on_quota: false,
             inject_cache_control: true,
             affinity_scope: "session".into(),
@@ -38,9 +36,7 @@ fn routing_policy_upsert_get_fallback() {
         &RoutingPolicyRow {
             agent_id: "claude-code-cli".into(),
             role: "*".into(),
-            preferred_endpoints: Some(r#"["ep-x"]"#.into()),
-            fallback_endpoints: None,
-            allowed_models: None,
+            route_targets: Some(r#"[{\"endpoint\":\"ep-x\",\"model\":\"m\"}]"#.into()),
             migrate_on_quota: true,
             inject_cache_control: false,
             affinity_scope: "task".into(),
@@ -60,7 +56,10 @@ fn routing_policy_upsert_get_fallback() {
     let p = routing_policy_for(&conn, "claude-code-cli", "claude:other", None).unwrap();
     assert_eq!(p.role, "*");
     assert!(!p.inject_cache_control);
-    assert_eq!(p.preferred_endpoints.as_deref(), Some(r#"["ep-x"]"#));
+    assert_eq!(
+        p.route_targets.as_deref(),
+        Some(r#"[{\"endpoint\":\"ep-x\",\"model\":\"m\"}]"#)
+    );
 }
 
 /// Lookup specificity with a budget tier in play: exact role > tier row >
@@ -76,9 +75,7 @@ fn routing_policy_tier_sits_between_role_and_catch_all() {
             &RoutingPolicyRow {
                 agent_id: "claude-code-cli".into(),
                 role: role.into(),
-                preferred_endpoints: Some(format!(r#"["{role}-ep"]"#).into()),
-                fallback_endpoints: None,
-                allowed_models: None,
+                route_targets: Some(format!(r#"[{{\"endpoint\":\"{role}-ep\",\"model\":\"m\"}}]"#).into()),
                 migrate_on_quota: true,
                 inject_cache_control: false,
                 affinity_scope: "task".into(),
@@ -101,9 +98,7 @@ fn routing_policy_tier_sits_between_role_and_catch_all() {
         &RoutingPolicyRow {
             agent_id: "claude-code-cli".into(),
             role: "claude:researcher".into(),
-            preferred_endpoints: Some(r#"["role-ep"]"#.into()),
-            fallback_endpoints: None,
-            allowed_models: None,
+            route_targets: Some(r#"[{\"endpoint\":\"role-ep\",\"model\":\"m\"}]"#.into()),
             migrate_on_quota: true,
             inject_cache_control: false,
             affinity_scope: "task".into(),

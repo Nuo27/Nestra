@@ -220,15 +220,15 @@ CREATE TABLE IF NOT EXISTS session_part (
 -- orchestration control plane
 -- =========================================================================
 
--- Per-(agent, subagent role) routing policy. The router reads this to decide
--- preferred/fallback endpoints, allowed models, migration behavior, cache
--- injection, and route-affinity scope. `role = '*'` is the catch-all default.
+-- Per-(agent, subagent role) routing policy. The router reads the ordered
+-- `route_targets` list: each entry pins one (endpoint, model) pair and the
+-- first healthy, quota-ok entry wins; failures walk the list. `role = '*'` is
+-- the mandatory catch-all (a request whose role matches no row routes via
+-- `*`; with no `*` row either, routing fails closed).
 CREATE TABLE IF NOT EXISTS routing_policy (
   agent_id             TEXT NOT NULL,
   role                 TEXT NOT NULL,
-  preferred_endpoints  TEXT,          -- JSON array of endpoint ids, in priority order
-  fallback_endpoints   TEXT,          -- JSON array of endpoint ids
-  allowed_models       TEXT,          -- JSON array of model-id globs, or NULL = any
+  route_targets        TEXT,          -- JSON array of {endpoint, model}, priority order; NULL = none
   migrate_on_quota     INTEGER NOT NULL DEFAULT 1,
   inject_cache_control INTEGER NOT NULL DEFAULT 0,
   affinity_scope       TEXT NOT NULL DEFAULT 'task',  -- 'task' | 'session' | 'none'
@@ -410,6 +410,132 @@ pub fn build_v1(conn: &Connection) -> AppResult<()> {
         "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)
          ON CONFLICT(version) DO UPDATE SET applied_at = excluded.applied_at",
         rusqlite::params![SCHEMA_VERSION, now],
+    )?;
+    migrate_legacy_routing_policy(conn)?;
+    Ok(())
+}
+
+/// Convert pre-route_targets `routing_policy` tables (preferred/fallback
+/// endpoint lists + allowed-models globs) to the ordered `route_targets`
+/// shape, in place and idempotently: legacy `preferred_endpoints` order
+/// first, `fallback_endpoints` appended, each entry's model = that
+/// endpoint's current `models_json.default` (first available model when no
+/// default is set); `allowed_models` is dropped. Endpoints with no resolvable
+/// model are skipped. A no-op on fresh databases (no legacy columns).
+fn migrate_legacy_routing_policy(conn: &Connection) -> AppResult<()> {
+    let legacy: i64 = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('routing_policy')
+         WHERE name IN ('preferred_endpoints', 'fallback_endpoints')",
+        [],
+        |r| r.get(0),
+    )?;
+    if legacy == 0 {
+        return Ok(());
+    }
+    // Model per endpoint: default model, else first available.
+    let mut endpoint_model: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, models_json FROM provider_endpoint")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        for row in rows {
+            let (id, models_json) = row?;
+            let model = models_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+                .and_then(|v| {
+                    v.get("default")
+                        .and_then(|d| d.as_str())
+                        .map(String::from)
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            v.get("available")
+                                .and_then(|a| a.as_array())
+                                .and_then(|a| a.first())
+                                .and_then(|m| m.as_str())
+                                .map(String::from)
+                        })
+                });
+            if let Some(m) = model {
+                endpoint_model.insert(id, m);
+            }
+        }
+    }
+    let legacy_rows: Vec<(String, String, Option<String>, Option<String>, i64, i64, String, i64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT agent_id, role, preferred_endpoints, fallback_endpoints,
+                    migrate_on_quota, inject_cache_control, affinity_scope, updated_at
+             FROM routing_policy",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    conn.execute_batch(
+        "CREATE TABLE routing_policy_migrated (
+           agent_id             TEXT NOT NULL,
+           role                 TEXT NOT NULL,
+           route_targets        TEXT,
+           migrate_on_quota     INTEGER NOT NULL DEFAULT 1,
+           inject_cache_control INTEGER NOT NULL DEFAULT 0,
+           affinity_scope       TEXT NOT NULL DEFAULT 'task',
+           updated_at           INTEGER NOT NULL,
+           PRIMARY KEY (agent_id, role)
+         );
+         DROP INDEX IF EXISTS idx_routing_policy_agent;",
+    )?;
+    for (agent_id, role, preferred, fallback, migrate, inject, affinity, updated_at) in legacy_rows {
+        let mut endpoint_order: Vec<String> = Vec::new();
+        for list in [preferred, fallback] {
+            if let Some(json) = list {
+                if let Ok(arr) = serde_json::from_str::<Vec<String>>(&json) {
+                    for id in arr {
+                        if !endpoint_order.iter().any(|e| e == &id) {
+                            endpoint_order.push(id);
+                        }
+                    }
+                }
+            }
+        }
+        let targets: Vec<serde_json::Value> = endpoint_order
+            .into_iter()
+            .filter_map(|ep| {
+                endpoint_model.get(&ep).map(|m| {
+                    serde_json::json!({ "endpoint": ep, "model": m })
+                })
+            })
+            .collect();
+        conn.execute(
+            "INSERT INTO routing_policy_migrated
+               (agent_id, role, route_targets, migrate_on_quota, inject_cache_control,
+                affinity_scope, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                agent_id,
+                role,
+                serde_json::to_string(&targets).unwrap_or_else(|_| "[]".into()),
+                migrate,
+                inject,
+                affinity,
+                updated_at,
+            ],
+        )?;
+    }
+    conn.execute_batch(
+        "DROP TABLE routing_policy;
+         ALTER TABLE routing_policy_migrated RENAME TO routing_policy;",
     )?;
     Ok(())
 }

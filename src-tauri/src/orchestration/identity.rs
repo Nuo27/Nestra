@@ -425,6 +425,10 @@ pub struct TaskContext {
     /// OpenAI). The router picks the matching `endpoint_protocol` row for the
     /// upstream base_url; `None` keeps the historical first-row behavior.
     pub protocol_hint: Option<ProviderKind>,
+    /// Endpoints that already failed on THIS request (set by the migration
+    /// loop before a re-resolve so the next attempt walks past them in the
+    /// policy's route-target list). Empty on the first attempt.
+    pub failed_endpoints: Vec<String>,
     /// Current lifecycle state.
     pub lifecycle: TaskLifecycle,
 }
@@ -452,6 +456,7 @@ impl TaskContext {
             budget_tier: None,
             required_capabilities: CapabilityReq::default(),
             protocol_hint: None,
+            failed_endpoints: Vec::new(),
             lifecycle: TaskLifecycle::Born,
         }
     }
@@ -481,7 +486,13 @@ pub enum RouteReason {
     Explicit,
     /// Task-grain route affinity reused the previous route (cache-friendly).
     Affinity,
+    /// First healthy entry of the policy's ordered route-target list.
+    /// (Historical rows may carry `capability`, the pre-route-targets
+    /// resolution reason.)
+    Policy,
     /// Capability-eligible endpoint, ranked best on cost/latency/cache.
+    /// Legacy: produced by the pre-route-targets resolver; historical
+    /// `route_request` rows still carry the string.
     Capability,
     /// Chosen as a fallback after a migration trigger (quota/rate-limit/5xx).
     Fallback,
@@ -494,6 +505,7 @@ impl RouteReason {
         match self {
             RouteReason::Explicit => "explicit",
             RouteReason::Affinity => "affinity",
+            RouteReason::Policy => "policy",
             RouteReason::Capability => "capability",
             RouteReason::Fallback => "fallback",
             RouteReason::NoEligible => "no_eligible",

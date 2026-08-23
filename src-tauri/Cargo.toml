@@ -26,7 +26,7 @@ tauri-plugin-opener = "2"
 # lock (transitive via auto-launch), so no new compile cost.
 winreg = "0.55"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 # Update-check version comparison. Already in the dependency tree
 # transitively, so declaring it directly adds no real compile cost.
 semver = "1"
@@ -64,6 +64,10 @@ http = "1"
 
 [dev-dependencies]
 tempfile = "3"
+# `#[tokio::test(start_paused = true)]` (e2e timeout tests) expands to
+# `Builder::start_paused`, which only exists under tokio's `test-util`
+# feature. Dev-only so the shipped binary never carries it.
+tokio = { version = "1", features = ["test-util"] }
 
 # Minimal-disk dev profile: deps ship zero debuginfo, the local crate keeps
 # line tables only (enough for panic backtraces). Incremental cache disabled

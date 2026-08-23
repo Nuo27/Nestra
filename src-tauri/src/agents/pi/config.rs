@@ -302,16 +302,39 @@ fn write_gateway_models(config_path: &Path, alias: &crate::config_writer::Gatewa
     );
     // openai-completions so Pi speaks Chat Completions -> OpenAI handler.
     provider.insert("api".into(), serde_json::Value::String("openai-completions".into()));
-    // One placeholder model nested under the alias; the router resolves the
-    // real model per-task. Pi's models schema has no limits field, so there is
-    // nothing to advertise here — the id alone is what Pi needs.
-    provider.insert(
-        "models".into(),
-        serde_json::Value::Array(vec![serde_json::json!({
-            "id": alias.model_alias.id,
-            "name": alias.model_alias.id,
-        })]),
+    // One model entry nested under the alias; the router resolves the real
+    // model per-task. Pi's models schema carries `contextWindow`/`maxTokens`
+    // — advertise the steady-state model's real limits so Pi doesn't fall
+    // back to its conservative default window. The `compat` block pins the
+    // OPENAI-COMPATIBLE conventions (system role, no store field,
+    // `max_tokens` field name): pi's defaults for an unknown provider are
+    // the newer OpenAI conventions (`developer` role, `store`,
+    // `max_completion_tokens`) which MiniMax-style backends reject with
+    // "[1214] Incorrect role information" — observed via opencode-go. The
+    // gateway bridges whatever dialect the upstream actually speaks.
+    let mut model = serde_json::Map::new();
+    model.insert("id".into(), serde_json::Value::String(alias.model_alias.id.clone()));
+    model.insert("name".into(), serde_json::Value::String(alias.model_alias.id.clone()));
+    model.insert(
+        "compat".into(),
+        serde_json::json!({
+            "supportsDeveloperRole": false,
+            "supportsStore": false,
+            "maxTokensField": "max_tokens",
+        }),
     );
+    if let Some(abilities) = &alias.model_alias.abilities {
+        if let Some(limit) = &abilities.limit {
+            model.insert("contextWindow".into(), serde_json::Value::from(limit.context));
+            model.insert("maxTokens".into(), serde_json::Value::from(limit.output));
+        }
+        if let Some(reasoning) = abilities.reasoning {
+            model.insert("reasoning".into(), serde_json::Value::from(reasoning));
+        }
+    }
+    provider.insert("models".into(), serde_json::Value::Array(vec![
+        serde_json::Value::Object(model),
+    ]));
     providers.insert("nestra-gw".into(), serde_json::Value::Object(provider));
     let bytes = serde_json::to_vec_pretty(&root)?;
     atomic_write(config_path, &bytes)
