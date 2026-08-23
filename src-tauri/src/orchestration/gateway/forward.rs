@@ -222,6 +222,7 @@ pub async fn run_with_migration(
                 record_attempt_outcome(
                     state,
                     &route.endpoint_id,
+                    &route.model,
                     &request_id,
                     status.as_u16(),
                     None, // Ok — clears quota + resets health
@@ -300,6 +301,7 @@ pub async fn run_with_migration(
         record_attempt_outcome(
             state,
             &route.endpoint_id,
+            &route.model,
             &request_id,
             outcome.record_status(),
             Some(class),
@@ -525,6 +527,7 @@ fn tool_names_json(names: &Option<std::collections::BTreeMap<String, u64>>) -> O
 pub async fn record_attempt_outcome(
     state: &GatewayState,
     endpoint_id: &str,
+    model: &str,
     request_id: &str,
     status: u16,
     class: Option<FailureClass>,
@@ -539,7 +542,7 @@ pub async fn record_attempt_outcome(
             None => HealthOutcome::Ok,
             Some(c) => HealthOutcome::Fail(c),
         };
-        state.health.record(endpoint_id, outcome, status);
+        state.health.record(endpoint_id, model, outcome, status);
         match outcome {
             HealthOutcome::Ok => state.quota.clear_exhausted(endpoint_id),
             HealthOutcome::Fail(FailureClass::QuotaExhausted) => {

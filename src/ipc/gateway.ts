@@ -108,6 +108,8 @@ export interface GatewayTuning {
 
 export interface EndpointHealthSnap {
   endpoint_id: string;
+  /** The specific model whose circuit tripped ("" = legacy any-model row). */
+  model: string;
   state: "closed" | "open" | "half_open";
   consecutive_failures: number;
   last_failure: string | null;

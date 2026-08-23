@@ -271,6 +271,9 @@ const PERSIST_KEY: &str = "provider_health";
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct DegradedEntry {
     endpoint_id: String,
+    /// Empty for pre-model-grain rows — restored as an any-model circuit.
+    #[serde(default)]
+    model: String,
     #[serde(alias = "degraded_at_ms")]
     opened_at_ms: i64,
     class: FailureClass,
@@ -306,10 +309,10 @@ impl ProviderHealth {
     /// machine (see [`BreakerState`]). Parameters come from the live tuning
     /// slot; the lazy `Open → HalfOpen` transition is applied first so a
     /// probe outcome lands in the right state.
-    pub fn record(&self, endpoint_id: &str, outcome: HealthOutcome, status: u16) {
+    pub fn record(&self, endpoint_id: &str, model: &str, outcome: HealthOutcome, status: u16) {
         let tuning = crate::orchestration::gateway::tuning::snapshot(&self.tuning);
         let mut map = self.inner.lock().expect("health lock poisoned");
-        let h = map.entry(endpoint_id.to_string()).or_default();
+        let h = map.entry(target_key(endpoint_id, model)).or_default();
         let now = chrono::Utc::now().timestamp_millis();
         let recovery_wait_ms = (tuning.breaker_recovery_wait_secs as i64) * 1000;
         let state = h.effective_state(now, recovery_wait_ms);
@@ -394,52 +397,36 @@ impl ProviderHealth {
         }
     }
 
-    /// Snapshot the health for one endpoint (defaulted if unseen).
-    pub fn get(&self, endpoint_id: &str) -> EndpointHealth {
+    /// Snapshot the health for one (endpoint, model) target (defaulted if
+    /// unseen).
+    pub fn get(&self, endpoint_id: &str, model: &str) -> EndpointHealth {
         let map = self.inner.lock().expect("health lock poisoned");
-        map.get(endpoint_id)
+        map.get(&target_key(endpoint_id, model))
             .cloned()
             .unwrap_or_default()
     }
 
-    /// All endpoints the router should consider eligible (breaker not Open).
-    pub fn eligible(&self, candidates: &[String]) -> Vec<String> {
+    /// `true` if the (endpoint, model) target's circuit is Open (excluded).
+    /// A legacy persisted row without a model (key `"<endpoint>/"`) excludes
+    /// EVERY model on that endpoint for its TTL window — pre-model-grain
+    /// state shouldn't silently resurrect. A HalfOpen
+    /// endpoint (recovery wait elapsed) is eligible — the next request is
+    /// the probe.
+    pub fn is_degraded(&self, endpoint_id: &str, model: &str) -> bool {
         let recovery_wait_ms = self.recovery_wait_ms();
         let now = chrono::Utc::now().timestamp_millis();
         let map = self.inner.lock().expect("health lock poisoned");
-        candidates
-            .iter()
-            .filter(|id| {
-                !map.get(*id)
-                    .map(|h| {
-                        matches!(
-                            h.effective_state(now, recovery_wait_ms),
-                            BreakerState::Open { .. }
-                        )
-                    })
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .collect()
-    }
-
-    /// `true` if the endpoint's circuit is Open (excluded). A HalfOpen
-    /// endpoint (recovery wait elapsed) is eligible — the next request is
-    /// the probe.
-    pub fn is_degraded(&self, endpoint_id: &str) -> bool {
-        let recovery_wait_ms = self.recovery_wait_ms();
-        let now = chrono::Utc::now().timestamp_millis();
-        self.inner
-            .lock()
-            .expect("health lock poisoned")
-            .get(endpoint_id)
-            .map(|h| {
-                matches!(
-                    h.effective_state(now, recovery_wait_ms),
-                    BreakerState::Open { .. }
-                )
-            })
-            .unwrap_or(false)
+        let open = |k: String| {
+            map.get(&k)
+                .map(|h| {
+                    matches!(
+                        h.effective_state(now, recovery_wait_ms),
+                        BreakerState::Open { .. }
+                    )
+                })
+                .unwrap_or(false)
+        };
+        open(target_key(endpoint_id, model)) || open(target_key(endpoint_id, ""))
     }
 
     fn recovery_wait_ms(&self) -> i64 {
@@ -464,10 +451,12 @@ impl ProviderHealth {
         let map = self.inner.lock().expect("health lock poisoned");
         let mut out: Vec<EndpointHealthSnap> = map
             .iter()
-            .map(|(id, h)| {
+            .map(|(key, h)| {
+                let (endpoint_id, model) = split_target_key(key);
                 let state = h.effective_state(now, recovery_wait_ms);
                 EndpointHealthSnap {
-                    endpoint_id: id.clone(),
+                    endpoint_id,
+                    model,
                     state: match state {
                         BreakerState::Closed => "closed",
                         BreakerState::Open { .. } => "open",
@@ -485,7 +474,7 @@ impl ProviderHealth {
                 }
             })
             .collect();
-        out.sort_by(|a, b| a.endpoint_id.cmp(&b.endpoint_id));
+        out.sort_by(|a, b| (&a.endpoint_id, &a.model).cmp(&(&b.endpoint_id, &b.model)));
         out
     }
 
@@ -538,7 +527,7 @@ impl ProviderHealth {
                 continue;
             }
             map.insert(
-                e.endpoint_id,
+                target_key(&e.endpoint_id, &e.model),
                 EndpointHealth {
                     breaker: BreakerState::Open {
                         opened_at_ms: e.opened_at_ms,
@@ -562,6 +551,8 @@ impl ProviderHealth {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EndpointHealthSnap {
     pub endpoint_id: String,
+    /// The specific model whose circuit tripped ("" = legacy any-model row).
+    pub model: String,
     /// "closed" | "open" | "half_open".
     pub state: &'static str,
     pub consecutive_failures: u32,
@@ -587,17 +578,34 @@ fn fresh_degraded_entries(
                 BreakerState::Open { .. }
             )
         })
-        .map(|(id, h)| DegradedEntry {
-            endpoint_id: id.clone(),
-            opened_at_ms: match h.breaker {
-                BreakerState::Open { opened_at_ms } => opened_at_ms,
-                _ => now_ms,
-            },
-            class: h.last_failure.unwrap_or(FailureClass::Unknown),
+        .map(|(key, h)| {
+            let (endpoint_id, model) = split_target_key(key);
+            DegradedEntry {
+                endpoint_id,
+                model,
+                opened_at_ms: match h.breaker {
+                    BreakerState::Open { opened_at_ms } => opened_at_ms,
+                    _ => now_ms,
+                },
+                class: h.last_failure.unwrap_or(FailureClass::Unknown),
+            }
         })
         .collect();
     entries.sort_by(|a, b| a.endpoint_id.cmp(&b.endpoint_id));
     entries
+}
+
+/// Composite breaker key: endpoint ids are slugs without `/`, so
+/// `"{endpoint}/{model}"` is collision-free.
+fn target_key(endpoint_id: &str, model: &str) -> String {
+    format!("{endpoint_id}/{model}")
+}
+
+fn split_target_key(key: &str) -> (String, String) {
+    match key.split_once('/') {
+        Some((ep, model)) => (ep.to_string(), model.to_string()),
+        None => (key.to_string(), String::new()),
+    }
 }
 
 #[cfg(test)]

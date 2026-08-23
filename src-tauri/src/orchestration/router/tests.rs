@@ -204,6 +204,7 @@ fn degraded_target_is_skipped() {
     for _ in 0..3 {
         env.health.record(
             "ep-1",
+            "m-1",
             crate::orchestration::health::HealthOutcome::Fail(
                 crate::orchestration::health::FailureClass::Temp5xx,
             ),

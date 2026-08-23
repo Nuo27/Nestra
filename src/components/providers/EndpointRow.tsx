@@ -141,6 +141,7 @@ export function BreakerBadge({ endpointId }: { endpointId: string }) {
       >
         <Badge tone="danger" variant="soft">
           {t("providers.breakerOpen")}
+          {snap.model ? ` · ${snap.model}` : ""}
         </Badge>
       </Tip>
     );

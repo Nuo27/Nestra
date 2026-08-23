@@ -312,7 +312,7 @@ pub fn resolve(ctx: &TaskContext, inputs: &RouterInputs<'_>) -> AppResult<Resolv
     // caller's stated intent.
     if let (Some(ep), Some(model)) = (&ctx.requested_provider, &ctx.requested_model) {
         if endpoint_exists(inputs.conn, ep)?
-            && !inputs.health.is_degraded(ep)
+            && !inputs.health.is_degraded(ep, model)
             && !inputs.quota.is_exhausted(ep)
         {
             let route = build_route(ctx, ep, model, RouteReason::Explicit, inputs, policy.inject_cache_control)?;
@@ -324,7 +324,7 @@ pub fn resolve(ctx: &TaskContext, inputs: &RouterInputs<'_>) -> AppResult<Resolv
     // 2. Affinity (cache-friendly reuse).
     if let Some((ep, model)) = inputs.affinity.lookup(ctx, scope) {
         if endpoint_exists(inputs.conn, &ep)?
-            && !inputs.health.is_degraded(&ep)
+            && !inputs.health.is_degraded(&ep, &model)
             && !inputs.quota.is_exhausted(&ep)
         {
             let route = build_route(ctx, &ep, &model, RouteReason::Affinity, inputs, policy.inject_cache_control)?;
@@ -422,7 +422,9 @@ fn pick_by_targets(
             );
             continue;
         }
-        if inputs.health.is_degraded(&target.endpoint) || inputs.quota.is_exhausted(&target.endpoint) {
+        if inputs.health.is_degraded(&target.endpoint, &target.model)
+                || inputs.quota.is_exhausted(&target.endpoint)
+            {
             continue;
         }
         return Ok(Some((
@@ -460,7 +462,7 @@ pub fn failover_targets(
         if !endpoint_exists(inputs.conn, &target.endpoint)? {
             continue;
         }
-        if inputs.health.is_degraded(&target.endpoint)
+        if inputs.health.is_degraded(&target.endpoint, &target.model)
             || inputs.quota.is_exhausted(&target.endpoint)
         {
             continue;
