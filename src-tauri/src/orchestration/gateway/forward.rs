@@ -202,7 +202,16 @@ pub async fn run_with_migration(
             let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         }
 
+        // Agent-disconnect honesty: if hyper drops this handler future
+        // WHILE the attempt is in flight (the client vanished — its
+        // connection error, not an upstream outcome), the attempt row would
+        // dangle born/NULL forever. The guard finalizes it as 499 (the
+        // client-closed convention) on drop; disarmed the moment `forward`
+        // completes, because every completed outcome is recorded normally.
+        let mut abort_guard =
+            AttemptGuard::new(state.clone(), request_id.clone(), ctx.task_id);
         let mut outcome = forward(&ctx, &route).await;
+        abort_guard.disarm();
         attempts += 1;
 
         // Extract what the failure path needs, by reference. On SUCCESS we
@@ -631,6 +640,89 @@ async fn mark_task_terminal(state: &GatewayState, task_id: &uuid::Uuid, terminal
 /// locked DB defers fast; retries run at the connection's normal timeout.
 /// Attempt-START rows deliberately stay synchronous — the usage backfill
 /// targets them by request_id, so their ordering must not float.
+/// Finalize an attempt whose AGENT vanished mid-flight as `http_status`
+/// 499 (client closed request — the nginx convention) instead of leaving a
+/// born/NULL row. Observability-grade: lock-escaped, best-effort.
+pub(super) async fn finalize_client_aborted(
+    state: &GatewayState,
+    request_id: &str,
+    task_id: &uuid::Uuid,
+) {
+    let request_id = request_id.to_string();
+    let task_id = *task_id;
+    observability_write(state, "finalize client-aborted attempt", move |conn| {
+        store::update_route_request_outcome(
+            conn,
+            &request_id,
+            Some(499),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            chrono::Utc::now().timestamp_millis(),
+        )?;
+        // The streaming body only knows its request_id — resolve the task
+        // from the attempt row when the caller couldn't supply one.
+        let task = if task_id.is_nil() {
+            conn.query_row(
+                "SELECT task_id FROM route_request WHERE request_id = ?1",
+                rusqlite::params![request_id],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+        } else {
+            Some(task_id.to_string())
+        };
+        if let Some(t) = task {
+            store::set_task_lifecycle(
+                conn,
+                &t,
+                TaskLifecycle::Failed,
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+        }
+        Ok(())
+    })
+    .await;
+}
+
+/// Drop guard around one in-flight attempt: armed before `forward`, disarmed
+/// after. Dropped-while-armed means the handler future was cancelled (agent
+/// disconnected) — see [`finalize_client_aborted`].
+pub(super) struct AttemptGuard {
+    state: Option<GatewayState>,
+    request_id: String,
+    task_id: uuid::Uuid,
+}
+
+impl AttemptGuard {
+    fn new(state: GatewayState, request_id: String, task_id: uuid::Uuid) -> Self {
+        Self {
+            state: Some(state),
+            request_id,
+            task_id,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.state = None;
+    }
+}
+
+impl Drop for AttemptGuard {
+    fn drop(&mut self) {
+        let Some(state) = self.state.take() else { return };
+        let request_id = std::mem::take(&mut self.request_id);
+        let task_id = self.task_id;
+        tokio::spawn(async move {
+            finalize_client_aborted(&state, &request_id, &task_id).await;
+        });
+    }
+}
+
 async fn observability_write(
     state: &GatewayState,
     what: &'static str,

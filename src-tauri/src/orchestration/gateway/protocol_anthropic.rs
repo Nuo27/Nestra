@@ -889,6 +889,29 @@ impl ObservingBody {
     }
 }
 
+impl Drop for ObservingBody {
+    /// The agent dropped the response body mid-stream (disconnect / abort):
+    /// fire the normal finish bookkeeping (usage backfill) and finalize the
+    /// attempt honestly as 499 — without this a vanished client leaves a
+    /// NULL-status route_request row forever.
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        self.finish();
+        let state = self.state.clone();
+        let request_id = std::mem::take(&mut self.request_id);
+        tokio::spawn(async move {
+            super::forward::finalize_client_aborted(
+                &state,
+                &request_id,
+                &uuid::Uuid::nil(),
+            )
+            .await;
+        });
+    }
+}
+
 /// Dispatch one complete-lines text window to the upstream-dialect observer.
 fn observe_wire_chunk(
     wire: ProviderKind,

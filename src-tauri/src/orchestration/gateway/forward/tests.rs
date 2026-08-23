@@ -423,3 +423,67 @@ async fn locked_db_defers_observability_write_instead_of_stalling() {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
 }
+
+
+/// The disconnect-honesty guard: dropped while ARMED (the agent vanished
+/// mid-attempt) finalizes the attempt as 499 + task failed; disarmed drops
+/// write nothing.
+#[tokio::test]
+async fn armed_guard_drop_finalizes_as_499() {
+    let state = gateway_state(rusqlite::Connection::open_in_memory().unwrap());
+    let ctx = TaskContext::new_task("claude-code-cli", Some("sess-1".to_string()));
+    let route = ok_route("ep-1", &ctx);
+    {
+        let conn = state.db.lock().await;
+        crate::db::create_endpoint(&conn, "ep-1", "anthropic", "Test").unwrap();
+        let rec = RouteRecord::from_route(&ctx, &route, 0);
+        record_attempt_start(&conn, &ctx, &rec);
+    }
+
+    let mut guard = AttemptGuard::new(state.clone(), ctx.request_id.to_string(), ctx.task_id);
+    guard.disarm();
+    drop(guard);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    {
+        let conn = state.db.lock().await;
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM route_request WHERE http_status = 499", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "disarmed guard must not write");
+    }
+
+    // Re-arm for a second attempt row and drop WITHOUT disarming.
+    let ctx2 = TaskContext::new_task("claude-code-cli", Some("sess-2".to_string()));
+    let route2 = ok_route("ep-1", &ctx2);
+    {
+        let conn = state.db.lock().await;
+        let rec = RouteRecord::from_route(&ctx2, &route2, 0);
+        record_attempt_start(&conn, &ctx2, &rec);
+    }
+    let guard = AttemptGuard::new(state.clone(), ctx2.request_id.to_string(), ctx2.task_id);
+    drop(guard);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let done = {
+            let conn = state.db.lock().await;
+            let (st,): (Option<i64>,) = conn
+                .query_row(
+                    "SELECT http_status FROM route_request WHERE request_id = ?1",
+                    [&ctx2.request_id.to_string()],
+                    |r| Ok((r.get(0)?,)),
+                )
+                .unwrap();
+            let st = st.unwrap_or(0);
+            let lc: String = conn
+                .query_row("SELECT lifecycle FROM task WHERE id = ?1", [&ctx2.task_id.to_string()], |r| r.get(0))
+                .unwrap_or_default();
+            st == 499 && lc == "failed"
+        };
+        if done {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "499 finalize must land after drop");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
