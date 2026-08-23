@@ -30,6 +30,28 @@ use serde_json::{Map, Value};
 
 type InnerStream = BoxBody<Bytes, std::io::Error>;
 
+/// Flat Responses-wire event (output_item.added / deltas / dones): the data
+/// carries `type` + the event fields at the same level — official clients
+/// deserialize by the `type` discriminator, so it must be present.
+fn sse_typed(event: &str, mut data: Value) -> Bytes {
+    if let Some(obj) = data.as_object_mut() {
+        obj.entry("type".to_string())
+            .or_insert_with(|| Value::String(event.to_string()));
+    }
+    sse(event, data)
+}
+
+/// Response-level event (created / completed / incomplete / failed): the
+/// response object is WRAPPED — `{"type": <event>, "response": {...}}`. A
+/// bare response object as the payload is an unknown event to codex / the
+/// openai SDKs (the discriminator never fires).
+fn sse_response(event: &str, resp: Map<String, Value>) -> Bytes {
+    sse(
+        event,
+        serde_json::json!({"type": event, "response": Value::Object(resp)}),
+    )
+}
+
 /// SSE framing helper: `event: <name>\ndata: <json>\n\n`. An empty event
 /// name emits a bare `data:` frame (chat chunks convention).
 fn sse(event: &str, data: Value) -> Bytes {
@@ -1315,8 +1337,8 @@ impl ChatToResponsesStream {
         self.message_open = true;
         let mut resp = self.response_skeleton("in_progress");
         resp.insert("output".into(), Value::Array(vec![]));
-        self.out.extend_from_slice(&sse("response.created", Value::Object(resp)));
-        self.out.extend_from_slice(&sse(
+        self.out.extend_from_slice(&sse_response("response.created", resp));
+        self.out.extend_from_slice(&sse_typed(
             "response.output_item.added",
             serde_json::json!({
                 "output_index": 0,
@@ -1356,7 +1378,7 @@ impl ChatToResponsesStream {
             if !text.is_empty() {
                 self.ensure_message_item();
                 self.message_text.push_str(text);
-                self.out.extend_from_slice(&sse(
+                self.out.extend_from_slice(&sse_typed(
                     "response.output_text.delta",
                     serde_json::json!({
                         "item_id": "msg-nestra",
@@ -1407,7 +1429,7 @@ impl ChatToResponsesStream {
                 let announce = !entry.open;
                 entry.open = true;
                 if announce {
-                    self.out.extend_from_slice(&sse(
+                    self.out.extend_from_slice(&sse_typed(
                         "response.output_item.added",
                         serde_json::json!({
                             "output_index": output_index,
@@ -1423,7 +1445,7 @@ impl ChatToResponsesStream {
                     ));
                 }
                 if !frag.is_empty() {
-                    self.out.extend_from_slice(&sse(
+                    self.out.extend_from_slice(&sse_typed(
                         "response.function_call_arguments.delta",
                         serde_json::json!({
                             "item_id": item_id,
@@ -1449,7 +1471,7 @@ impl ChatToResponsesStream {
         self.finished = true;
         let mut output: Vec<Value> = Vec::new();
         if self.message_open {
-            self.out.extend_from_slice(&sse(
+            self.out.extend_from_slice(&sse_typed(
                 "response.output_text.done",
                 serde_json::json!({
                     "item_id": "msg-nestra",
@@ -1469,7 +1491,7 @@ impl ChatToResponsesStream {
                     "annotations": [],
                 }],
             }));
-            self.out.extend_from_slice(&sse(
+            self.out.extend_from_slice(&sse_typed(
                 "response.output_item.done",
                 serde_json::json!({
                     "output_index": 0,
@@ -1489,7 +1511,7 @@ impl ChatToResponsesStream {
                 "status": "completed",
             });
             output.push(item.clone());
-            self.out.extend_from_slice(&sse(
+            self.out.extend_from_slice(&sse_typed(
                 "response.output_item.done",
                 serde_json::json!({
                     "output_index": tool.output_index,
@@ -1519,7 +1541,7 @@ impl ChatToResponsesStream {
             );
         }
         let event = if incomplete { "response.incomplete" } else { "response.completed" };
-        self.out.extend_from_slice(&sse(event, Value::Object(resp)));
+        self.out.extend_from_slice(&sse_response(event, resp));
         self.done = true;
     }
 
@@ -1534,7 +1556,7 @@ impl ChatToResponsesStream {
             "error".into(),
             serde_json::json!({ "code": "nestra_upstream_error", "message": message }),
         );
-        self.out.extend_from_slice(&sse("response.failed", Value::Object(resp)));
+        self.out.extend_from_slice(&sse_response("response.failed", resp));
     }
 
     /// Process buffered chat chunks; `Ok(true)` = caller should yield.

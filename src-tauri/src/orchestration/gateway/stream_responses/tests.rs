@@ -331,8 +331,9 @@ fn chat_to_responses_stream_emits_codex_event_sequence() {
     let done = data_payload(&sse_text, "response.output_text.done");
     assert_eq!(done["text"], "hello");
     let completed = data_payload(&sse_text, "response.completed");
-    assert_eq!(completed["status"], "completed");
-    assert_eq!(completed["output"][0]["content"][0]["text"], "hello");
+    assert_eq!(completed["type"], "response.completed");
+    assert_eq!(completed["response"]["status"], "completed");
+    assert_eq!(completed["response"]["output"][0]["content"][0]["text"], "hello");
 }
 
 #[test]
@@ -370,14 +371,14 @@ fn chat_to_responses_stream_tools_and_usage() {
     assert_eq!(added["item"]["call_id"], "c1");
     assert_eq!(added["output_index"], 1);
     let completed = data_payload(&sse_text, "response.completed");
-    let fc = completed["output"]
+    let fc = completed["response"]["output"]
         .as_array()
         .unwrap()
         .iter()
         .find(|i| i["type"] == "function_call")
         .unwrap();
     assert_eq!(fc["arguments"], "{\"cmd\":\"ls\"}");
-    assert_eq!(completed["usage"]["total_tokens"], 10);
+    assert_eq!(completed["response"]["usage"]["total_tokens"], 10);
 }
 
 #[test]
@@ -386,6 +387,98 @@ fn chat_to_responses_stream_error_becomes_failed() {
         "data: {\"error\":{\"message\":\"boom\"}}\n\n",
     ))));
     let failed = data_payload(&sse_text, "response.failed");
-    assert_eq!(failed["status"], "failed");
-    assert_eq!(failed["error"]["message"], "boom");
+    assert_eq!(failed["response"]["status"], "failed");
+    assert_eq!(failed["response"]["error"]["message"], "boom");
+}
+
+
+/// Strict client-state-machine replay (the codex-rs consumption model):
+/// every event parses, dispatches on `type`, references an ANNOUNCED item,
+/// and the sequence closes with a terminal event carrying usage — the
+/// zcode-class failure (a malformed first/terminal event killing the
+/// client's stream consumer) must be impossible on this wire.
+#[test]
+fn chat_to_responses_stream_survives_strict_client_replay() {
+    let final_chunk = serde_json::json!({
+        "id": "chatcmpl-x", "object": "chat.completion.chunk", "model": "glm-5.3",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+    })
+    .to_string();
+    let upstream = [
+        chat_chunk(serde_json::json!({"content": "he"}), None),
+        chat_chunk(
+            serde_json::json!({"content": "llo", "tool_calls": [
+                {"index": 0, "id": "c1", "function": {"name": "bash", "arguments": "{\"cmd\":\"ls\"}"}}
+            ]}),
+            None,
+        ),
+        final_chunk,
+    ].join("
+
+data: ");
+    let sse_text = collect_all(ChatToResponsesStream::new(Full::new(frame(&format!(
+        "data: {upstream}
+
+data: [DONE]
+
+",
+    )))));
+    let mut announced: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut saw_created = false;
+    let mut terminal: Option<&str> = None;
+    let mut events = 0usize;
+    for block in sse_text.split("
+
+") {
+        let (name, data) = match block.strip_prefix("event: ") {
+            Some(rest) => match rest.split_once("
+data: ") {
+                Some((n, d)) => (n.trim(), d.trim()),
+                None => panic!("malformed frame: {block:?}"),
+            },
+            None => continue,
+        };
+        events += 1;
+        assert!(terminal.is_none(), "no event may follow the terminal {terminal:?}");
+        let v: serde_json::Value = serde_json::from_str(data)
+            .unwrap_or_else(|e| panic!("event {name} payload must parse: {e}"));
+        match name {
+            "response.created" => {
+                assert_eq!(v["response"]["status"], "in_progress");
+                assert_eq!(v["response"]["object"], "response");
+                saw_created = true;
+            }
+            "response.output_item.added" => {
+                assert!(saw_created, "item added before response.created");
+                let id = v["item"]["id"].as_str().expect("item.id").to_string();
+                assert!(v["item"]["status"] == "in_progress");
+                announced.insert(id);
+            }
+            "response.output_text.delta" | "response.function_call_arguments.delta" => {
+                let id = v["item_id"].as_str().expect("delta.item_id").to_string();
+                assert!(announced.contains(&id), "delta for unannounced item {id}");
+                assert!(v["delta"].is_string(), "delta payload must be a string");
+            }
+            "response.output_text.done" => {
+                assert!(v["text"].is_string(), "text done carries full text");
+            }
+            "response.output_item.done" => {
+                let id = v["item"]["id"].as_str().expect("done.item.id").to_string();
+                assert!(announced.contains(&id), "done for unannounced item {id}");
+                assert_eq!(v["item"]["status"], "completed");
+            }
+            "response.completed" => {
+                assert!(v["response"]["usage"]["input_tokens"].is_u64(), "terminal carries usage: {v}");
+                assert!(v["response"]["usage"]["total_tokens"].is_u64());
+                assert!(v["response"]["output"].as_array().unwrap().len() == 2);
+                terminal = Some(name);
+            }
+            "response.failed" | "response.incomplete" => terminal = Some(name),
+            other => panic!("unknown event type {other}"),
+        }
+    }
+    assert!(saw_created, "stream must open with response.created");
+    assert_eq!(terminal, Some("response.completed"), "stream must close with a terminal event");
+    assert!(events >= 8, "expected the full event chain, got {events}");
 }
