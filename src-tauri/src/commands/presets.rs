@@ -401,22 +401,17 @@ pub fn provider_presets() -> Vec<ProviderPreset> {
         ProviderPreset {
             id: "opencode-go".into(),
             display_name: "OpenCode Go".into(),
-            // The gateway serves both protocols on the SAME base_url
-            // (verified: /v1/chat/completions, /v1/responses, /v1/messages).
-            // Dual rows let every agent bind in Direct mode: Claude Code
-            // (anthropic-only) picks the anthropic row, OpenCode/Pi the
-            // openai row. The per-model protocol map (model_abilities
-            // corrections) filters which models are written per row.
-            protocols: vec![
-                ProtocolInfo {
-                    protocol: "anthropic".into(),
-                    base_url: "https://opencode.ai/zen/go/v1".into(),
-                },
-                ProtocolInfo {
-                    protocol: "openai-comp".into(),
-                    base_url: "https://opencode.ai/zen/go/v1".into(),
-                },
-            ],
+            // Chat Completions ONLY, per https://opencode.ai/docs/go
+            // (@ai-sdk/openai-compatible). The anthropic wire on this base
+            // returns 500 (probe-verified) — an earlier "dual rows" preset
+            // made Direct binds default to the dead anthropic protocol and
+            // every Direct attempt failed; keep the single official wire.
+            // Anthropic-only agents (Claude Code) reach this provider via
+            // the GATEWAY's anthropic->chat bridge, not Direct.
+            protocols: vec![ProtocolInfo {
+                protocol: "openai-comp".into(),
+                base_url: "https://opencode.ai/zen/go/v1".into(),
+            }],
             // The Go plan's flagship model (1M context).
             default_model: Some("deepseek-v4-flash".into()),
             // Usage is scraped from the authenticated dashboard (cookie +

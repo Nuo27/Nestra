@@ -12,16 +12,15 @@ fn provider_presets_sorted_alphabetically_with_custom_last() {
     let mut sorted = names[..names.len() - 1].to_vec();
     sorted.sort_by_key(|s| s.to_lowercase());
     assert_eq!(&names[..names.len() - 1], sorted.as_slice());
-    // OpenCode Go present with its dual-protocol rows (same gateway)
-    // + Go plan default model.
+    // OpenCode Go: chat-completions ONLY (the anthropic wire on that base
+    // 500s — an earlier dual-row preset made Direct binds default to it).
     let go = presets
         .iter()
         .find(|p| p.id == "opencode-go")
         .expect("opencode-go preset");
-    assert_eq!(go.protocols.len(), 2);
-    assert_eq!(go.protocols[0].protocol, "anthropic");
-    assert_eq!(go.protocols[1].protocol, "openai-comp");
-    assert!(go.protocols.iter().all(|p| p.base_url == "https://opencode.ai/zen/go/v1"));
+    assert_eq!(go.protocols.len(), 1);
+    assert_eq!(go.protocols[0].protocol, "openai-comp");
+    assert_eq!(go.protocols[0].base_url, "https://opencode.ai/zen/go/v1");
     assert_eq!(go.default_model.as_deref(), Some("deepseek-v4-flash"));
 }
 
