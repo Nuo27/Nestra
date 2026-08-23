@@ -79,6 +79,12 @@ export function ProviderConfigPanel({
   const initialSelected = multi
     ? new Set(boundIds)
     : new Set(agent.active_provider_id ? [agent.active_provider_id] : []);
+  // Stable identity for the effect below: `boundIds` is a fresh Set every
+  // render, so depending on the OBJECT would re-fire the effect on every
+  // render — setSelected(new Set(...)) each time = an unbounded re-render
+  // loop that froze the whole panel (no click ever landed). A sorted string
+  // key changes only when the bound set actually changes.
+  const boundKey = [...boundIds].sort().join(",");
   const [selected, setSelected] = useState<Set<string>>(() => initialSelected);
   const [defaultId, setDefaultId] = useState<string | null>(
     agent.active_provider_id ?? null,
@@ -121,7 +127,7 @@ export function ProviderConfigPanel({
       return changed ? merged : prev;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agent.id, agent.active_provider_id, boundIds, multi]);
+  }, [agent.id, agent.active_provider_id, boundKey, multi]);
 
   const dirty =
     selected.size !== boundIds.size ||
