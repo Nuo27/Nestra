@@ -51,29 +51,37 @@ use super::stream::{
 };
 use super::GatewayState;
 
-/// The hyper client used to dial upstreams. Cheap to clone (it pools
-/// connections).
-///
-/// NOTE: this is rebuilt on every call — the doc below previously claimed
-/// "built once per gateway process", but there is no caching (no `OnceLock`/
-/// static) and each `forward_one` constructs a fresh `HttpsConnector` +
-/// `Client`, re-reading system TLS roots per request. That is a known
-/// performance gap (no connection reuse across requests), tracked
-/// separately; this doc describes reality, not the intended design.
-/// Public to the sibling OpenAI handler so both protocols share one client.
+/// The shared hyper client used to dial upstreams: ONE per process, created
+/// on first use and pooled from then on (hyper-util's Client reuses
+/// keep-alive connections internally, so repeat requests to the same
+/// provider skip the TLS handshake — a per-request client paid it every
+/// time, a measured 100-300ms tax on every routed call).
+/// Public to the sibling OpenAI/Responses handlers so all dials share one
+/// pool.
+fn shared_upstream_client() -> &'static Client<HttpsConnector<HttpConnector>, GatewayBody> {
+    static CLIENT: std::sync::OnceLock<Client<HttpsConnector<HttpConnector>, GatewayBody>> =
+        std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        // HTTPS-aware connector: real upstreams (z-ai, MiniMax, …) are HTTPS
+        // and a bare `HttpConnector` fails every such dial ("unsupported
+        // scheme"). System root store (Windows CA) via rustls-native-certs;
+        // HTTP stays supported so mock/test upstreams keep working.
+        let https = HttpsConnectorBuilder::new()
+            .with_native_roots()
+            .expect("system TLS roots must load")
+            .https_or_http()
+            .enable_http1()
+            .enable_http2()
+            .build();
+        Client::builder(hyper_util::rt::TokioExecutor::new()).build(https)
+    })
+}
+
+/// Back-compat alias for the dial sites: returns a clone of the shared
+/// client (hyper `Client` is a cheap `Arc` handle — cloning does NOT create
+/// a new pool).
 pub(super) fn upstream_client() -> Client<HttpsConnector<HttpConnector>, GatewayBody> {
-    // HTTPS-aware connector: real upstreams (z-ai, MiniMax, …) are HTTPS and
-    // a bare `HttpConnector` fails every such dial ("unsupported scheme").
-    // System root store (Windows CA) via rustls-native-certs; HTTP stays
-    // supported so mock/test upstreams keep working. Keep-alive on by default.
-    let https = HttpsConnectorBuilder::new()
-        .with_native_roots()
-        .expect("system TLS roots must load")
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .build();
-    Client::builder(hyper_util::rt::TokioExecutor::new()).build(https)
+    shared_upstream_client().clone()
 }
 
 /// Handle one Anthropic Messages request end-to-end. `agent_id` is supplied
