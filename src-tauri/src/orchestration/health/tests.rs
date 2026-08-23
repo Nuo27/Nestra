@@ -95,23 +95,25 @@ fn only_transient_classes_retry_same_provider() {
     assert!(!FailureClass::BadRequest.retry_same_provider());
 }
 
+/// The default tuning's failure threshold (3) — the tests below assume it.
+const THRESHOLD: u32 = 3;
+
 #[test]
-fn health_window_opens_circuit_after_threshold_migratable() {
+fn breaker_opens_after_threshold_migratable_failures() {
     let h = ProviderHealth::new();
     let ep = "ep-1";
-    // Two quota failures: not yet degraded.
+    // Two quota failures: not yet open.
     h.record(ep, HealthOutcome::Fail(FailureClass::QuotaExhausted), 429);
     h.record(ep, HealthOutcome::Fail(FailureClass::QuotaExhausted), 429);
     assert!(!h.is_degraded(ep));
     assert_eq!(h.get(ep).consecutive_migratable, 2);
     // Third migratable failure opens the circuit.
     h.record(ep, HealthOutcome::Fail(FailureClass::Temp5xx), 503);
-    assert!(h.is_degraded(ep), "3 consecutive migratable failures must degrade");
-    assert!(h.get(ep).degraded);
-    // One Ok clears it.
-    h.record(ep, HealthOutcome::Ok, 200);
-    assert!(!h.is_degraded(ep));
-    assert_eq!(h.get(ep).consecutive_migratable, 0);
+    assert!(h.is_degraded(ep), "3 consecutive migratable failures must open");
+    assert!(matches!(
+        h.get(ep).breaker,
+        BreakerState::Open { .. }
+    ));
 }
 
 #[test]
@@ -124,7 +126,7 @@ fn auth_failures_do_not_open_circuit() {
     for _ in 0..5 {
         h.record(ep, HealthOutcome::Fail(FailureClass::Auth), 401);
     }
-    assert!(!h.is_degraded(ep), "auth failures must not degrade (non-migratable)");
+    assert!(!h.is_degraded(ep), "auth failures must not open (non-migratable)");
     assert_eq!(h.get(ep).consecutive_failures, 5);
     assert_eq!(h.get(ep).consecutive_migratable, 0);
 }
@@ -140,16 +142,16 @@ fn window_caps_at_max() {
 }
 
 #[test]
-fn eligible_filters_out_degraded() {
+fn eligible_filters_out_open() {
     let h = ProviderHealth::new();
-    for _ in 0..DEGRADED_THRESHOLD {
+    for _ in 0..THRESHOLD {
         h.record("ep-bad", HealthOutcome::Fail(FailureClass::QuotaExhausted), 429);
     }
     h.record("ep-good", HealthOutcome::Ok, 200);
     let eligible = h.eligible(&["ep-bad".into(), "ep-good".into(), "ep-unseen".into()]);
     assert!(eligible.contains(&"ep-good".into()));
     assert!(eligible.contains(&"ep-unseen".into()), "unseen endpoints are eligible");
-    assert!(!eligible.contains(&"ep-bad".into()), "degraded endpoint excluded");
+    assert!(!eligible.contains(&"ep-bad".into()), "open endpoint excluded");
 }
 
 #[test]
@@ -164,6 +166,166 @@ fn outcome_from_response_classifies() {
     ));
 }
 
+/// Seed a `ProviderHealth` with one endpoint in an explicit breaker state
+/// (the map is private, but this child module may touch it — avoids sleeping
+/// on real recovery waits).
+fn seeded(state: BreakerState) -> ProviderHealth {
+    let h = ProviderHealth::new();
+    h.inner.lock().unwrap().insert(
+        "ep-1".to_string(),
+        EndpointHealth {
+            breaker: state,
+            consecutive_migratable: THRESHOLD,
+            consecutive_failures: THRESHOLD,
+            last_failure: Some(FailureClass::Temp5xx),
+            ..Default::default()
+        },
+    );
+    h
+}
+
+/// Open → (recovery wait elapses) → eligible as HalfOpen → probe Oks close
+/// the circuit only after the success threshold; a probe failure re-opens
+/// with a FRESH stamp (the wait restarts).
+#[test]
+fn half_open_probes_close_after_success_threshold() {
+    let wait_ms: i64 = 60_000;
+    let opened_at = chrono::Utc::now().timestamp_millis() - wait_ms - 1;
+    let h = seeded(BreakerState::Open { opened_at_ms: opened_at });
+
+    // Recovery wait elapsed → lazily HalfOpen → eligible (probe allowed).
+    assert!(!h.is_degraded("ep-1"), "expired Open must probe (HalfOpen)");
+
+    // First probe Ok: successes 1 < 2 → still HalfOpen.
+    h.record("ep-1", HealthOutcome::Ok, 200);
+    assert!(!h.is_degraded("ep-1"));
+    assert_eq!(
+        h.get("ep-1").breaker,
+        BreakerState::HalfOpen { successes: 1 },
+        "one probe success keeps the circuit half-open"
+    );
+
+    // Second probe Ok: threshold reached → Closed.
+    h.record("ep-1", HealthOutcome::Ok, 200);
+    assert_eq!(h.get("ep-1").breaker, BreakerState::Closed);
+}
+
+#[test]
+fn half_open_probe_failure_reopens_with_fresh_stamp() {
+    let wait_ms: i64 = 60_000;
+    let opened_at = chrono::Utc::now().timestamp_millis() - wait_ms - 1_000;
+    let h = seeded(BreakerState::Open { opened_at_ms: opened_at });
+    assert!(!h.is_degraded("ep-1"), "expired Open probes");
+
+    // The probe fails → re-open, with a FRESH stamp (>= the original).
+    let before = chrono::Utc::now().timestamp_millis();
+    h.record("ep-1", HealthOutcome::Fail(FailureClass::Temp5xx), 503);
+    match h.get("ep-1").breaker {
+        BreakerState::Open { opened_at_ms } => {
+            assert!(
+                opened_at_ms >= opened_at,
+                "re-open must stamp fresh (not reuse the expired stamp)"
+            );
+            assert!(opened_at_ms <= before + 1_000);
+        }
+        other => panic!("expected re-open, got {other:?}"),
+    }
+    assert!(h.is_degraded("ep-1"), "fresh Open excludes again");
+}
+
+/// Still inside the recovery wait: Open stays Open (excluded), and further
+/// failures must NOT reset the stamp (a still-failing endpoint cannot
+/// extend its own wait window forever by failing).
+#[test]
+fn fresh_open_holds_stamp_under_continued_failure() {
+    let opened_at = chrono::Utc::now().timestamp_millis() - 1_000; // 1s ago
+    let h = seeded(BreakerState::Open { opened_at_ms: opened_at });
+    assert!(h.is_degraded("ep-1"));
+    h.record("ep-1", HealthOutcome::Fail(FailureClass::Temp5xx), 503);
+    assert_eq!(
+        h.get("ep-1").breaker,
+        BreakerState::Open { opened_at_ms: opened_at },
+        "continued failure must keep the original stamp"
+    );
+}
+
+/// The error-rate backstop: a flapping endpoint (fail fail ok repeat — the
+/// consecutive count never reaches the threshold) opens the circuit once
+/// the windowed rate crosses `breaker_error_rate_pct` with enough samples.
+#[test]
+fn error_rate_backstop_opens_flapping_endpoint() {
+    let h = ProviderHealth::new();
+    let ep = "ep-1";
+    // fail,fail,ok × 7 = 21 outcomes → window keeps the last 20 (rate ≥ 60%,
+    // consecutive never exceeds 2 < 3).
+    for _ in 0..7 {
+        h.record(ep, HealthOutcome::Fail(FailureClass::Temp5xx), 503);
+        h.record(ep, HealthOutcome::Fail(FailureClass::Temp5xx), 503);
+        h.record(ep, HealthOutcome::Ok, 200);
+    }
+    assert!(
+        matches!(h.get(ep).breaker, BreakerState::Open { .. }),
+        "flapping endpoint must trip the error-rate backstop (state: {:?})",
+        h.get(ep).breaker
+    );
+    assert!(h.is_degraded(ep));
+}
+
+#[test]
+fn error_rate_backstop_disabled_at_zero_pct() {
+    let tuning = crate::orchestration::gateway::tuning::shared_default();
+    *tuning.write().unwrap() = crate::orchestration::gateway::tuning::GatewayTuning {
+        breaker_error_rate_pct: 0,
+        ..Default::default()
+    };
+    let h = ProviderHealth::with_tuning(tuning);
+    for _ in 0..7 {
+        h.record("ep-1", HealthOutcome::Fail(FailureClass::Temp5xx), 503);
+        h.record("ep-1", HealthOutcome::Fail(FailureClass::Temp5xx), 503);
+        h.record("ep-1", HealthOutcome::Ok, 200);
+    }
+    assert_eq!(h.get("ep-1").breaker, BreakerState::Closed);
+}
+
+/// A healthy endpoint's Ok must never re-open via the error-rate backstop
+/// (the stale-window livelock guard: rate check fires on failures only).
+#[test]
+fn error_rate_backstop_not_evaluated_after_ok() {
+    let h = ProviderHealth::new();
+    // Fill the window with a ≥60% failure rate without crossing the
+    // consecutive threshold, then flip fully healthy.
+    for _ in 0..7 {
+        h.record("ep-1", HealthOutcome::Fail(FailureClass::Temp5xx), 503);
+        h.record("ep-1", HealthOutcome::Fail(FailureClass::Temp5xx), 503);
+        h.record("ep-1", HealthOutcome::Ok, 200);
+    }
+    assert!(matches!(h.get("ep-1").breaker, BreakerState::Open { .. }));
+    // Expire the wait (fresh seeded Open past the wait) and record an Ok —
+    // the stale window must NOT re-open the just-closed circuit.
+    let wait_ms: i64 = 60_000;
+    let opened_at = chrono::Utc::now().timestamp_millis() - wait_ms - 1;
+    *h.inner.lock().unwrap().get_mut("ep-1").unwrap() =
+        EndpointHealth {
+            breaker: BreakerState::Open { opened_at_ms: opened_at },
+            recent: std::iter::repeat(OutcomeSnap {
+                at_ms: opened_at,
+                ok: false,
+                class: Some(FailureClass::Temp5xx),
+                status: 503,
+            })
+            .take(20)
+            .collect(),
+            consecutive_migratable: 0,
+            consecutive_failures: 0,
+            last_failure: Some(FailureClass::Temp5xx),
+        };
+    h.record("ep-1", HealthOutcome::Ok, 200);
+    assert!(
+        !matches!(h.get("ep-1").breaker, BreakerState::Open { .. }),
+        "an Ok must not re-open via the stale window"
+    );
+}
+
 fn mem_conn() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     crate::schema::build_v1(&conn).unwrap();
@@ -171,38 +333,68 @@ fn mem_conn() -> rusqlite::Connection {
 }
 
 #[test]
-fn degraded_circuit_persists_and_restores() {
+fn open_circuit_persists_and_restores() {
     let conn = mem_conn();
     let h = ProviderHealth::new();
-    for _ in 0..DEGRADED_THRESHOLD {
+    for _ in 0..THRESHOLD {
         h.record("ep-1", HealthOutcome::Fail(FailureClass::Temp5xx), 503);
     }
     assert!(h.is_degraded("ep-1"));
     h.persist_degraded(&conn);
 
-    // Simulated restart: a fresh instance restores the open circuit.
+    // Simulated restart: a fresh instance restores the open circuit (well
+    // inside the recovery wait, so it restores as Open).
     let h2 = ProviderHealth::new();
     h2.load(&conn);
-    assert!(h2.is_degraded("ep-1"), "degraded circuit survives restart");
+    assert!(h2.is_degraded("ep-1"), "open circuit survives restart");
     assert!(h2.eligible(&["ep-1".into()]).is_empty());
 
-    // An Ok clears it; the healthy transition persists as an empty set.
+    // Strict breaker: closing requires the recovery wait to elapse (lazy
+    // half-open) and then `breaker_success_threshold` probe Oks. Age the
+    // restored stamp past the wait instead of sleeping.
+    {
+        let mut map = h2.inner.lock().unwrap();
+        let BreakerState::Open { .. } = map.get("ep-1").unwrap().breaker else {
+            panic!("restored circuit must be Open");
+        };
+        let aged = chrono::Utc::now().timestamp_millis() - 61_000;
+        map.get_mut("ep-1").unwrap().breaker = BreakerState::Open { opened_at_ms: aged };
+    }
     h2.record("ep-1", HealthOutcome::Ok, 200);
+    h2.record("ep-1", HealthOutcome::Ok, 200);
+    assert_eq!(h2.get("ep-1").breaker, BreakerState::Closed);
     h2.persist_degraded(&conn);
     let h3 = ProviderHealth::new();
     h3.load(&conn);
-    assert!(!h3.is_degraded("ep-1"), "cleared circuit stays cleared across restart");
+    assert!(!h3.is_degraded("ep-1"), "closed circuit stays closed across restart");
+}
+
+#[test]
+fn open_circuit_persists_in_old_json_format() {
+    // Rows written by the pre-three-state build use `degraded_at_ms` — they
+    // must restore as Open (recent enough).
+    let conn = mem_conn();
+    let now = chrono::Utc::now().timestamp_millis();
+    let legacy = serde_json::json!([{
+        "endpoint_id": "ep-legacy",
+        "degraded_at_ms": now - 1_000,
+        "class": "temp5xx"
+    }]);
+    crate::db::set_setting(&conn, PERSIST_KEY, &legacy).unwrap();
+    let h = ProviderHealth::new();
+    h.load(&conn);
+    assert!(h.is_degraded("ep-legacy"), "legacy degraded_at_ms rows restore as Open");
 }
 
 #[test]
 fn expired_persisted_circuit_is_dropped_at_load() {
     let conn = mem_conn();
-    // A degraded_at beyond the TTL — the stale-circuit trap fix 3 exists
-    // for: without the TTL check this endpoint would never route again.
+    // An opened_at beyond the persistence TTL — the stale-circuit trap the
+    // TTL exists for: without the check this endpoint would never route again.
     let stale = serde_json::json!([{
         "endpoint_id": "ep-old",
-        "degraded_at_ms": chrono::Utc::now().timestamp_millis() - DEGRADED_TTL_MS - 1,
-        "class": "temp_5xx"
+        "opened_at_ms": chrono::Utc::now().timestamp_millis() - PERSIST_TTL_MS - 1,
+        "class": "temp5xx"
     }]);
     crate::db::set_setting(&conn, PERSIST_KEY, &stale).unwrap();
     let h = ProviderHealth::new();
@@ -212,16 +404,16 @@ fn expired_persisted_circuit_is_dropped_at_load() {
 }
 
 #[test]
-fn persist_degraded_writes_only_on_transition() {
+fn persist_writes_only_on_transition() {
     let conn = mem_conn();
     let h = ProviderHealth::new();
-    for _ in 0..DEGRADED_THRESHOLD {
+    for _ in 0..THRESHOLD {
         h.record("ep-1", HealthOutcome::Fail(FailureClass::Temp5xx), 503);
     }
     h.persist_degraded(&conn);
     // Delete the row to detect any rewrite; a further failure does NOT
-    // transition (still degraded, same open time) so the snapshot is
-    // unchanged and the persist must be a no-op.
+    // transition (still open, same stamp) so the snapshot is unchanged and
+    // the persist must be a no-op.
     conn.execute("DELETE FROM setting_kv WHERE key = 'provider_health'", [])
         .unwrap();
     h.record("ep-1", HealthOutcome::Fail(FailureClass::Temp5xx), 503);
@@ -233,5 +425,21 @@ fn persist_degraded_writes_only_on_transition() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(n, 0, "stable degraded set must not rewrite the setting");
+    assert_eq!(n, 0, "stable open set must not rewrite the setting");
+}
+
+#[test]
+fn snapshot_all_reports_effective_states() {
+    let h = ProviderHealth::new();
+    for _ in 0..THRESHOLD {
+        h.record("ep-open", HealthOutcome::Fail(FailureClass::Temp5xx), 503);
+    }
+    h.record("ep-ok", HealthOutcome::Ok, 200);
+    let snap = h.snapshot_all();
+    let open = snap.iter().find(|s| s.endpoint_id == "ep-open").unwrap();
+    assert_eq!(open.state, "open");
+    assert!(open.recovery_in_ms.is_some());
+    let ok = snap.iter().find(|s| s.endpoint_id == "ep-ok").unwrap();
+    assert_eq!(ok.state, "closed");
+    assert_eq!(ok.recovery_in_ms, None);
 }

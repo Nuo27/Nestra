@@ -29,11 +29,12 @@
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
-use hyper::header::HeaderValue;
+use hyper::header::{HeaderMap, HeaderValue};
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
+use std::pin::Pin;
 
 use crate::error::{AppError, AppResult};
 use crate::config_writer::ProviderKind;
@@ -305,25 +306,45 @@ async fn forward_one(
         }
     };
     let client = upstream_client();
-    let upstream_resp = match client.request(upstream_req).await {
-        Ok(r) => r,
-        Err(e) => {
+    let tuning = super::tuning::snapshot(&state.tuning);
+    let upstream_resp = match tokio::time::timeout(
+        std::time::Duration::from_secs(tuning.headers_timeout_secs),
+        client.request(upstream_req),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             return ForwardOutcome::Unreachable {
                 timeout: error_is_timeout(&e),
                 message: e.to_string(),
             };
         }
+        Err(_) => {
+            return ForwardOutcome::Unreachable {
+                timeout: true,
+                message: format!(
+                    "upstream did not send response headers within {}s",
+                    tuning.headers_timeout_secs
+                ),
+            };
+        }
     };
     let status = upstream_resp.status();
     let resp_headers = upstream_resp.headers().clone();
-    let relay = relay_response(
+    let relay = match probe_and_relay(
         state.clone(),
-        request_id.to_string(),
+        request_id,
         route.protocol,
         upstream_resp,
-        status,
+        &route.endpoint_id,
+        &route.model,
     )
-    .await;
+    .await
+    {
+        Ok(relay) => relay,
+        Err(in_band_failure) => return in_band_failure,
+    };
     // Convert the upstream body back to Anthropic when bridging. The pair
     // (inbound=Anthropic, upstream=route.protocol) picks the converter.
     let body = if bridging {
@@ -533,13 +554,17 @@ pub(super) struct RelayOutcome {
 /// reports usage only when the agent itself set `stream_options.include_usage`
 /// (the gateway's Anthropic→OpenAI bridge injects it — see
 /// `convert::anthropic_to_openai`).
-pub(super) async fn relay_response(
+pub(super) async fn relay_response<B>(
     state: GatewayState,
     request_id: String,
     upstream_wire: ProviderKind,
-    upstream_resp: Response<Incoming>,
+    upstream_resp: Response<B>,
     status: StatusCode,
-) -> RelayOutcome {
+) -> RelayOutcome
+where
+    B: hyper::body::Body<Data = Bytes> + Send + Sync + 'static,
+    B::Error: std::fmt::Display,
+{
     let (parts, body) = upstream_resp.into_parts();
     let is_sse = parts
         .headers
@@ -548,10 +573,18 @@ pub(super) async fn relay_response(
         .map(|s| s.contains("text/event-stream"))
         .unwrap_or(false);
 
+    let tuning = super::tuning::snapshot(&state.tuning);
+
     if is_sse && status.is_success() {
         // Committed stream: bytes flow to the agent as they arrive. The loop
         // treats a 2xx SSE response as success; generation is already started.
-        let observing = ObservingBody::new(body, state, request_id, upstream_wire);
+        let observing = ObservingBody::new(
+            body,
+            state,
+            request_id,
+            upstream_wire,
+            std::time::Duration::from_secs(tuning.stream_silence_timeout_secs),
+        );
         return RelayOutcome {
             body: GatewayBody::streaming(observing),
             usage: None,
@@ -569,21 +602,40 @@ pub(super) async fn relay_response(
     let mut buf = Vec::new();
     let mut got_any = false;
     let mut body_error: Option<String> = None;
-    let mut stream = body;
-    loop {
-        match stream.frame().await {
-            Some(Ok(frame)) => {
-                if let Some(bytes) = frame.data_ref() {
-                    got_any = true;
-                    buf.extend_from_slice(bytes);
+    let mut stream = std::pin::pin!(body);
+    // The whole buffered read is capped (tuning `buffered_body_timeout_secs`)
+    // — an upstream that sends headers and then stalls must fail in bounded
+    // time instead of hanging the agent forever.
+    let buffered_timeout = std::time::Duration::from_secs(tuning.buffered_body_timeout_secs);
+    let collect = async {
+        loop {
+            match stream.as_mut().frame().await {
+                Some(Ok(frame)) => {
+                    if let Some(bytes) = frame.data_ref() {
+                        got_any = true;
+                        buf.extend_from_slice(bytes);
+                    }
                 }
+                Some(Err(e)) => {
+                    body_error = Some(e.to_string());
+                    break;
+                }
+                None => break,
             }
-            Some(Err(e)) => {
-                body_error = Some(e.to_string());
-                break;
-            }
-            None => break,
         }
+    };
+    if tokio::time::timeout(buffered_timeout, collect)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout_secs = buffered_timeout.as_secs(),
+            "gateway: buffered upstream body incomplete — treating as interrupted"
+        );
+        body_error = Some(format!(
+            "buffered body incomplete after {}s",
+            buffered_timeout.as_secs()
+        ));
     }
     // Non-success upstream responses are buffered here — log the status and
     // the upstream's own error text (capped) so a 4xx/5xx failure is
@@ -617,10 +669,78 @@ pub(super) async fn relay_response(
     RelayOutcome {
         body: GatewayBody::Full(Full::new(Bytes::from(buf))),
         usage,
-        generation_started: got_any,
+        // Only SUCCESS bytes can mean generation started. An error body
+        // (4xx/5xx with a JSON envelope) downloaded fine — but nothing was
+        // generated, so the migration loop must treat the failure as
+        // pre-response and replay it per class. Counting error bodies as
+        // "generation started" surfaced every buffered 503 to tool-carrying
+        // agents immediately, bypassing retry/failover entirely (observed:
+        // zcode + opencode-go's "Endpoint is unavailable" 503s).
+        generation_started: got_any && status.is_success(),
         body_error,
         tool_calls,
         tool_names,
+    }
+}
+
+/// Probe a 2xx SSE upstream's first complete event for an in-band terminal
+/// error, then relay. An in-band error (zero generated content + an
+/// error-valued terminal `finish_reason`, `response.failed`, or an error
+/// envelope — observed on opencode-go's free models) returns a 503-shaped
+/// [`ForwardOutcome`] the retry/migration loop can act on, instead of
+/// relaying a "successful" empty stream to the agent. Non-SSE / non-2xx
+/// responses skip the probe.
+pub(super) async fn probe_and_relay(
+    state: GatewayState,
+    request_id: &str,
+    upstream_wire: ProviderKind,
+    upstream_resp: Response<Incoming>,
+    log_endpoint: &str,
+    log_model: &str,
+) -> Result<RelayOutcome, ForwardOutcome> {
+    let status = upstream_resp.status();
+    let is_sse = upstream_resp
+        .headers()
+        .get(hyper::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("text/event-stream"))
+        .unwrap_or(false);
+    if !(status.is_success() && is_sse) {
+        return Ok(
+            relay_response(state, request_id.to_string(), upstream_wire, upstream_resp, status)
+                .await,
+        );
+    }
+    let (parts, body) = upstream_resp.into_parts();
+    let first_event_timeout = std::time::Duration::from_secs(
+        super::tuning::snapshot(&state.tuning).first_event_timeout_secs,
+    );
+    match super::stream::probe_first_sse_event(body, first_event_timeout).await {
+        super::stream::FirstEventProbe::InBandError { reason } => {
+            tracing::warn!(
+                endpoint = log_endpoint,
+                model = log_model,
+                reason = %reason,
+                "gateway: upstream in-band stream error — failing attempt (retry/migrate)"
+            );
+            Err(ForwardOutcome::Responded {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                headers: HeaderMap::new(),
+                body: GatewayBody::Full(Full::new(Bytes::new())),
+                usage: None,
+                tool_calls: None,
+                tool_names: None,
+                generation_started: false,
+                body_error: None,
+            })
+        }
+        super::stream::FirstEventProbe::Ok { held, rest } => {
+            let resp =
+                Response::from_parts(parts, super::stream::PrependBody::new(held, rest));
+            Ok(
+                relay_response(state, request_id.to_string(), upstream_wire, resp, status).await,
+            )
+        }
     }
 }
 
@@ -644,7 +764,7 @@ pub(super) async fn relay_response(
 /// disconnects and the body is dropped without reaching a terminal poll, no
 /// backfill happens (accepted: best-effort observability).
 struct ObservingBody {
-    inner: Incoming,
+    inner: Pin<Box<dyn hyper::body::Body<Data = Bytes, Error = std::io::Error> + Send + Sync>>,
     /// The upstream's wire dialect — picks the SSE observer.
     wire: ProviderKind,
     /// Accumulated usage + tool-call ids. `Arc` so the finish task can read a
@@ -662,6 +782,12 @@ struct ObservingBody {
     /// stream ends `None`) — converts an upstream mid-stream reset into a
     /// structured error the agent can parse instead of a connection teardown.
     pending_terminal: bool,
+    /// Mid-stream silence watchdog (tuning `stream_silence_timeout_secs`):
+    /// reset on every received frame; if the gap between frames exceeds the
+    /// deadline the stream terminates with a structured error instead of
+    /// hanging the agent forever. `None` when disabled (0).
+    silence: Option<Pin<Box<tokio::time::Sleep>>>,
+    silence_dur: std::time::Duration,
 }
 
 /// Cap on the unterminated-line carry buffer (bytes). Generous on purpose:
@@ -670,13 +796,20 @@ const CARRY_CAP: usize = 128 * 1024;
 
 impl ObservingBody {
     fn new(
-        inner: Incoming,
+        inner: impl hyper::body::Body<Data = Bytes> + Send + Sync + 'static,
         state: GatewayState,
         request_id: String,
         wire: ProviderKind,
+        silence_timeout: std::time::Duration,
     ) -> Self {
+        // Normalize the upstream error type (hyper::Error for `Incoming`,
+        // io::Error for probe-wrapped bodies) — the Err arm below converts
+        // either into a terminal SSE event, never a body error.
+        let inner = inner.map_err(|_| std::io::Error::other("upstream stream error"));
+        let silence = (!silence_timeout.is_zero())
+            .then(|| Box::pin(tokio::time::sleep(silence_timeout)));
         Self {
-            inner,
+            inner: Box::pin(inner),
             wire,
             obs: std::sync::Arc::new(std::sync::Mutex::new(StreamObservation::default())),
             carry: String::new(),
@@ -684,6 +817,8 @@ impl ObservingBody {
             request_id,
             done: false,
             pending_terminal: false,
+            silence,
+            silence_dur: silence_timeout,
         }
     }
 
@@ -731,6 +866,18 @@ impl ObservingBody {
                 tracing::warn!("gateway: usage backfill failed for {request_id}: {e}");
             }
         });
+    }
+
+    /// Mid-stream failure (upstream error or silence timeout): finish the
+    /// observation and produce the terminal SSE error event the agent parses
+    /// instead of seeing a connection reset. The event is queued in
+    /// `pending_terminal`; the next poll hands it out and the one after ends
+    /// the stream.
+    fn terminate(&mut self, msg: String) -> Bytes {
+        self.finish();
+        let terminal = terminal_sse_error(self.wire, &msg);
+        self.pending_terminal = true;
+        Bytes::from(terminal)
     }
 }
 
@@ -813,24 +960,48 @@ impl hyper::body::Body for ObservingBody {
             this.pending_terminal = false;
             return std::task::Poll::Ready(None);
         }
-        let poll = std::pin::Pin::new(&mut this.inner).poll_frame(cx);
+        let poll = this.inner.as_mut().poll_frame(cx);
         match poll {
-            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Pending => {
+                // Race the inner body against the silence deadline: polling
+                // the Sleep here registers its waker alongside the inner
+                // body's, so whichever completes first wakes this task. A
+                // mid-stream stall (bytes already flowed, so no retry —
+                // honest termination) must not hang the agent forever.
+                if let Some(sleep) = this.silence.as_mut() {
+                    if std::future::Future::poll(sleep.as_mut(), cx).is_ready() {
+                        let msg = format!(
+                            "upstream stream stalled: no data for {}s",
+                            this.silence_dur.as_secs()
+                        );
+                        tracing::warn!("gateway: {msg}");
+                        let terminal = this.terminate(msg);
+                        return std::task::Poll::Ready(Some(Ok(
+                            hyper::body::Frame::data(terminal),
+                        )));
+                    }
+                }
+                std::task::Poll::Pending
+            }
             std::task::Poll::Ready(None) => {
                 this.finish();
                 std::task::Poll::Ready(None)
             }
             std::task::Poll::Ready(Some(Err(e))) => {
-                this.finish();
                 let msg = format!("upstream body: {e}");
                 tracing::warn!("gateway: relay stream error — terminating cleanly: {msg}");
-                let terminal = terminal_sse_error(this.wire, &msg);
-                this.pending_terminal = true;
-                std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(Bytes::from(terminal)))))
+                let terminal = this.terminate(msg);
+                std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(terminal))))
             }
             std::task::Poll::Ready(Some(Ok(frame))) => {
                 if let Some(bytes) = frame.data_ref() {
                     this.observe_frame(bytes);
+                }
+                // Data arrived — push the silence deadline out again.
+                if let Some(sleep) = this.silence.as_mut() {
+                    sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + this.silence_dur);
                 }
                 std::task::Poll::Ready(Some(Ok(frame)))
             }

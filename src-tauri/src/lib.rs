@@ -60,6 +60,9 @@ pub struct AppState {
     pub orch_health: Arc<orchestration::health::ProviderHealth>,
     pub orch_quota: Arc<orchestration::quota_state::QuotaState>,
     pub orch_affinity: Arc<orchestration::router::RouteAffinity>,
+    /// Live gateway tuning (timeouts + breaker parameters), shared with the
+    /// gateway state and `ProviderHealth` — Settings edits hot-apply.
+    pub gateway_tuning: orchestration::gateway::tuning::SharedTuning,
     /// The single active review session (Review Runtime R1 — one at a time).
     /// Clone handle; the runner task + abort command coordinate through it.
     pub reviews: review::ReviewRegistry,
@@ -88,7 +91,10 @@ pub fn run() {
     // slow disk-walking reconcile off the UI's locks.
     let reconcile_conn = db::open(&data_dir).expect("failed to open reconcile database");
 
-    let orch_health = Arc::new(orchestration::health::ProviderHealth::new());
+    let gateway_tuning = orchestration::gateway::tuning::shared_default();
+    let orch_health = Arc::new(orchestration::health::ProviderHealth::with_tuning(
+        gateway_tuning.clone(),
+    ));
     let orch_quota = Arc::new(orchestration::quota_state::QuotaState::new());
     let orch_affinity = Arc::new(orchestration::router::RouteAffinity::new());
     // Restore the restart-persistent routing state (Smart Gateway fix 3):
@@ -99,6 +105,11 @@ pub fn run() {
     // the plain pre-AppState connection here — no lock to take.
     orch_affinity.load_sessions(&conn);
     orch_health.load(&conn);
+    // Tuning overrides land last so persisted breaker state restores under
+    // default parameters, then the user's saved knobs take over.
+    if let Ok(mut t) = gateway_tuning.write() {
+        *t = orchestration::gateway::tuning::GatewayTuning::load(&conn);
+    }
 
     // Loopback auth token: get-or-generate up front (encrypted keychain). The
     // gateway is fail-closed without it; generating at launch means it is ready
@@ -123,6 +134,7 @@ pub fn run() {
         orch_health: orch_health.clone(),
         orch_quota: orch_quota.clone(),
         orch_affinity: orch_affinity.clone(),
+        gateway_tuning: gateway_tuning.clone(),
         reviews: review::ReviewRegistry::default(),
         gateway: gateway_control,
     };
@@ -278,12 +290,22 @@ pub fn run() {
                                 crate::secrets::get(endpoint_id)
                             }),
                             loopback_token: app.state::<AppState>().gateway.token.clone(),
+                            tuning: app.state::<AppState>().gateway_tuning.clone(),
                         };
                         let ctrl = app.state::<AppState>().gateway.clone();
+                        let refresh_handle = app.handle().clone();
                         tauri::async_runtime::spawn(async move {
                             if let Err(e) = ctrl.start(gw_state, gw_port).await {
                                 tracing::error!("gateway failed to start: {e}");
                             }
+                            // Gateway start is a lifecycle op: refresh every
+                            // routed agent's alias once per launch so config
+                            // files carry the current steady-state abilities
+                            // (context/output limits) even when no
+                            // policy/endpoint edit has fired since the last
+                            // write.
+                            let state = refresh_handle.state::<AppState>();
+                            commands::gateway::refresh_all_routed(&state).await;
                         });
                     }
                     Err(e) => {
@@ -416,6 +438,10 @@ pub fn run() {
             commands::gateway::gateway_token_get,
             commands::gateway::gateway_token_regenerate,
             commands::gateway::gateway_recent_activity,
+            commands::gateway::gateway_tuning_get,
+            commands::gateway::gateway_tuning_set,
+            commands::gateway::provider_health_snapshot,
+            commands::gateway::provider_health_reset,
             // Route history + migration events
             commands::orchestration::orch_route_history,
             commands::orchestration::orch_migrations,

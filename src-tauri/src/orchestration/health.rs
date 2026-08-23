@@ -8,7 +8,10 @@
 //! escalation after retries fail or the circuit opens).
 //!
 //! Ships the classifier + an in-memory [`ProviderHealth`] rolling window. The
-//! gateway feeds it observed outcomes; the migration engine reads it.
+//! gateway feeds it observed outcomes; the migration engine reads it. The
+//! circuit breaker on top is a lazy three-state machine — see
+//! [`BreakerState`] (Closed / Open / HalfOpen with probe-based recovery);
+//! its parameters live in [`crate::orchestration::gateway::tuning`].
 //!
 //! ## The six classes (correction #3)
 //!
@@ -159,6 +162,33 @@ impl HealthOutcome {
     }
 }
 
+/// The circuit-breaker state machine per endpoint (cc-switch-style
+/// Closed/Open/HalfOpen). Transitions are evaluated lazily at
+/// record/query time — there is no background prober task.
+///
+/// * `Closed → Open`: `breaker_failure_threshold` consecutive migratable
+///   failures, OR the rolling-window error rate reaching
+///   `breaker_error_rate_pct` over at least `breaker_min_requests` samples
+///   (the flapping-endpoint backstop).
+/// * `Open → HalfOpen`: after `breaker_recovery_wait_secs` the endpoint
+///   becomes eligible again — the next real requests are the probes
+///   (concurrent requests during half-open all count as probes).
+/// * `HalfOpen → Closed`: `breaker_success_threshold` consecutive Oks.
+/// * `HalfOpen → Open`: any migratable failure, with a FRESH open stamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum BreakerState {
+    /// Healthy / eligible. Failures are counted but nothing is excluded.
+    #[default]
+    Closed,
+    /// Circuit open: the router excludes the endpoint until the recovery
+    /// wait elapses (`opened_at_ms` is Unix millis).
+    Open { opened_at_ms: i64 },
+    /// Recovery probes in flight: eligible; `successes` consecutive Oks so
+    /// far (closes at `breaker_success_threshold`).
+    HalfOpen { successes: u32 },
+}
+
 /// Per-endpoint health summary the router reads.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EndpointHealth {
@@ -166,31 +196,32 @@ pub struct EndpointHealth {
     pub recent: Vec<OutcomeSnap>,
     /// Consecutive failures of any class right now. Reset to 0 on an Ok.
     pub consecutive_failures: u32,
-    /// Consecutive failures of a *migratable* class. The router opens the
-    /// circuit (skips the endpoint) when this crosses
-    /// [`ProviderHealth::DEGRADED_THRESHOLD`].
+    /// Consecutive failures of a *migratable* class. Crossing
+    /// `breaker_failure_threshold` opens the circuit from Closed.
     pub consecutive_migratable: u32,
-    /// True once the circuit has opened; the router excludes the endpoint
-    /// until an Ok clears it.
-    pub degraded: bool,
-    /// When the circuit opened (Unix millis). A degraded endpoint receives no
-    /// traffic, so without a TTL it could never get the Ok that clears it —
-    /// [`ProviderHealth::DEGRADED_TTL_MS`] bounds the exclusion window.
-    pub degraded_at_ms: Option<i64>,
+    /// The breaker state. `Open` is the router's exclusion signal (lazily
+    /// advanced to `HalfOpen` once the recovery wait elapses — see
+    /// [`EndpointHealth::effective_state`]).
+    pub breaker: BreakerState,
     /// Last observed failure class, when any. `None` after an Ok.
     pub last_failure: Option<FailureClass>,
 }
 
 impl EndpointHealth {
-    /// Degraded AND within the TTL. This is the router's exclusion signal:
-    /// an expired circuit is treated as eligible so the next request probes
-    /// the endpoint (an Ok clears it; a failure re-opens it with a fresh
-    /// timestamp).
-    fn effectively_degraded(&self, now_ms: i64) -> bool {
-        self.degraded
-            && self
-                .degraded_at_ms
-                .is_some_and(|at| now_ms.saturating_sub(at) < DEGRADED_TTL_MS)
+    /// The breaker state with the lazy `Open → HalfOpen` transition applied:
+    /// an Open circuit whose recovery wait has elapsed behaves as HalfOpen
+    /// (eligible — the next real request is the probe). This is what BOTH
+    /// the router exclusion check and `record` consult, so the lazy
+    /// transition is consistent everywhere.
+    fn effective_state(&self, now_ms: i64, recovery_wait_ms: i64) -> BreakerState {
+        match self.breaker {
+            BreakerState::Open { opened_at_ms }
+                if now_ms.saturating_sub(opened_at_ms) >= recovery_wait_ms =>
+            {
+                BreakerState::HalfOpen { successes: 0 }
+            }
+            s => s,
+        }
     }
 }
 
@@ -213,29 +244,35 @@ pub struct OutcomeSnap {
 /// gateway records one outcome per proxied request.
 pub struct ProviderHealth {
     inner: Mutex<HashMap<String, EndpointHealth>>,
+    /// Live breaker parameters (failure threshold / recovery wait / success
+    /// threshold / error-rate backstop). Shared with `AppState` so Settings
+    /// edits hot-apply. Std RwLock: brief, never-across-`.await` sections.
+    tuning: crate::orchestration::gateway::tuning::SharedTuning,
     /// Serialized last-persisted degraded set — the no-op guard that keeps
     /// `persist_degraded` off the hot path while the set is stable.
     last_persist: Mutex<Option<String>>,
 }
 
-/// How many recent outcomes to retain per endpoint.
+/// How many recent outcomes to retain per endpoint (the error-rate
+/// backstop's sample window).
 pub const WINDOW: usize = 20;
-/// Consecutive migratable failures (quota/rate/5xx/timeout) before the
-/// endpoint is marked degraded and excluded from routing until an Ok clears it.
-pub const DEGRADED_THRESHOLD: u32 = 3;
-/// A degraded circuit is held out for at most this long (Smart Gateway fix 3):
-/// the degraded endpoint gets no traffic, so without a bound a
-/// restart-persisted circuit could stay open forever (stale-circuit trap).
-pub const DEGRADED_TTL_MS: i64 = 10 * 60 * 1000;
-/// `setting_kv` key for the persisted degraded set.
+/// A persisted open circuit is dropped at load when older than this
+/// (Smart Gateway fix 3, the stale-circuit trap): a restart hours later
+/// must not resurrect a long-dead exclusion. The in-memory breaker itself
+/// recovers via the (much shorter) `breaker_recovery_wait_secs`.
+pub const PERSIST_TTL_MS: i64 = 10 * 60 * 1000;
+/// `setting_kv` key for the persisted open-circuit set.
 const PERSIST_KEY: &str = "provider_health";
 
-/// One persisted degraded-circuit row. Credential-free (endpoint id +
-/// timestamps + a failure-class label).
+/// One persisted open-circuit row. Credential-free (endpoint id +
+/// timestamps + a failure-class label). `opened_at_ms` reads the
+/// pre-three-state `degraded_at_ms` key too, so persisted rows from an
+/// older build restore as `Open` unchanged.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct DegradedEntry {
     endpoint_id: String,
-    degraded_at_ms: i64,
+    #[serde(alias = "degraded_at_ms")]
+    opened_at_ms: i64,
     class: FailureClass,
 }
 
@@ -249,40 +286,80 @@ impl ProviderHealth {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            tuning: crate::orchestration::gateway::tuning::shared_default(),
             last_persist: Mutex::new(None),
         }
     }
 
-    /// Record an outcome for `endpoint_id`. Ok resets the consecutive counters
-    /// and clears the degraded flag; failures bump the counters and push a
-    /// snapshot onto the rolling window.
+    /// Construct sharing a live tuning slot (the `AppState` path — Settings
+    /// edits apply to the breaker without a restart). `new()` owns a private
+    /// default slot, which is what tests want.
+    pub fn with_tuning(tuning: crate::orchestration::gateway::tuning::SharedTuning) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            tuning,
+            last_persist: Mutex::new(None),
+        }
+    }
+
+    /// Record an outcome for `endpoint_id` and walk the breaker state
+    /// machine (see [`BreakerState`]). Parameters come from the live tuning
+    /// slot; the lazy `Open → HalfOpen` transition is applied first so a
+    /// probe outcome lands in the right state.
     pub fn record(&self, endpoint_id: &str, outcome: HealthOutcome, status: u16) {
+        let tuning = crate::orchestration::gateway::tuning::snapshot(&self.tuning);
         let mut map = self.inner.lock().expect("health lock poisoned");
         let h = map.entry(endpoint_id.to_string()).or_default();
         let now = chrono::Utc::now().timestamp_millis();
+        let recovery_wait_ms = (tuning.breaker_recovery_wait_secs as i64) * 1000;
+        let state = h.effective_state(now, recovery_wait_ms);
         match outcome {
             HealthOutcome::Ok => {
                 h.consecutive_failures = 0;
                 h.consecutive_migratable = 0;
-                h.degraded = false;
-                h.degraded_at_ms = None;
                 h.last_failure = None;
+                h.breaker = match state {
+                    // A successful probe counts toward closing. A
+                    // not-yet-expired Open stays Open even on an Ok: only
+                    // post-wait probes may close a strict breaker — an
+                    // in-flight request that started before the circuit
+                    // opened must not silently resurrect the endpoint (and
+                    // flapping open/close oscillation must not happen).
+                    BreakerState::HalfOpen { successes } => {
+                        let successes = successes + 1;
+                        if successes as u64 >= tuning.breaker_success_threshold {
+                            BreakerState::Closed
+                        } else {
+                            BreakerState::HalfOpen { successes }
+                        }
+                    }
+                    o @ BreakerState::Open { .. } => o,
+                    BreakerState::Closed => BreakerState::Closed,
+                };
             }
             HealthOutcome::Fail(class) => {
                 h.consecutive_failures = h.consecutive_failures.saturating_add(1);
                 if class.can_migrate() {
                     h.consecutive_migratable = h.consecutive_migratable.saturating_add(1);
                 }
-                if h.consecutive_migratable >= DEGRADED_THRESHOLD {
-                    // Stamp the open time on the healthy→degraded transition
-                    // only, so a still-failing endpoint doesn't reset its own
-                    // TTL window.
-                    if !h.degraded {
-                        h.degraded_at_ms = Some(now);
-                    }
-                    h.degraded = true;
-                }
                 h.last_failure = Some(class);
+                h.breaker = match state {
+                    // A failed probe re-opens with a FRESH stamp so the
+                    // recovery wait restarts.
+                    BreakerState::HalfOpen { .. } if class.can_migrate() => {
+                        BreakerState::Open { opened_at_ms: now }
+                    }
+                    // Still within the wait window: keep the original stamp
+                    // (a still-failing endpoint must not reset its own wait).
+                    o @ BreakerState::Open { .. } => o,
+                    BreakerState::HalfOpen { .. } | BreakerState::Closed => {
+                        if h.consecutive_migratable as u64 >= tuning.breaker_failure_threshold {
+                            BreakerState::Open { opened_at_ms: now }
+                        } else {
+                            BreakerState::Closed
+                        }
+                    }
+                };
             }
         }
         h.recent.push(OutcomeSnap {
@@ -298,6 +375,23 @@ impl ProviderHealth {
             let drop_n = h.recent.len() - WINDOW;
             h.recent.drain(0..drop_n);
         }
+        // Error-rate backstop (flapping endpoints whose consecutive count
+        // never reaches the threshold because Oks keep resetting it). Only
+        // meaningful from Closed, and only evaluated on a FAILURE — firing
+        // it after an Ok would let a stale window instantly re-open a
+        // circuit that half-open probes just closed (livelock: an excluded
+        // endpoint gets no traffic, so its window never drains). 0 disables.
+        if tuning.breaker_error_rate_pct > 0
+            && matches!(outcome, HealthOutcome::Fail(_))
+            && h.breaker == BreakerState::Closed
+            && h.recent.len() >= tuning.breaker_min_requests as usize
+        {
+            let fails = h.recent.iter().filter(|o| !o.ok).count();
+            let pct = fails as u64 * 100 / h.recent.len() as u64;
+            if pct >= tuning.breaker_error_rate_pct {
+                h.breaker = BreakerState::Open { opened_at_ms: now };
+            }
+        }
     }
 
     /// Snapshot the health for one endpoint (defaulted if unseen).
@@ -308,46 +402,105 @@ impl ProviderHealth {
             .unwrap_or_default()
     }
 
-    /// All endpoints the router should consider eligible (not degraded).
+    /// All endpoints the router should consider eligible (breaker not Open).
     pub fn eligible(&self, candidates: &[String]) -> Vec<String> {
+        let recovery_wait_ms = self.recovery_wait_ms();
         let now = chrono::Utc::now().timestamp_millis();
         let map = self.inner.lock().expect("health lock poisoned");
         candidates
             .iter()
             .filter(|id| {
                 !map.get(*id)
-                    .map(|h| h.effectively_degraded(now))
+                    .map(|h| {
+                        matches!(
+                            h.effective_state(now, recovery_wait_ms),
+                            BreakerState::Open { .. }
+                        )
+                    })
                     .unwrap_or(false)
             })
             .cloned()
             .collect()
     }
 
-    /// `true` if the endpoint is currently degraded (circuit open, within the
-    /// TTL).
+    /// `true` if the endpoint's circuit is Open (excluded). A HalfOpen
+    /// endpoint (recovery wait elapsed) is eligible — the next request is
+    /// the probe.
     pub fn is_degraded(&self, endpoint_id: &str) -> bool {
+        let recovery_wait_ms = self.recovery_wait_ms();
         let now = chrono::Utc::now().timestamp_millis();
         self.inner
             .lock()
             .expect("health lock poisoned")
             .get(endpoint_id)
-            .map(|h| h.effectively_degraded(now))
+            .map(|h| {
+                matches!(
+                    h.effective_state(now, recovery_wait_ms),
+                    BreakerState::Open { .. }
+                )
+            })
             .unwrap_or(false)
     }
 
-    /// Clear all health state (used by tests and a future "reset health" UI).
+    fn recovery_wait_ms(&self) -> i64 {
+        (crate::orchestration::gateway::tuning::snapshot(&self.tuning)
+            .breaker_recovery_wait_secs as i64)
+            * 1000
+    }
+
+    /// Clear all health state (the Providers page "reset health" action and
+    /// tests).
     pub fn clear(&self) {
         self.inner.lock().expect("health lock poisoned").clear();
     }
 
-    /// Persist the degraded set to `setting_kv` — called from the gateway's
+    /// UI-facing snapshot across every tracked endpoint: the effective
+    /// breaker state (with the lazy half-open transition applied) plus the
+    /// counters the health badge renders. Read by the
+    /// `provider_health_snapshot` command.
+    pub fn snapshot_all(&self) -> Vec<EndpointHealthSnap> {
+        let recovery_wait_ms = self.recovery_wait_ms();
+        let now = chrono::Utc::now().timestamp_millis();
+        let map = self.inner.lock().expect("health lock poisoned");
+        let mut out: Vec<EndpointHealthSnap> = map
+            .iter()
+            .map(|(id, h)| {
+                let state = h.effective_state(now, recovery_wait_ms);
+                EndpointHealthSnap {
+                    endpoint_id: id.clone(),
+                    state: match state {
+                        BreakerState::Closed => "closed",
+                        BreakerState::Open { .. } => "open",
+                        BreakerState::HalfOpen { .. } => "half_open",
+                    },
+                    consecutive_failures: h.consecutive_failures,
+                    last_failure: h.last_failure,
+                    // For an Open circuit: how long until half-open probes.
+                    recovery_in_ms: match state {
+                        BreakerState::Open { opened_at_ms } => Some(
+                            (opened_at_ms + recovery_wait_ms - now).max(0),
+                        ),
+                        _ => None,
+                    },
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| a.endpoint_id.cmp(&b.endpoint_id));
+        out
+    }
+
+    /// Persist the open-circuit set to `setting_kv` — called from the gateway's
     /// outcome recording while it already holds the DB lock. Writes only on a
-    /// degraded↔healthy TRANSITION: the cached last snapshot makes the stable
+    /// open↔closed TRANSITION: the cached last snapshot makes the stable
     /// case a compare-and-return, so the per-request hot path adds no write.
     /// Best-effort; a failure is logged and retried on the next transition.
     pub fn persist_degraded(&self, conn: &rusqlite::Connection) {
         let now = chrono::Utc::now().timestamp_millis();
-        let entries = fresh_degraded_entries(&self.inner.lock().expect("health lock poisoned"), now);
+        let entries = fresh_degraded_entries(
+            &self.inner.lock().expect("health lock poisoned"),
+            now,
+            self.recovery_wait_ms(),
+        );
         let Ok(value) = serde_json::to_value(&entries) else {
             return;
         };
@@ -363,10 +516,13 @@ impl ProviderHealth {
         *last = Some(serialized);
     }
 
-    /// Restore the degraded set at startup. Entries past the TTL are dropped:
-    /// a stale persisted circuit must not exclude an endpoint forever — the
-    /// next request probes it. Restored entries carry the threshold already
-    /// crossed so the circuit holds until an Ok or the TTL.
+    /// Restore the open-circuit set at startup. Entries past the persistence
+    /// TTL are dropped: a stale persisted circuit must not exclude an
+    /// endpoint forever (the stale-circuit trap). A restored Open whose
+    /// recovery wait already elapsed lazily becomes HalfOpen at the first
+    /// query — correct breaker semantics after a long downtime. Restored
+    /// entries carry the threshold already crossed so the circuit holds
+    /// until probes close or re-open it.
     pub fn load(&self, conn: &rusqlite::Connection) {
         let Ok(Some(v)) = crate::db::get_setting(conn, PERSIST_KEY) else {
             return;
@@ -374,44 +530,69 @@ impl ProviderHealth {
         let Ok(entries) = serde_json::from_value::<Vec<DegradedEntry>>(v) else {
             return;
         };
+        let tuning = crate::orchestration::gateway::tuning::snapshot(&self.tuning);
         let now = chrono::Utc::now().timestamp_millis();
         let mut map = self.inner.lock().expect("health lock poisoned");
         for e in entries {
-            if now.saturating_sub(e.degraded_at_ms) >= DEGRADED_TTL_MS {
+            if now.saturating_sub(e.opened_at_ms) >= PERSIST_TTL_MS {
                 continue;
             }
             map.insert(
                 e.endpoint_id,
                 EndpointHealth {
-                    degraded: true,
-                    degraded_at_ms: Some(e.degraded_at_ms),
-                    consecutive_migratable: DEGRADED_THRESHOLD,
-                    consecutive_failures: DEGRADED_THRESHOLD,
+                    breaker: BreakerState::Open {
+                        opened_at_ms: e.opened_at_ms,
+                    },
+                    consecutive_migratable: tuning.breaker_failure_threshold as u32,
+                    consecutive_failures: tuning.breaker_failure_threshold as u32,
                     last_failure: Some(e.class),
                     ..Default::default()
                 },
             );
         }
         // Sync the persist no-op guard so an unchanged set doesn't rewrite.
-        let entries = fresh_degraded_entries(&map, now);
+        let entries = fresh_degraded_entries(&map, now, self.recovery_wait_ms());
         if let Ok(s) = serde_json::to_string(&entries) {
             *self.last_persist.lock().expect("health persist lock poisoned") = Some(s);
         }
     }
 }
 
-/// TTL-fresh degraded entries, sorted by endpoint id for a stable comparison
-/// string (HashMap order must not decide whether a transition "happened").
+/// One row of [`ProviderHealth::snapshot_all`] (credential-free).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EndpointHealthSnap {
+    pub endpoint_id: String,
+    /// "closed" | "open" | "half_open".
+    pub state: &'static str,
+    pub consecutive_failures: u32,
+    pub last_failure: Option<FailureClass>,
+    /// Present while the circuit is Open: millis until half-open probing.
+    pub recovery_in_ms: Option<i64>,
+}
+
+/// TTL-fresh Open-circuit entries, sorted by endpoint id for a stable
+/// comparison string (HashMap order must not decide whether a transition
+/// "happened"). An Open whose recovery wait already elapsed (lazy HalfOpen)
+/// is NOT persisted — restart would immediately half-open it anyway.
 fn fresh_degraded_entries(
     map: &HashMap<String, EndpointHealth>,
     now_ms: i64,
+    recovery_wait_ms: i64,
 ) -> Vec<DegradedEntry> {
     let mut entries: Vec<DegradedEntry> = map
         .iter()
-        .filter(|(_, h)| h.effectively_degraded(now_ms))
+        .filter(|(_, h)| {
+            matches!(
+                h.effective_state(now_ms, recovery_wait_ms),
+                BreakerState::Open { .. }
+            )
+        })
         .map(|(id, h)| DegradedEntry {
             endpoint_id: id.clone(),
-            degraded_at_ms: h.degraded_at_ms.unwrap_or(now_ms),
+            opened_at_ms: match h.breaker {
+                BreakerState::Open { opened_at_ms } => opened_at_ms,
+                _ => now_ms,
+            },
             class: h.last_failure.unwrap_or(FailureClass::Unknown),
         })
         .collect();

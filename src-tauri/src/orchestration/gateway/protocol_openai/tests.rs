@@ -190,6 +190,17 @@ async fn handle_bytes_routes_default_model_to_matching_protocol_row() {
         [],
     )
     .unwrap();
+    // The `*` policy target pins the endpoint's default model explicitly.
+    conn.execute(
+        "INSERT INTO routing_policy (agent_id, role, route_targets, migrate_on_quota,
+                                    inject_cache_control, affinity_scope, updated_at)
+             VALUES ('opencode-desktop','*',?1,1,0,'task',1)",
+        rusqlite::params![serde_json::to_string(&vec![serde_json::json!({
+            "endpoint": "z-ai", "model": "glm-5.2"
+        })])
+        .unwrap()],
+    )
+    .unwrap();
     crate::orchestration::capability_registry::rebuild(&conn).unwrap();
 
     // 3. GatewayState with a stub credential reader (no keychain).
@@ -200,6 +211,7 @@ async fn handle_bytes_routes_default_model_to_matching_protocol_row() {
         affinity: std::sync::Arc::new(crate::orchestration::router::RouteAffinity::new()),
         credential_reader: std::sync::Arc::new(|_| Ok(Some("test-key".into()))),
         loopback_token: std::sync::Arc::new(tokio::sync::RwLock::new("test-token".into())),
+        tuning: super::super::tuning::shared_default(),
     };
 
     // 4. One OpenAI chat request for the alias model.

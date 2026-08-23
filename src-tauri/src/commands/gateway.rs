@@ -489,6 +489,53 @@ pub fn gateway_recent_activity(
     crate::orchestration::store::recent_route_requests(&conn, limit.unwrap_or(10))
 }
 
+/// Read the live gateway tuning (timeouts + circuit-breaker parameters).
+#[tauri::command]
+pub fn gateway_tuning_get(
+    state: State<'_, crate::AppState>,
+) -> AppResult<crate::orchestration::gateway::tuning::GatewayTuning> {
+    Ok(crate::orchestration::gateway::tuning::snapshot(
+        &state.gateway_tuning,
+    ))
+}
+
+/// Update the tuning: persist (clamped) to `setting_kv` AND write the shared
+/// in-memory slot — applies to the next request with no gateway restart.
+#[tauri::command]
+pub fn gateway_tuning_set(
+    state: State<'_, crate::AppState>,
+    tuning: crate::orchestration::gateway::tuning::GatewayTuning,
+) -> AppResult<crate::orchestration::gateway::tuning::GatewayTuning> {
+    let clamped = tuning.clamped();
+    {
+        let conn = state
+            .db
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        clamped.save(&conn)?;
+    }
+    if let Ok(mut slot) = state.gateway_tuning.write() {
+        *slot = clamped;
+    }
+    Ok(clamped)
+}
+
+/// Live per-endpoint breaker snapshot for the Providers page health badges.
+#[tauri::command]
+pub fn provider_health_snapshot(
+    state: State<'_, crate::AppState>,
+) -> AppResult<Vec<crate::orchestration::health::EndpointHealthSnap>> {
+    Ok(state.orch_health.snapshot_all())
+}
+
+/// Reset all breaker state (the "reset health" action) — every endpoint
+/// becomes eligible immediately.
+#[tauri::command]
+pub fn provider_health_reset(state: State<'_, crate::AppState>) -> AppResult<()> {
+    state.orch_health.clear();
+    Ok(())
+}
+
 /// Restart the gateway on the configured port (e.g. after a config change that
 /// does not alter port/token). Token rotation does NOT need this — it writes
 /// the shared token RwLock in place.
@@ -693,6 +740,7 @@ fn build_gateway_state(
         affinity: state.orch_affinity.clone(),
         credential_reader: Arc::new(|endpoint_id| crate::secrets::get(endpoint_id)),
         loopback_token: state.gateway.token.clone(),
+        tuning: state.gateway_tuning.clone(),
     })
 }
 

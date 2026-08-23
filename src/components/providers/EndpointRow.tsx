@@ -5,6 +5,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { HeartPulse } from "lucide-react";
 import {
   endpointFetchQuota,
+  providerHealthSnapshot,
   quotaKeepaliveStatus,
   quotaRefreshGet,
   type EndpointInfo,
@@ -103,12 +104,53 @@ export function EndpointRow({ endpoint }: { endpoint: EndpointInfo }) {
         <Badge tone={badge.tone} variant="soft">
           {t(badge.labelKey)}
         </Badge>
+
+        <BreakerBadge endpointId={endpoint.id} />
       </div>
 
       {/* Quota preview — renders its own full-width divider + bar, or nothing
           while the query is unverified. */}
       <QuotaSection endpoint={endpoint} />
     </Card>
+  );
+}
+
+/// Circuit-breaker badge — the live routing health of this endpoint from the
+/// gateway's breaker state machine. Renders NOTHING while closed (healthy is
+/// the non-event); `open` shows a danger badge with the recovery countdown,
+/// `half_open` a warning badge (probe requests in flight). Shares one query
+/// key across all cards (TanStack dedupes; 10s refresh is a cheap in-memory
+/// read).
+export function BreakerBadge({ endpointId }: { endpointId: string }) {
+  const { t } = useTranslation();
+  const q = useQuery({
+    queryKey: qk.providerHealth(),
+    queryFn: providerHealthSnapshot,
+    refetchInterval: 10_000,
+  });
+  const snap = q.data?.find((s) => s.endpoint_id === endpointId);
+  if (!snap || snap.state === "closed") return null;
+  if (snap.state === "open") {
+    const secs = Math.ceil((snap.recovery_in_ms ?? 0) / 1000);
+    return (
+      <Tip
+        content={t("providers.breakerOpenTip", {
+          secs,
+          class: snap.last_failure ?? "—",
+        })}
+      >
+        <Badge tone="danger" variant="soft">
+          {t("providers.breakerOpen")}
+        </Badge>
+      </Tip>
+    );
+  }
+  return (
+    <Tip content={t("providers.breakerHalfOpenTip")}>
+      <Badge tone="warning" variant="soft">
+        {t("providers.breakerHalfOpen")}
+      </Badge>
+    </Tip>
   );
 }
 

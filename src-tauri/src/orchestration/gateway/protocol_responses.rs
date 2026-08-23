@@ -189,13 +189,28 @@ async fn forward_one(
     };
 
     let client = super::protocol_anthropic::upstream_client();
-    let upstream_resp = match client.request(upstream_req).await {
-        Ok(r) => r,
-        Err(e) => {
+    let tuning = super::tuning::snapshot(&state.tuning);
+    let upstream_resp = match tokio::time::timeout(
+        std::time::Duration::from_secs(tuning.headers_timeout_secs),
+        client.request(upstream_req),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             return ForwardOutcome::Unreachable {
                 timeout: super::protocol_anthropic::error_is_timeout(&e),
                 message: e.to_string(),
-            }
+            };
+        }
+        Err(_) => {
+            return ForwardOutcome::Unreachable {
+                timeout: true,
+                message: format!(
+                    "upstream did not send response headers within {}s",
+                    tuning.headers_timeout_secs
+                ),
+            };
         }
     };
 
@@ -210,14 +225,22 @@ async fn forward_one(
             "gateway: upstream non-success"
         );
     }
-    let relay = super::protocol_anthropic::relay_response(
+    // Relay + observe with the same first-event probe the anthropic/chat
+    // paths use: an in-band stream error fails the attempt (retry/migrate)
+    // instead of relaying a "successful" empty stream to the agent.
+    let relay = match super::protocol_anthropic::probe_and_relay(
         state.clone(),
-        request_id.to_string(),
+        &request_id.to_string(),
         upstream_kind,
         upstream_resp,
-        status,
+        &route.endpoint_id,
+        &route.model,
     )
-    .await;
+    .await
+    {
+        Ok(relay) => relay,
+        Err(in_band_failure) => return in_band_failure,
+    };
     // Convert a bridged upstream wire back to the Responses shape the agent
     // speaks; a native responses upstream passes through verbatim.
     let body = if bridging {

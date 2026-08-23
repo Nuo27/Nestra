@@ -14,6 +14,7 @@ import { confirmDialog } from "../components/controls/ConfirmDialog";
 import { ErrorBanner } from "../components/feedback/ErrorBanner";
 import { Skeleton } from "../components/ui/skeleton";
 import { DiagnosticsSection } from "../components/controls/DiagnosticsSection";
+import { GatewayTuningSection } from "../components/controls/GatewayTuningSection";
 import { useUI, type ThemePref } from "../stores/ui";
 
 type Cadence = "on-launch" | "manual";
@@ -312,6 +313,8 @@ export function SettingsPage() {
           </Button>
         </div>
       </Card>
+
+      <GatewayTuningSection />
 
       <DiagnosticsSection />
 

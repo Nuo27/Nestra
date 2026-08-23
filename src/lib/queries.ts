@@ -9,6 +9,7 @@ export const qk = {
   agents: () => ["agents"] as const,
   endpoints: () => ["endpoints"] as const,
   endpoint: (id: string) => ["endpoint", id] as const,
+  providerHealth: () => ["provider-health"] as const,
   endpointQuota: (id: string) => ["endpoint-quota", id] as const,
   skills: () => ["skills"] as const,
   mcp: () => ["mcp"] as const,

@@ -84,3 +84,46 @@ export const gatewayTokenRegenerate = () =>
 
 export const gatewayRecentActivity = (limit = 10) =>
   invoke<RouteRecord[]>("gateway_recent_activity", { limit });
+
+// ──────────────────────────────────────────────────────────────────────────
+// Gateway tuning (timeouts + circuit-breaker parameters) and live provider
+// health. Tuning edits hot-apply to the next request — no gateway restart.
+// ──────────────────────────────────────────────────────────────────────────
+
+export interface GatewayTuning {
+  headers_timeout_secs: number;
+  first_event_timeout_secs: number;
+  /** Max gap between SSE frames mid-stream; 0 disables. */
+  stream_silence_timeout_secs: number;
+  buffered_body_timeout_secs: number;
+  /** Wall-clock cap on the whole retry/migrate loop for one request. */
+  request_deadline_secs: number;
+  breaker_failure_threshold: number;
+  breaker_recovery_wait_secs: number;
+  breaker_success_threshold: number;
+  /** Rolling-window error-rate backstop; 0 disables. */
+  breaker_error_rate_pct: number;
+  breaker_min_requests: number;
+}
+
+export interface EndpointHealthSnap {
+  endpoint_id: string;
+  state: "closed" | "open" | "half_open";
+  consecutive_failures: number;
+  last_failure: string | null;
+  /** Present while the circuit is open: millis until half-open probing. */
+  recovery_in_ms: number | null;
+}
+
+export const gatewayTuningGet = () =>
+  invoke<GatewayTuning>("gateway_tuning_get");
+
+/** Returns the clamped tuning that was persisted + applied. */
+export const gatewayTuningSet = (tuning: GatewayTuning) =>
+  invoke<GatewayTuning>("gateway_tuning_set", { tuning });
+
+export const providerHealthSnapshot = () =>
+  invoke<EndpointHealthSnap[]>("provider_health_snapshot");
+
+export const providerHealthReset = () =>
+  invoke<void>("provider_health_reset");

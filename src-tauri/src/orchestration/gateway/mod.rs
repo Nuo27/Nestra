@@ -32,7 +32,10 @@ pub mod protocol_responses;
 pub mod stream;
 pub mod stream_convert;
 pub mod stream_responses;
+pub mod tuning;
 
+#[cfg(test)]
+mod tests_capture;
 #[cfg(test)]
 mod tests_e2e;
 
@@ -104,6 +107,11 @@ pub struct GatewayState {
     /// restart. NEVER serialized or logged — lives only in the keychain + this
     /// shared `RwLock`.
     pub loopback_token: Arc<tokio::sync::RwLock<String>>,
+    /// Live runtime tuning (timeouts + breaker parameters). Shared with
+    /// `AppState` and `ProviderHealth` — a Settings edit applies to the next
+    /// request with no restart. Std RwLock: brief, never-across-`.await`
+    /// sections only (see `tuning.rs`).
+    pub tuning: tuning::SharedTuning,
 }
 
 /// The gateway's fixed loopback port. FIXED (not ephemeral) so the stable

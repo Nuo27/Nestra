@@ -10,6 +10,8 @@ import {
   endpointList,
   type BuiltinKind,
   type CreateWithPresetResult,
+  providerHealthReset,
+  providerHealthSnapshot,
 } from "../ipc";
 import { extractError } from "../ipc/errors";
 import { useUI } from "../stores/ui";
@@ -42,6 +44,17 @@ export function ProvidersPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const q = useQuery({ queryKey: qk.endpoints(), queryFn: endpointList });
+  const healthQ = useQuery({
+    queryKey: qk.providerHealth(),
+    queryFn: providerHealthSnapshot,
+    refetchInterval: 10_000,
+  });
+  const anyBreakerTripped = (healthQ.data ?? []).some((s) => s.state !== "closed");
+  const resetHealth = async () => {
+    await providerHealthReset();
+    qc.invalidateQueries({ queryKey: qk.providerHealth() });
+    toast(t("providers.healthResetToast"), "success");
+  };
   const endpoints = q.data ?? [];
   const [creating, setCreating] = useState(false);
   const toast = useUI((s) => s.pushToast);
@@ -149,6 +162,11 @@ export function ProvidersPage() {
         info={t("providers.help")}
         action={
           <div className="flex items-center gap-3">
+            {anyBreakerTripped && (
+              <Button variant="ghost" size="sm" onClick={resetHealth}>
+                {t("providers.resetHealth")}
+              </Button>
+            )}
             <SyncIndicator query={q} />
             <NewProviderButton onClick={() => setCreating(true)} />
           </div>
