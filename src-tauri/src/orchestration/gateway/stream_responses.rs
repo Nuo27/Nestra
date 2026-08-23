@@ -73,6 +73,41 @@ fn take_one_frame(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
 /// aborted with an error event instead.
 const MAX_FRAME_BUFFER: usize = 8 * 1024 * 1024; // 8 MiB
 
+/// The output item of a `response.output_item.*` event. OpenAI names it
+/// `output_item`; opencode-go names it `item` — accept both.
+fn output_item<'a>(j: &'a Value) -> Option<&'a Value> {
+    j.get("output_item").or_else(|| j.get("item"))
+}
+
+/// Resolve the tool key for an argument-delta event: OpenAI tags them with
+/// `item_id`; opencode-go tags them with `output_index` only. Returns the
+/// key the converter registered the tool under (`item_id` or `#<index>`).
+fn delta_tool_key(j: &Value) -> Option<String> {
+    if let Some(id) = j.get("item_id").and_then(Value::as_str) {
+        if !id.is_empty() {
+            return Some(id.to_string());
+        }
+    }
+    j.get("output_index")
+        .and_then(Value::as_u64)
+        .map(|oi| format!("#{oi}"))
+}
+
+/// opencode-go's argument delta stream truncates the start of the arguments
+/// object — the fragments concatenate to `command":"echo hi"}` (missing the
+/// `{"` prefix), so they would never parse as JSON. Restore the missing
+/// prefix on the first fragment of each tool: `{"` before a bare key, `{`
+/// before a quoted key.
+fn brace_first_fragment(first: bool, delta: &str) -> String {
+    if !first || delta.starts_with('{') {
+        delta.to_string()
+    } else if delta.starts_with('"') {
+        format!("{{{}", delta)
+    } else {
+        format!("{{\"{}", delta)
+    }
+}
+
 /// Event name + data for one SSE frame: `event:` line when present, else the
 /// JSON `type` field (some compatible gateways omit the event line).
 fn event_name(frame: &str) -> (Option<String>, Option<Value>) {
@@ -199,6 +234,9 @@ struct ToolState {
     name: Option<String>,
     started: bool,
     pending_args: Vec<u8>,
+    /// Whether any argument fragment arrived — guards the leading-`{`
+    /// restoration for opencode's brace-less first fragment.
+    args_seen: bool,
 }
 
 /// State machine converting `response.*` SSE events into Anthropic
@@ -216,6 +254,12 @@ pub struct ResponsesToAnthropicStream {
     open_reasoning: Option<usize>,
     open_text: Option<usize>,
     tool_states: HashMap<String, ToolState>,
+    /// `#<output_index>` → item_id: opencode tags delta events by output
+    /// index instead of item id.
+    index_alias: HashMap<String, String>,
+    /// A function_call output item was seen (opencode's `response.completed`
+    /// carries no output array to infer this from).
+    saw_tool: bool,
     open_tool_order: Vec<String>,
     stop_reason: Option<String>,
     latest_usage: Option<Value>,
@@ -241,6 +285,8 @@ impl ResponsesToAnthropicStream {
             open_reasoning: None,
             open_text: None,
             tool_states: HashMap::new(),
+            index_alias: HashMap::new(),
+            saw_tool: false,
             open_tool_order: Vec::new(),
             stop_reason: None,
             latest_usage: None,
@@ -417,12 +463,18 @@ impl ResponsesToAnthropicStream {
             "response.in_progress" => {}
             "response.output_item.added" => {
                 let Some(j) = json else { return };
-                let Some(item) = j.get("output_item") else { return };
+                let Some(item) = output_item(j) else { return };
                 let item_id = item.get("id").and_then(Value::as_str).unwrap_or("");
                 match item.get("type").and_then(Value::as_str) {
                     Some("reasoning") => self.open_reasoning_block(),
                     Some("message") => {}
                     Some("function_call") => {
+                        self.saw_tool = true;
+                        // opencode keys the delta events by output index —
+                        // remember the mapping back to the item id.
+                        if let Some(oi) = j.get("output_index").and_then(Value::as_u64) {
+                            self.index_alias.insert(format!("#{oi}"), item_id.to_string());
+                        }
                         let st = ToolState {
                             block_index: 0,
                             id: item
@@ -433,6 +485,7 @@ impl ResponsesToAnthropicStream {
                             name: item.get("name").and_then(Value::as_str).map(String::from),
                             started: false,
                             pending_args: Vec::new(),
+                            args_seen: false,
                         };
                         // Name is present in well-formed gateways — start
                         // immediately; otherwise wait for the first delta.
@@ -527,43 +580,41 @@ impl ResponsesToAnthropicStream {
                 }
             }
             "response.function_call_arguments.delta" => {
-                let item_id = json
-                    .and_then(|j| j.get("item_id"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let delta = json
-                    .and_then(|j| j.get("delta"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let Some(j) = json else { return };
+                let item_id = delta_tool_key(j)
+                    .map(|k| self.index_alias.get(&k).cloned().unwrap_or(k))
+                    .unwrap_or_default();
+                let delta = j.get("delta").and_then(Value::as_str).unwrap_or("");
 
                 if delta.is_empty() {
                     return;
                 }
-                let entry = self.tool_states.get_mut(&item_id.to_string());
+                let entry = self.tool_states.get_mut(&item_id);
                 let Some(state) = entry else { return };
 
+                let fragment = brace_first_fragment(!state.args_seen, delta);
+                state.args_seen = true;
                 if state.started {
                     let idx = state.block_index;
-                    let text = delta.to_string();
                     self.out.extend_from_slice(&sse(
                         "content_block_delta",
                         serde_json::json!({
                             "type": "content_block_delta",
                             "index": idx,
-                            "delta": { "type": "input_json_delta", "partial_json": text }
+                            "delta": { "type": "input_json_delta", "partial_json": fragment }
                         }),
                     ));
                 } else {
                     // Arguments arrived before name: buffer, flushed by the
                     // late start.
-                    state.pending_args.extend_from_slice(delta.as_bytes());
+                    state.pending_args.extend_from_slice(fragment.as_bytes());
                 }
             }
             "response.function_call_arguments.done" => {
-                let item_id = json
-                    .and_then(|j| j.get("item_id"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let Some(j) = json else { return };
+                let item_id = delta_tool_key(j)
+                    .map(|k| self.index_alias.get(&k).cloned().unwrap_or(k))
+                    .unwrap_or_default();
                 // Late start (name arrived in a delta-tagged event).
                 let needs_start = {
                     let state = self.tool_states.get(&item_id.to_string());
@@ -571,7 +622,7 @@ impl ResponsesToAnthropicStream {
                         Some(s) if !s.started && s.name.is_none() => {
                             // No name ever arrived — drop the block.
                             self.tool_states.remove(&item_id.to_string());
-                            self.open_tool_order.retain(|i| i != item_id);
+                            self.open_tool_order.retain(|i| i != item_id.as_str());
                             return;
                         }
                         Some(s) if !s.started => true,
@@ -599,13 +650,12 @@ impl ResponsesToAnthropicStream {
                 self.close_tool_block(&item_id);
             }
             "response.output_item.done" => {
-                let item_id = json
-                    .and_then(|j| j.get("output_item"))
+                let item = json.and_then(output_item);
+                let item_id = item
                     .and_then(|i| i.get("id"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                let kind = json
-                    .and_then(|j| j.get("output_item"))
+                let kind = item
                     .and_then(|i| i.get("type"))
                     .and_then(Value::as_str);
                 match kind {
@@ -648,6 +698,9 @@ impl ResponsesToAnthropicStream {
                         })
                     })
                     .unwrap_or(false);
+                // opencode's completed event carries usage only — no output
+                // array — so also honor the function_call items seen live.
+                let has_tool = has_tool || self.saw_tool;
                 self.stop_reason = Some(match status {
                     "incomplete" => {
                         let reason = resp
@@ -857,6 +910,9 @@ pub struct ResponsesToChatStream {
     out: Vec<u8>,
     done: bool,
     tool_indices: HashMap<String, usize>,
+    /// Tools whose first argument fragment arrived — guards the leading-`{`
+    /// restoration for opencode's brace-less first fragment.
+    tool_args_seen: std::collections::HashSet<usize>,
     next_tool_index: usize,
     stop_reason: Option<String>,
     latest_usage: Option<Value>,
@@ -876,6 +932,7 @@ impl ResponsesToChatStream {
             out: Vec::new(),
             done: false,
             tool_indices: HashMap::new(),
+            tool_args_seen: std::collections::HashSet::new(),
             next_tool_index: 0,
             stop_reason: None,
             latest_usage: None,
@@ -911,7 +968,7 @@ impl ResponsesToChatStream {
         match name {
             "response.output_item.added" => {
                 let Some(j) = json else { return };
-                let Some(item) = j.get("output_item") else { return };
+                let Some(item) = output_item(j) else { return };
                 if item.get("type").and_then(Value::as_str) != Some("function_call") {
                     return;
                 }
@@ -919,8 +976,14 @@ impl ResponsesToChatStream {
                 let idx = self.next_tool_index;
                 self.next_tool_index += 1;
                 self.tool_indices.insert(item_id.to_string(), idx);
+                // opencode tags the argument-delta events by output index
+                // instead of item id — register that key too.
+                if let Some(oi) = j.get("output_index").and_then(Value::as_u64) {
+                    self.tool_indices.insert(format!("#{oi}"), idx);
+                }
                 let mut tool = Map::new();
                 tool.insert("index".into(), Value::from(idx));
+                tool.insert("type".into(), Value::String("function".into()));
                 if let Some(id) = item.get("call_id").and_then(Value::as_str) {
                     tool.insert("id".into(), Value::String(id.into()));
                 }
@@ -932,23 +995,19 @@ impl ResponsesToChatStream {
                 self.chunk(serde_json::json!({ "tool_calls": [Value::Object(tool)] }), None);
             }
             "response.function_call_arguments.delta" => {
-                let item_id = json
-                    .and_then(|j| j.get("item_id"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let delta = json
-                    .and_then(|j| j.get("delta"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let Some(j) = json else { return };
+                let Some(key) = delta_tool_key(j) else { return };
+                let delta = j.get("delta").and_then(Value::as_str).unwrap_or("");
                 if delta.is_empty() {
                     return;
                 }
-                let Some(&idx) = self.tool_indices.get(&item_id.to_string()) else {
+                let Some(&idx) = self.tool_indices.get(&key) else {
                     return;
                 };
+                let fragment = brace_first_fragment(self.tool_args_seen.insert(idx), delta);
                 let mut tool = Map::new();
                 tool.insert("index".into(), Value::from(idx));
-                tool.insert("function".into(), serde_json::json!({ "arguments": delta }));
+                tool.insert("function".into(), serde_json::json!({ "arguments": fragment }));
                 self.chunk(serde_json::json!({ "tool_calls": [Value::Object(tool)] }), None);
             }
             "response.output_text.delta" | "response.refusal.delta" => {
@@ -990,6 +1049,9 @@ impl ResponsesToChatStream {
                         })
                     })
                     .unwrap_or(false);
+                // opencode's completed event carries usage only — no output
+                // array — so also honor the function_call items seen live.
+                let has_tool = has_tool || self.next_tool_index > 0;
                 self.stop_reason = Some(match status {
                     "incomplete" => "max_tokens",
                     _ => {

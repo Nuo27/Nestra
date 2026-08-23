@@ -223,6 +223,22 @@ impl OpenAiToAnthropicStream {
             message.insert("content".into(), Value::Array(Vec::new()));
             message.insert("stop_reason".into(), Value::Null);
             message.insert("stop_sequence".into(), Value::Null);
+            // Real Anthropic ALWAYS includes `usage` on message_start —
+            // Claude-Code-family clients read `message.usage.input_tokens`
+            // off the first event and can throw (killing their stream
+            // consumer → connection abort) when it's absent. The true input
+            // count only arrives with the final chunk
+            // (`stream_options.include_usage`), so open with the first
+            // chunk's count when it carries one, else zeros.
+            let first_input = chunk
+                .get("usage")
+                .and_then(|u| u.get("prompt_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            message.insert(
+                "usage".into(),
+                serde_json::json!({"input_tokens": first_input, "output_tokens": 1}),
+            );
             let mut start = Map::new();
             start.insert("type".into(), Value::String("message_start".into()));
             start.insert("message".into(), Value::Object(message));
@@ -384,6 +400,10 @@ impl OpenAiToAnthropicStream {
             message.insert("content".into(), Value::Array(Vec::new()));
             message.insert("stop_reason".into(), Value::Null);
             message.insert("stop_sequence".into(), Value::Null);
+            message.insert(
+                "usage".into(),
+                serde_json::json!({"input_tokens": 0, "output_tokens": 1}),
+            );
             let mut start = Map::new();
             start.insert("type".into(), Value::String("message_start".into()));
             start.insert("message".into(), Value::Object(message));
@@ -418,7 +438,9 @@ impl OpenAiToAnthropicStream {
             delta.insert("usage".into(), Value::Object(usage));
         }
         self.emit("message_delta", &Value::Object(delta));
-        self.emit("message_stop", &Value::Object(Map::new()));
+        // Real Anthropic sends `{"type":"message_stop"}` — strict clients
+        // validate the data payload matches the event name.
+        self.emit("message_stop", &serde_json::json!({"type": "message_stop"}));
     }
 }
 

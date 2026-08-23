@@ -156,6 +156,73 @@ fn responses_stream_utf8_split_across_frames() {
 // ---- ResponsesToChatStream ----
 
 #[test]
+fn responses_chat_stream_handles_opencode_event_shapes() {
+    // EXACT event shapes captured from opencode-go's /v1/responses SSE
+    // (ox-alpha-free): item events carry `item` (not `output_item`) and an
+    // `output_index`; argument deltas are keyed by `output_index` (no
+    // `item_id`) and the first fragment omits the opening `{`; `completed`
+    // carries usage only (no output array to infer tool_use from).
+    let upstream = format!(
+        "{}{}{}{}{}{}",
+        r_ev("response.output_item.added", r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"call_1","type":"function_call","name":"bash","call_id":"call_1","arguments":""}}"#),
+        r_ev("response.function_call_arguments.delta", r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"command\":\""}"#),
+        r_ev("response.function_call_arguments.delta", r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"echo"}"#),
+        r_ev("response.function_call_arguments.delta", r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":" hi\""}"#),
+        r_ev("response.function_call_arguments.delta", r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"}"}"#),
+        r_ev("response.completed", r#"{"type":"response.completed","response":{"id":"r1","model":"ox-alpha-free","usage":{"input_tokens":236,"output_tokens":27}}}"#),
+    );
+    let out = collect_all(ResponsesToChatStream::new(Full::new(frame(&upstream))));
+
+    // Tool start chunk carries id + name + type (key order is serde's).
+    assert!(out.contains(r#""tool_calls":[{"#), "start chunk: {out}");
+    assert!(out.contains(r#""type":"function""#), "start chunk type: {out}");
+    assert!(out.contains(r#""id":"call_1""#));
+    assert!(out.contains(r#""name":"bash""#), "start chunk name: {out}");
+    // Argument fragments reconstruct a parseable JSON object (leading `{"`
+    // restored on the first fragment).
+    let args: String = out
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| {
+            v["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .map(String::from)
+        })
+        .collect();
+    let parsed: serde_json::Value = serde_json::from_str(&args).expect("args must parse");
+    assert_eq!(parsed["command"], "echo hi");
+    // finish_reason reflects the tool call even without an output array.
+    assert!(out.contains(r#""finish_reason":"tool_calls""#), "finish: {out}");
+    assert!(out.contains(r#""prompt_tokens":236"#));
+    assert!(out.contains("data: [DONE]"));
+}
+
+#[test]
+fn responses_anthropic_stream_handles_opencode_event_shapes() {
+    // Same opencode quirks through the Anthropic converter (zcode path).
+    let upstream = format!(
+        "{}{}{}",
+        r_ev("response.output_item.added", r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"call_1","type":"function_call","name":"bash","call_id":"call_1","arguments":""}}"#),
+        r_ev("response.function_call_arguments.delta", r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"command\":\"echo hi\"}"}"#),
+        r_ev("response.completed", r#"{"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":236,"output_tokens":27}}}"#),
+    );
+    let out = collect_all(ResponsesToAnthropicStream::new(Full::new(frame(&upstream))));
+
+    assert!(out.contains(r#""type":"tool_use""#), "tool_use block: {out}");
+    assert!(out.contains(r#""name":"bash""#));
+    let args: String = out
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v["delta"]["partial_json"].as_str().map(String::from))
+        .collect();
+    let parsed: serde_json::Value = serde_json::from_str(&args).expect("args must parse");
+    assert_eq!(parsed["command"], "echo hi");
+    assert!(out.contains(r#""stop_reason":"tool_use""#), "stop_reason: {out}");
+}
+
+#[test]
 fn responses_stream_to_chat_chunks() {
     let upstream = format!(
         "{}{}{}",

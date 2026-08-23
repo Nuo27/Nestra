@@ -125,3 +125,93 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":77,"outpu
     observe_responses_chunk("data: not json\n\nevent: ping\ndata: {}", &mut obs);
     assert_eq!(obs.tool_call_ids.len(), 1);
 }
+// ---- first-event in-band error probe ----
+
+use super::*;
+use http_body_util::Full;
+
+fn probe_over(bytes: &'static [u8]) -> FirstEventProbe {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(probe_first_sse_event(
+        Full::new(Bytes::from_static(bytes)),
+        std::time::Duration::from_secs(30),
+    ))
+}
+
+#[test]
+fn probe_flags_chat_network_error_terminal_chunk() {
+    // The observed opencode-go failure shape: 200 + SSE whose ONLY event is
+    // a terminal error-valued finish_reason on an empty delta.
+    let out = probe_over(
+        b"data: {\"choices\":[{\"index\":0,\"finish_reason\":\"network_error\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+    );
+    match out {
+        FirstEventProbe::InBandError { reason } => assert!(reason.contains("network_error")),
+        _ => panic!("expected InBandError"),
+    }
+}
+
+#[test]
+fn probe_passes_healthy_first_chunk_through() {
+    let out = probe_over(
+        b"data: {\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n",
+    );
+    match out {
+        FirstEventProbe::Ok { held, .. } => {
+            assert!(held.starts_with(b"data:"));
+            assert!(held.ends_with(b"\n\n") || held.ends_with(b"\n"));
+        }
+        _ => panic!("expected Ok"),
+    }
+}
+
+#[test]
+fn probe_passes_benign_terminal_first_chunk() {
+    // A first chunk that is ALREADY terminal but benign ("stop") with no
+    // content is a legitimate empty completion — not a failure.
+    let out = probe_over(
+        b"data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{}}]}\n\n",
+    );
+    assert!(matches!(out, FirstEventProbe::Ok { .. }));
+}
+
+#[test]
+fn probe_flags_content_bearing_error_chunk_as_ok() {
+    // Content already streamed in the first event + error finish_reason:
+    // generation started — the agent gets it (honesty contract).
+    let out = probe_over(
+        b"data: {\"choices\":[{\"index\":0,\"finish_reason\":\"network_error\",\"delta\":{\"content\":\"partial\"}}]}\n\n",
+    );
+    assert!(matches!(out, FirstEventProbe::Ok { .. }));
+}
+
+#[test]
+fn probe_flags_error_envelope_and_responses_failed() {
+    let out = probe_over(b"data: {\"error\":{\"message\":\"overloaded\"}}\n\n");
+    match out {
+        FirstEventProbe::InBandError { reason } => assert_eq!(reason, "overloaded"),
+        _ => panic!("expected InBandError"),
+    }
+    let out = probe_over(
+        b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"boom\"}}}\n\n",
+    );
+    match out {
+        FirstEventProbe::InBandError { reason } => assert_eq!(reason, "boom"),
+        _ => panic!("expected InBandError"),
+    }
+}
+
+#[test]
+fn probe_passes_ping_and_done_events() {
+    assert!(matches!(
+        probe_over(b": ping\n\ndata: [DONE]\n\n"),
+        FirstEventProbe::Ok { .. }
+    ));
+    // Responses wire healthy first event.
+    assert!(matches!(
+        probe_over(
+            b"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n"
+        ),
+        FirstEventProbe::Ok { .. }
+    ));
+}

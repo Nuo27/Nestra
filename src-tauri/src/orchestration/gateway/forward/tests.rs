@@ -13,6 +13,7 @@ fn gateway_state(conn: rusqlite::Connection) -> GatewayState {
         affinity: Arc::new(crate::orchestration::router::RouteAffinity::new()),
         credential_reader: Arc::new(|_| Ok(None)),
         loopback_token: Arc::new(tokio::sync::RwLock::new("test-token".into())),
+        tuning: super::super::tuning::shared_default(),
     }
 }
 
@@ -113,9 +114,9 @@ async fn gateway_success_records_request_visible_to_task_reads() {
     assert_eq!((inp, out), (100, 50));
 }
 
-/// A surfaced failure (side-effect-risk body that must never be blindly
-/// retried) must mark the task `failed` — the terminal lifecycle for the
-/// honest failure path.
+/// A surfaced failure (side-effect-risk body that already streamed response
+/// bytes — never blindly retried) must mark the task `failed` — the terminal
+/// lifecycle for the honest failure path.
 #[tokio::test]
 async fn gateway_surface_failure_marks_task_failed() {
     let state = gateway_state(rusqlite::Connection::open_in_memory().unwrap());
@@ -129,8 +130,8 @@ async fn gateway_surface_failure_marks_task_failed() {
         let route = ok_route("ep-1", _ctx);
         Box::pin(async move { Ok(route) })
     };
-    // A 500 response on a side-effect-risk body must Surface (never blind
-    // retry a possibly-executed tool call), so the loop exits via the
+    // A 500 after bytes flowed on a side-effect-risk body must Surface (never
+    // blind-retry a possibly-executed tool call), so the loop exits via the
     // MigrationDecision::Surface arm and marks the task failed.
     let forward = |_ctx: &TaskContext, _route: &ResolvedRoute| -> ForwardFuture {
         Box::pin(async move {
@@ -140,6 +141,96 @@ async fn gateway_surface_failure_marks_task_failed() {
                 body: GatewayBody::Full(Full::new(Bytes::from(
                     r#"{"type":"error","error":{"message":"boom"}}"#,
                 ))),
+                usage: None,
+                tool_calls: None,
+                tool_names: None,
+                generation_started: true,
+                body_error: None,
+            }
+        })
+    };
+    let error_response = |status: StatusCode, msg: &str| {
+        build_agent_response(status, HeaderMap::new(), GatewayBody::Full(Full::new(Bytes::from(msg.to_string()))))
+    };
+
+    let resp = run_with_migration(
+        &state,
+        ctx,
+        "claude-code-cli".to_string(),
+        chrono::Utc::now().timestamp_millis(),
+        true, // side-effect risk — surfaces because bytes already flowed
+        resolve,
+        forward,
+        error_response,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let conn = state.db.lock().await;
+    let lc: String = conn
+        .query_row("SELECT lifecycle FROM task", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(lc, "failed", "surfaced failure must mark the task failed");
+}
+
+/// The pre-response replay path (the production ox-alpha-free scenario): a
+/// tool-carrying request that fails with an empty-body 503 BEFORE any
+/// response bytes must retry the same endpoint, then migrate — and when no
+/// fallback is eligible, terminate with a 503 and the `failed` lifecycle
+/// instead of surfacing the first failure (or looping forever).
+#[tokio::test]
+async fn gateway_pre_response_failure_retries_then_falls_back() {
+    let state = gateway_state(rusqlite::Connection::open_in_memory().unwrap());
+    {
+        let conn = state.db.lock().await;
+        crate::db::create_endpoint(&conn, "ep-1", "anthropic", "Test").unwrap();
+        crate::db::create_endpoint(&conn, "ep-2", "anthropic", "Test").unwrap();
+        // A second policy target must exist for the retry ladder to run at
+        // all: the fast-fail guard collapses RetrySame to Surface when
+        // `failover_targets` sees no alternative (single-target policies
+        // fail fast by design — see the e2e
+        // `single_target_policy_fails_fast_without_retry_ladder`).
+        let targets = serde_json::to_string(&[
+            serde_json::json!({"endpoint": "ep-1", "model": "claude-haiku-4-5"}),
+            serde_json::json!({"endpoint": "ep-2", "model": "claude-haiku-4-5"}),
+        ])
+        .unwrap();
+        conn.execute(
+            "INSERT INTO routing_policy (agent_id, role, route_targets, migrate_on_quota,
+                                        inject_cache_control, affinity_scope, updated_at)
+             VALUES ('claude-code-cli','*',?1,1,0,'task',1)",
+            [&targets],
+        )
+        .unwrap();
+    }
+    let ctx = TaskContext::new_task("claude-code-cli", Some("sess-1".to_string()));
+
+    // First resolve returns the route; the post-Migrate re-resolve reports no
+    // eligible fallback (the real router skips the now-degraded endpoint).
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let resolve = move |_ctx: &TaskContext| -> ResolveFuture {
+        let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let route = ok_route("ep-1", _ctx);
+        Box::pin(async move {
+            if n == 0 {
+                Ok(route)
+            } else {
+                Ok(ResolvedRoute {
+                    endpoint_id: String::new(),
+                    reason: RouteReason::NoEligible,
+                    ..route
+                })
+            }
+        })
+    };
+    // Always an empty-body 503, generation never started.
+    let forward = |_ctx: &TaskContext, _route: &ResolvedRoute| -> ForwardFuture {
+        Box::pin(async move {
+            ForwardOutcome::Responded {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                headers: HeaderMap::new(),
+                body: GatewayBody::Full(Full::new(Bytes::new())),
                 usage: None,
                 tool_calls: None,
                 tool_names: None,
@@ -157,18 +248,178 @@ async fn gateway_surface_failure_marks_task_failed() {
         ctx,
         "claude-code-cli".to_string(),
         chrono::Utc::now().timestamp_millis(),
-        true, // side-effect risk — never blind-retry
+        true, // side-effect risk — replays because no bytes flowed
         resolve,
         forward,
         error_response,
     )
     .await
     .unwrap();
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let conn = state.db.lock().await;
     let lc: String = conn
         .query_row("SELECT lifecycle FROM task", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(lc, "failed", "surfaced failure must mark the task failed");
+    assert_eq!(lc, "failed", "exhausted fallback must mark the task failed");
+    // Initial attempt + 2 same-endpoint retries (attempts 1 and 2 → RetrySame,
+    // attempt 3 → Migrate): 3 route_request rows, 1 migration row.
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM route_request", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 3, "expected initial attempt + 2 retries");
+    let (reason,): (String,) = conn
+        .query_row("SELECT reason FROM route_migration", [], |r| {
+            Ok((r.get(0)?,))
+        })
+        .unwrap();
+    assert_eq!(reason, "retries_exhausted");
+}
+
+/// The whole-loop deadline: even with alternatives available (the ladder
+/// WOULD keep going), `request_deadline_secs` caps the total wall clock and
+/// the loop stops with an honest 504. Pure stubs (no real IO) so paused
+/// tokio time auto-advances deterministically: each attempt "takes" 20s of
+/// paused time, the deadline is the 30s clamp minimum.
+#[tokio::test(start_paused = true)]
+async fn request_deadline_caps_the_ladder() {
+    let state = gateway_state(rusqlite::Connection::open_in_memory().unwrap());
+    {
+        let conn = state.db.lock().await;
+        crate::db::create_endpoint(&conn, "ep-1", "anthropic", "Test").unwrap();
+        crate::db::create_endpoint(&conn, "ep-2", "anthropic", "Test").unwrap();
+        let targets = serde_json::to_string(&[
+            serde_json::json!({"endpoint": "ep-1", "model": "claude-haiku-4-5"}),
+            serde_json::json!({"endpoint": "ep-2", "model": "claude-haiku-4-5"}),
+        ])
+        .unwrap();
+        conn.execute(
+            "INSERT INTO routing_policy (agent_id, role, route_targets, migrate_on_quota,
+                                        inject_cache_control, affinity_scope, updated_at)
+             VALUES ('claude-code-cli','*',?1,1,0,'task',1)",
+            [&targets],
+        )
+        .unwrap();
+    }
+    // 30s is the clamp minimum for the deadline.
+    *state.tuning.write().unwrap() = super::super::tuning::GatewayTuning {
+        request_deadline_secs: 30,
+        ..Default::default()
+    };
+    let ctx = TaskContext::new_task("claude-code-cli", Some("sess-1".to_string()));
+
+    // Always the same route (the ladder would loop forever without the
+    // deadline) and always a 20s-then-503 attempt.
+    let resolve = |_ctx: &TaskContext| -> ResolveFuture {
+        let route = ok_route("ep-1", _ctx);
+        Box::pin(async move { Ok(route) })
+    };
+    let forward = |_ctx: &TaskContext, _route: &ResolvedRoute| -> ForwardFuture {
+        Box::pin(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            ForwardOutcome::Responded {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                headers: HeaderMap::new(),
+                body: GatewayBody::Full(Full::new(Bytes::new())),
+                usage: None,
+                tool_calls: None,
+                tool_names: None,
+                generation_started: false,
+                body_error: None,
+            }
+        })
+    };
+    let error_response = |status: StatusCode, msg: &str| {
+        build_agent_response(status, HeaderMap::new(), GatewayBody::Full(Full::new(Bytes::from(msg.to_string()))))
+    };
+
+    let resp = run_with_migration(
+        &state,
+        ctx,
+        "claude-code-cli".to_string(),
+        chrono::Utc::now().timestamp_millis(),
+        false,
+        resolve,
+        forward,
+        error_response,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+
+    let conn = state.db.lock().await;
+    let lc: String = conn
+        .query_row("SELECT lifecycle FROM task", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(lc, "failed", "deadline expiry must mark the task failed");
+    // Attempt 1 ends at t=20, attempt 2 at t=40; the loop-top check at t≥30
+    // stops the ladder after two attempts.
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM route_request", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 2, "deadline fires between attempt 2 and 3");
+}
+
+
+/// Lock-escape: while ANOTHER connection holds the write lock (launch
+/// reconcile's shape — multi-second per-provider transactions), a terminal
+/// observability write must (a) return FAST (the inline attempt defers at
+/// ~150ms busy, never the 5s connection default — that stall is what made
+/// zcode reconnect-loop while the gateway rows said 200), and (b) still
+/// land once the lock releases (bounded background retry). Real file-backed
+/// SQLite — in-memory DBs are per-connection and can't reproduce the
+/// cross-connection lock.
+#[tokio::test]
+async fn locked_db_defers_observability_write_instead_of_stalling() {
+    let dir = tempfile::tempdir().unwrap();
+    let gw_conn = crate::db::open(dir.path()).unwrap();
+    let state = gateway_state(gw_conn);
+    let task_id = uuid::Uuid::new_v4();
+    {
+        let conn = state.db.lock().await;
+        conn.execute(
+            "INSERT INTO task (id, lifecycle, started_at) VALUES (?1, 'born', 0)",
+            rusqlite::params![task_id.to_string()],
+        )
+        .unwrap();
+    }
+
+    // Antagonist: a separate connection holding the write lock for 1.5s.
+    let ant = crate::db::open(dir.path()).unwrap();
+    ant.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        ant.execute_batch("ROLLBACK;").unwrap();
+    });
+
+    let t0 = std::time::Instant::now();
+    mark_task_terminal(&state, &task_id, TaskLifecycle::Done).await;
+    let elapsed = t0.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "terminal write must defer fast under lock (took {elapsed:?})"
+    );
+
+    holder.join().unwrap();
+    // The deferred write lands via the retry ladder shortly after release.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        let lc = {
+            let conn = state.db.lock().await;
+            conn.query_row(
+                "SELECT lifecycle FROM task WHERE id = ?1",
+                rusqlite::params![task_id.to_string()],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+        };
+        if lc.as_deref() == Some("done") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "deferred terminal write must land after lock release"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
 }

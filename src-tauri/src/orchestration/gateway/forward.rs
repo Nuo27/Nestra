@@ -19,9 +19,10 @@
 //! - A failure after bytes were received (buffered body read interrupted)
 //!   is a broken generation: the next attempt's `route_request` row is
 //!   inserted with `generation_broken = true`.
-//! - A request whose body declares tools/functions is never blind-retried:
-//!   `side_effect_risk` forces `Surface` so a possibly-executed tool call is
-//!   not double-executed.
+//! - A request whose body declares tools/functions is never blind-retried
+//!   once generation bytes were received: `side_effect_risk` forces `Surface`
+//!   so a possibly-executed tool call is not double-executed. A pre-response
+//!   failure replays per its class — nothing observable happened yet.
 //!
 //! Note: for SSE responses the gateway commits to relaying the stream the
 //! moment it returns from the forward closure, so a mid-stream SSE drop is
@@ -143,8 +144,29 @@ pub async fn run_with_migration(
     // silently switch endpoints while sharing the retry budget, and the
     // migrate_on_quota policy would be bypassed).
     let mut retry_route: Option<ResolvedRoute> = None;
+    // Wall-clock cap on the WHOLE loop (tuning `request_deadline_secs`) —
+    // the last-resort bound that makes an unbounded retry × migrate ladder
+    // impossible even for a pathological policy × upstream combination.
+    // tokio's Instant (not std's) so paused-clock tests control it.
+    let deadline_secs = super::tuning::snapshot(&state.tuning).request_deadline_secs;
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(deadline_secs);
 
     loop {
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(
+                deadline_secs,
+                task = %ctx.task_id,
+                "gateway: request deadline exceeded — abandoning retries/migrations"
+            );
+            mark_task_terminal(state, &ctx.task_id, TaskLifecycle::Failed).await;
+            return Ok(error_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                &format!(
+                    "nestra gateway: request deadline of {deadline_secs}s exceeded (retries/migrations abandoned)"
+                ),
+            ));
+        }
         let route = match retry_route.take() {
             Some(r) => r,
             None => resolve(&ctx).await?,
@@ -164,13 +186,20 @@ pub async fn run_with_migration(
 
         // Persist the credential-free projection of this attempt. First
         // ensure the run + task rows exist (route_request has FKs to them;
-        // the gateway never creates them elsewhere).
+        // the gateway never creates them elsewhere). Attempt-start stays
+        // synchronous (the usage backfill targets this row by request_id),
+        // but under a locked DB (launch reconcile) it must not eat the full
+        // 5s busy timeout — cap the pre-dial stall at 2s and skip
+        // bookkeeping beyond that (the outcome path's lock escape owns the
+        // rest; a skipped row only costs one observability record).
         let request_id = ctx.request_id.to_string();
         {
             let conn = state.db.lock().await;
+            let _ = conn.busy_timeout(std::time::Duration::from_millis(2000));
             let mut rec = RouteRecord::from_route(&ctx, &route, started_at);
             rec.generation_broken = generation_broken;
             record_attempt_start(&conn, &ctx, &rec);
+            let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         }
 
         let mut outcome = forward(&ctx, &route).await;
@@ -281,6 +310,38 @@ pub async fn run_with_migration(
         )
         .await;
 
+        // Fast-fail: when a RetrySame decision has nowhere else to go
+        // (single-target policy, or every other target already
+        // failed/degraded), the retry ladder only adds latency before the
+        // same surfacing — collapse it and surface NOW so the agent gets a
+        // prompt, honest error (an upstream zero-byte hang otherwise stalls
+        // the agent for minutes).
+        let decision = if matches!(decision, MigrationDecision::RetrySame { .. }) {
+            let has_alternative = {
+                let conn = state.db.lock().await;
+                let inputs = crate::orchestration::router::RouterInputs {
+                    conn: &conn,
+                    health: &state.health,
+                    quota: &state.quota,
+                    affinity: &state.affinity,
+                };
+                let mut excluding = ctx.failed_endpoints.clone();
+                if !excluding.iter().any(|e| e == &route.endpoint_id) {
+                    excluding.push(route.endpoint_id.clone());
+                }
+                crate::orchestration::router::failover_targets(&inputs, &ctx, &excluding)
+                    .map(|t| !t.is_empty())
+                    .unwrap_or(false)
+            };
+            if has_alternative {
+                decision
+            } else {
+                MigrationDecision::Surface
+            }
+        } else {
+            decision
+        };
+
         match decision {
             MigrationDecision::RetrySame {
                 backoff, generation_broken: next_broken, ..
@@ -300,9 +361,13 @@ pub async fn run_with_migration(
             } => {
                 generation_broken = next_broken;
                 failed_endpoint = Some(from_endpoint_id.clone());
+                // Exclude the failed endpoint on the next resolve so the
+                // router walks FORWARD in the policy's route-target list.
+                if !ctx.failed_endpoints.iter().any(|e| e == &from_endpoint_id) {
+                    ctx.failed_endpoints.push(from_endpoint_id.clone());
+                }
                 // Re-resolve for the fallback so the migration row records the
-                // actual target. The failed endpoint is now quota-exhausted /
-                // degraded, so the router picks a different one (or none).
+                // actual target (an excluded/degraded endpoint is skipped).
                 let to = match resolve(&ctx).await {
                     Ok(r) if r.reason != RouteReason::NoEligible && !r.endpoint_id.is_empty() => {
                         Some(r.endpoint_id.clone())
@@ -367,6 +432,9 @@ fn rotate_ctx(ctx: &TaskContext, agent_id: &str) -> TaskContext {
     next.required_capabilities = ctx.required_capabilities.clone();
     next.subagent_role = ctx.subagent_role.clone();
     next.role_source = ctx.role_source;
+    // Migration exclusions survive rotation — the next resolve must walk
+    // past endpoints that already failed on this request.
+    next.failed_endpoints = ctx.failed_endpoints.clone();
     next.lifecycle = TaskLifecycle::Routed;
     // The inbound protocol direction must survive retries: without it a
     // same-gateway bridge (anthropic inbound → openai row) silently flips to
@@ -482,68 +550,125 @@ pub async fn record_attempt_outcome(
             _ => {}
         }
     }
-    // route_request finalize.
-    let conn = state.db.lock().await;
-    // Persist the quota-state change so it survives a restart — the gateway
-    // previously only mutated the in-memory store, leaving the documented
-    // `last_quota_state` persistence bridge disconnected (the column stayed
-    // stale forever).
-    match class {
-        None => {
-            let _ = crate::orchestration::quota_state::persist(
-                &conn,
-                endpoint_id,
-                &state.quota.get(endpoint_id),
-            );
-        }
-        Some(FailureClass::QuotaExhausted) => {
-            let _ = crate::orchestration::quota_state::persist(
-                &conn,
-                endpoint_id,
-                &state.quota.get(endpoint_id),
-            );
-        }
-        _ => {}
-    }
+    // route_request finalize + quota/circuit persistence: observability —
+    // lock-escaped (see `observability_write`) so a locked DB never delays
+    // the agent response. The quota snapshot is taken HERE (the in-memory
+    // state above is authoritative for routing; the persisted copy is the
+    // restart bridge).
+    let quota_snap = state.quota.get(endpoint_id);
+    let health = state.health.clone();
+    let endpoint_id = endpoint_id.to_string();
+    let request_id = request_id.to_string();
     let ended_at = chrono::Utc::now().timestamp_millis();
     let (inp, out, cc, cr) = match usage {
         Some(u) => (u.input, u.output, u.cache_creation, u.cache_read),
         None => (None, None, None, None),
     };
-    if let Err(e) = store::update_route_request_outcome(
-        &conn,
-        request_id,
-        Some(status as i64),
-        inp,
-        out,
-        cc,
-        cr,
-        tool_calls,
-        tool_names,
-        generation_broken,
-        ended_at,
-    ) {
-        tracing::warn!("gateway: failed to finalize route_request: {e}");
-    }
-    // Persist the degraded-endpoint circuit when it transitioned (Smart
-    // Gateway fix 3). No-op while the set is stable — see
-    // `ProviderHealth::persist_degraded`.
-    state.health.persist_degraded(&conn);
+    let tool_names_owned = tool_names;
+    let persist_quota = matches!(
+        class,
+        None | Some(FailureClass::QuotaExhausted)
+    );
+    observability_write(state, "finalize route_request", move |conn| {
+        // Persist the quota-state change so it survives a restart — the
+        // gateway previously only mutated the in-memory store, leaving the
+        // documented `last_quota_state` persistence bridge disconnected
+        // (the column stayed stale forever).
+        if persist_quota {
+            crate::orchestration::quota_state::persist(conn, &endpoint_id, &quota_snap)?;
+        }
+        store::update_route_request_outcome(
+            conn,
+            &request_id,
+            Some(status as i64),
+            inp,
+            out,
+            cc,
+            cr,
+            tool_calls,
+            tool_names_owned.clone(),
+            generation_broken,
+            ended_at,
+        )?;
+        // Persist the open-circuit set when it transitioned. No-op while
+        // the set is stable — see `ProviderHealth::persist_degraded`.
+        health.persist_degraded(conn);
+        Ok(())
+    })
+    .await;
 }
 
 /// Transition the task to its terminal lifecycle state (`done`,
-/// `generationbroken`, or `failed`) when the loop exits. Best-effort: the
-/// lifecycle is observability, so a failed write only warns.
+/// `generationbroken`, or `failed`) when the loop exits. Best-effort and
+/// lock-escaped: the lifecycle is observability, so it must neither stall
+/// the response nor get lost to a momentary lock.
 async fn mark_task_terminal(state: &GatewayState, task_id: &uuid::Uuid, terminal: TaskLifecycle) {
-    let conn = state.db.lock().await;
-    if let Err(e) = store::set_task_lifecycle(
-        &conn,
-        &task_id.to_string(),
-        terminal,
-        chrono::Utc::now().timestamp_millis(),
-    ) {
-        tracing::warn!("gateway: failed to mark task {task_id} {terminal:?}: {e}");
+    let task_id = task_id.to_string();
+    observability_write(state, "mark task terminal", move |conn| {
+        store::set_task_lifecycle(
+            conn,
+            &task_id,
+            terminal,
+            chrono::Utc::now().timestamp_millis(),
+        )
+    })
+    .await;
+}
+
+/// Run one best-effort OBSERVABILITY write (outcome finalize, task-terminal
+/// lifecycle, migration row) with a bounded inline wait: normally it lands
+/// immediately; when the gateway DB is momentarily locked (launch reconcile
+/// holds per-provider write transactions for seconds at a time), the write
+/// defers to a bounded background retry instead of stalling the
+/// agent-facing response path — a 2×5s busy-timeout stall past the
+/// client's patience is what produced the zcode reconnect loop while the
+/// gateway rows said 200.
+///
+/// The inline attempt shortens the connection's busy timeout to 150ms so a
+/// locked DB defers fast; retries run at the connection's normal timeout.
+/// Attempt-START rows deliberately stay synchronous — the usage backfill
+/// targets them by request_id, so their ordering must not float.
+async fn observability_write(
+    state: &GatewayState,
+    what: &'static str,
+    write: impl Fn(&rusqlite::Connection) -> crate::error::AppResult<()> + Send + Sync + 'static,
+) {
+    let is_locked = |e: &crate::error::AppError| e.to_string().to_lowercase().contains("locked");
+    {
+        let conn = state.db.lock().await;
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(150));
+        let result = write(&conn);
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+        match result {
+            Ok(()) => return,
+            Err(e) if is_locked(&e) => {
+                tracing::warn!("gateway: {what} deferred — database locked, retrying in background");
+            }
+            Err(e) => {
+                tracing::warn!("gateway: {what} failed: {e}");
+                return;
+            }
+        }
     }
+    let state = state.clone();
+    tokio::spawn(async move {
+        // ~60s of widening backoff — launch reconcile windows are tens of
+        // seconds; beyond this the row is genuinely lost (logged, not hung).
+        let backoffs_ms: [u64; 7] = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
+        for ms in backoffs_ms {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            let conn = state.db.lock().await;
+            match write(&conn) {
+                Ok(()) => return,
+                Err(e) if is_locked(&e) => continue,
+                Err(e) => {
+                    tracing::warn!("gateway: {what} retry failed: {e}");
+                    return;
+                }
+            }
+        }
+        tracing::warn!("gateway: {what} gave up after retries");
+    });
 }
 
 /// Record a migration event (the route_migration row). `from_endpoint_id` is
@@ -567,10 +692,10 @@ pub async fn record_migration(
         detail,
         at_ms: chrono::Utc::now().timestamp_millis(),
     };
-    let conn = state.db.lock().await;
-    if let Err(e) = store::insert_route_migration(&conn, &mig) {
-        tracing::warn!("gateway: failed to record route_migration: {e}");
-    }
+    observability_write(state, "record route_migration", move |conn| {
+        store::insert_route_migration(conn, &mig)
+    })
+    .await;
 }
 
 #[cfg(test)]

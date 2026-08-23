@@ -174,6 +174,21 @@ fn chat_request_converts_messages_tools_and_usage_flag() {
     assert_eq!(input[2]["output"], "out");
 }
 
+#[test]
+fn chat_request_maps_max_completion_tokens() {
+    // Newer OpenAI clients (pi's SDK) send `max_completion_tokens` instead of
+    // `max_tokens` — it must reach the Responses wire as `max_output_tokens`.
+    let body = serde_json::json!({
+        "model": "ox-alpha-free",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_completion_tokens": 16384,
+        "store": false
+    });
+    let out = conv(chat_to_responses, &body);
+    assert_eq!(out["max_output_tokens"], 16384);
+    assert!(out.get("store").is_none());
+}
+
 // ---- responses_to_anthropic (response) ----
 
 #[test]

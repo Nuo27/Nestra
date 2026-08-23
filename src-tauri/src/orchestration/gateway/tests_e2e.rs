@@ -80,7 +80,7 @@ async fn mock_upstream(
 }
 
 /// Seed the in-memory DB with an opencode-go-style endpoint (dual rows on
-/// one base_url) bound to an agent, with the default model in `models_json`.
+/// one base_url) plus a `*` policy targeting its default model.
 fn seed_conn(
     addr: std::net::SocketAddr,
     agent: &str,
@@ -115,11 +115,37 @@ fn seed_conn(
         rusqlite::params![agent],
     )
     .unwrap();
+    seed_star_policy(&conn, agent, "opencode-go", models_json);
     crate::orchestration::capability_registry::rebuild(&conn).unwrap();
     conn
 }
 
-fn state_for(conn: rusqlite::Connection) -> GatewayState {
+/// Seed a `*` policy row targeting `(endpoint, models_json.default)`.
+fn seed_star_policy(conn: &rusqlite::Connection, agent: &str, endpoint: &str, models_json: &str) {
+    let default = serde_json::from_str::<serde_json::Value>(models_json)
+        .ok()
+        .and_then(|v| {
+            v.get("default")
+                .and_then(|d| d.as_str())
+                .map(String::from)
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "m-1".into());
+    let targets = serde_json::to_string(&vec![serde_json::json!({
+        "endpoint": endpoint,
+        "model": default,
+    })])
+    .unwrap();
+    conn.execute(
+        "INSERT INTO routing_policy (agent_id, role, route_targets, migrate_on_quota,
+                                    inject_cache_control, affinity_scope, updated_at)
+         VALUES (?1,'*',?2,1,0,'task',1)",
+        rusqlite::params![agent, targets],
+    )
+    .unwrap();
+}
+
+pub(super) fn state_for(conn: rusqlite::Connection) -> GatewayState {
     GatewayState {
         db: Arc::new(tokio::sync::Mutex::new(conn)),
         health: Arc::new(crate::orchestration::health::ProviderHealth::new()),
@@ -129,6 +155,7 @@ fn state_for(conn: rusqlite::Connection) -> GatewayState {
         // tests_e2e exercises the protocol handlers directly (not `dispatch`),
         // so the token is never read here; supplying one keeps the struct valid.
         loopback_token: Arc::new(tokio::sync::RwLock::new("test-token".into())),
+        tuning: super::tuning::shared_default(),
     }
 }
 
@@ -203,14 +230,19 @@ async fn tier_policy_routes_haiku_requests_to_preferred_endpoint() {
             [],
         )
         .unwrap();
+        // tier:haiku → the cheap endpoint; `*` → the main endpoint.
+        let haiku_targets = serde_json::to_string(&vec![serde_json::json!({
+            "endpoint": "ep-cheap", "model": "cheap-2"
+        })])
+        .unwrap();
         conn.execute(
-            "INSERT INTO routing_policy (agent_id, role, preferred_endpoints, fallback_endpoints,
-                                        allowed_models, migrate_on_quota, inject_cache_control,
-                                        affinity_scope, updated_at)
-             VALUES ('claude-code-cli','tier:haiku','[\"ep-cheap\"]',NULL,NULL,1,0,'task',1)",
-            [],
+            "INSERT INTO routing_policy (agent_id, role, route_targets, migrate_on_quota,
+                                        inject_cache_control, affinity_scope, updated_at)
+             VALUES ('claude-code-cli','tier:haiku',?1,1,0,'task',1)",
+            rusqlite::params![haiku_targets],
         )
         .unwrap();
+        seed_star_policy(&conn, "claude-code-cli", "ep-main", r#"{"available":["glm-5.2"],"default":"glm-5.2"}"#);
         crate::orchestration::capability_registry::rebuild(&conn).unwrap();
         conn
     };
@@ -385,6 +417,7 @@ async fn chat_inbound_to_anthropic_upstream() {
             [],
         )
         .unwrap();
+        seed_star_policy(&conn, "opencode-desktop", "m3", r#"{"available":["MiniMax-M3"],"default":"MiniMax-M3"}"#);
         crate::orchestration::capability_registry::rebuild(&conn).unwrap();
         conn
     };
@@ -515,4 +548,750 @@ async fn streaming_sse_backfills_usage_and_tool_calls() {
         Some((Some(11), Some(23), Some(7), Some(1))),
         "stream usage + tool_calls backfilled onto route_request"
     );
+}
+
+/// Multi-shot mock upstream: serves `count` connections, each replied to
+/// with `payload`; returns every request's (path, body).
+async fn mock_upstream_n(
+    payload: String,
+    count: usize,
+) -> (
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<Vec<(String, serde_json::Value)>>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        for _ in 0..count {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 8192];
+            loop {
+                let n = socket.read(&mut tmp).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                let complete = text
+                    .split_once("\r\n\r\n")
+                    .map(|(head, body)| {
+                        let clen = head
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if clen > 0 {
+                            body.len() >= clen
+                        } else {
+                            body.contains("0\r\n\r\n")
+                        }
+                    })
+                    .unwrap_or(false);
+                if complete {
+                    break;
+                }
+            }
+            let text = String::from_utf8_lossy(&buf).to_string();
+            let path = text
+                .lines()
+                .next()
+                .unwrap_or("")
+                .split(' ')
+                .nth(1)
+                .unwrap_or("")
+                .to_string();
+            let body_json = text
+                .split_once("\r\n\r\n")
+                .and_then(|(_, rest)| {
+                    let start = rest.find('{')?;
+                    serde_json::from_str(
+                        &rest[start..].trim_end_matches("\r\n0\r\n\r\n"),
+                    )
+                    .ok()
+                })
+                .unwrap_or_default();
+            seen.push((path, body_json));
+            socket.write_all(payload.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            let _ = socket.shutdown().await;
+        }
+        seen
+    });
+    (addr, handle)
+}
+
+/// The opencode-go free-model failure shape as an SSE stream: a 200 whose
+/// ONLY event is a terminal error-valued finish_reason with no content.
+/// With the ordered route-target policy, the gateway must fail the attempt
+/// (first-event probe), retry the same target per the taxonomy, then WALK
+/// the list to the healthy second target — the agent ends up with the good
+/// stream and a migration row records the walk.
+#[tokio::test]
+async fn in_band_stream_error_walks_route_targets() {
+    let bad_payload = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
+        data: {\"choices\":[{\"index\":0,\"finish_reason\":\"network_error\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n\
+        data: [DONE]\n\n";
+    let good_payload = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
+        data: {\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"content\":\"hi from good\"}}]}\n\n\
+        data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3}}\n\n\
+        data: [DONE]\n\n";
+    // 3 attempts land on the bad target (initial + 2 same-endpoint retries),
+    // then the migration walks to the good target.
+    let (bad_addr, bad_upstream) = mock_upstream_n(bad_payload.to_string(), 3).await;
+    let (good_addr, good_upstream) = mock_upstream_n(good_payload.to_string(), 1).await;
+
+    let conn = {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::schema::build_v1(&conn).unwrap();
+        for a in crate::agents::agents() {
+            conn.execute(
+                "INSERT OR IGNORE INTO agent (id, kind, display_name, status, last_detected_at, enabled)
+                 VALUES (?1, ?2, ?3, 'ok', 0, 1)",
+                rusqlite::params![a.id, a.kind, a.display_name],
+            )
+            .unwrap();
+        }
+        for (id, addr, model) in [
+            ("ep-bad", bad_addr, "m-bad"),
+            ("ep-good", good_addr, "m-good"),
+        ] {
+            conn.execute(
+                "INSERT INTO provider_endpoint (id, kind, display_name, has_api_key, status, models_json)
+                 VALUES (?1,'custom','test',1,'valid',?2)",
+                rusqlite::params![id, format!(r#"{{"available":["{model}"],"default":"{model}"}}"#)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO endpoint_protocol (endpoint_id, protocol, base_url) VALUES (?1,'openai-comp',?2)",
+                rusqlite::params![id, format!("http://{addr}")],
+            )
+            .unwrap();
+        }
+        seed_star_policy_rows(
+            &conn,
+            "opencode-desktop",
+            &[("ep-bad", "m-bad"), ("ep-good", "m-good")],
+        );
+        crate::orchestration::capability_registry::rebuild(&conn).unwrap();
+        conn
+    };
+    let state = state_for(conn);
+
+    let body = br#"{"model":"nestra","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = super::protocol_openai::handle_bytes(
+        headers(),
+        Bytes::from_static(body),
+        state.clone(),
+        "opencode-desktop",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::OK);
+
+    use http_body_util::BodyExt as _;
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("hi from good"), "agent must get the healthy target's stream: {text}");
+
+    // The bad target absorbed the initial attempt + 2 same-endpoint retries.
+    let bad_seen = bad_upstream.await.unwrap();
+    assert_eq!(bad_seen.len(), 3);
+    assert!(bad_seen.iter().all(|(_, b)| b["model"] == "m-bad"));
+    // The good target served the migrated request.
+    let good_seen = good_upstream.await.unwrap();
+    assert_eq!(good_seen.len(), 1);
+    assert_eq!(good_seen[0].1["model"], "m-good");
+
+    // Observability: 4 route_request rows (3 bad + 1 good), 1 migration row.
+    let db = state.db.lock().await;
+    let rows: i64 = db
+        .query_row("SELECT count(*) FROM route_request", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 4);
+    let (from_ep, to_ep, reason): (String, String, String) = db
+        .query_row(
+            "SELECT from_endpoint_id, to_endpoint_id, reason FROM route_migration",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((from_ep.as_str(), to_ep.as_str()), ("ep-bad", "ep-good"));
+    assert_eq!(reason, "retries_exhausted");
+}
+
+/// Seed a `*` policy with explicit ordered targets (test-local form of
+/// `seed_star_policy` that takes pairs directly).
+pub(super) fn seed_star_policy_rows(conn: &rusqlite::Connection, agent: &str, targets: &[(&str, &str)]) {
+    let targets = serde_json::to_string(
+        &targets
+            .iter()
+            .map(|(ep, m)| serde_json::json!({"endpoint": ep, "model": m}))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO routing_policy (agent_id, role, route_targets, migrate_on_quota,
+                                    inject_cache_control, affinity_scope, updated_at)
+         VALUES (?1,'*',?2,1,0,'task',1)",
+        rusqlite::params![agent, targets],
+    )
+    .unwrap();
+}
+
+
+/// A REAL upstream 503 (with an error JSON body) on a TOOL-CARRYING
+/// request: the buffered relay must not count the error body as
+/// "generation started" (the zcode regression — opencode-go's "Endpoint is
+/// unavailable" 503s surfaced straight to the agent, bypassing
+/// retry/failover). Expected: 3 same-endpoint retries, then migration to
+/// the healthy second target.
+#[tokio::test]
+async fn buffered_503_with_body_retries_then_migrates_for_tool_requests() {
+    let err_payload = "HTTP/1.1 503 Service Unavailable
+content-type: application/json
+connection: close
+
+{\"error\":{\"type\":\"server_error\",\"message\":\"Endpoint is unavailable.\"}}";
+    let good_payload = "HTTP/1.1 200 OK
+content-type: application/json
+connection: close
+
+{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m-good\",\"content\":[{\"type\":\"text\",\"text\":\"hi from good\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}";
+    let (bad_addr, bad_upstream) = mock_upstream_n(err_payload.to_string(), 3).await;
+    let (good_addr, good_upstream) = mock_upstream_n(good_payload.to_string(), 1).await;
+
+    let conn = {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::schema::build_v1(&conn).unwrap();
+        for a in crate::agents::agents() {
+            conn.execute(
+                "INSERT OR IGNORE INTO agent (id, kind, display_name, status, last_detected_at, enabled)
+                 VALUES (?1, ?2, ?3, 'ok', 0, 1)",
+                rusqlite::params![a.id, a.kind, a.display_name],
+            )
+            .unwrap();
+        }
+        for (id, addr, model) in [
+            ("ep-bad", bad_addr, "m-bad"),
+            ("ep-good", good_addr, "m-good"),
+        ] {
+            conn.execute(
+                "INSERT INTO provider_endpoint (id, kind, display_name, has_api_key, status, models_json)
+                 VALUES (?1,'custom','test',1,'valid',?2)",
+                rusqlite::params![id, format!(r#"{{"available":["{model}"],"default":"{model}"}}"#)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO endpoint_protocol (endpoint_id, protocol, base_url) VALUES (?1,'anthropic',?2)",
+                rusqlite::params![id, format!("http://{addr}")],
+            )
+            .unwrap();
+        }
+        seed_star_policy_rows(
+            &conn,
+            "claude-code-cli",
+            &[("ep-bad", "m-bad"), ("ep-good", "m-good")],
+        );
+        crate::orchestration::capability_registry::rebuild(&conn).unwrap();
+        conn
+    };
+    let state = state_for(conn);
+
+    // Tools-carrying Anthropic request (side-effect risk).
+    let body = br#"{"model":"claude-haiku-4-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"bash","description":"run","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}]}"#;
+    let resp = super::protocol_anthropic::handle_bytes(
+        headers(),
+        Bytes::from_static(body),
+        state.clone(),
+        "claude-code-cli",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::OK, "failover must land on the healthy target");
+
+    use http_body_util::BodyExt as _;
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("hi from good"), "agent must get the healthy target's reply: {text}");
+
+    // The bad target absorbed the initial attempt + 2 same-endpoint retries;
+    // the migration row records the walk to the good target.
+    assert_eq!(bad_upstream.await.unwrap().len(), 3);
+    assert_eq!(good_upstream.await.unwrap().len(), 1);
+    let db = state.db.lock().await;
+    let (from_ep, to_ep): (String, String) = db
+        .query_row(
+            "SELECT from_endpoint_id, to_endpoint_id FROM route_migration",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((from_ep.as_str(), to_ep.as_str()), ("ep-bad", "ep-good"));
+}
+
+
+/// Fast-fail: a SINGLE-target policy surfaces a tool-carrying request's
+/// upstream 503 IMMEDIATELY — no retry ladder (there is nowhere to migrate,
+/// so retries only add latency before the same error). One attempt row.
+#[tokio::test]
+async fn single_target_policy_fails_fast_without_retry_ladder() {
+    let err_payload = "HTTP/1.1 503 Service Unavailable
+content-type: application/json
+connection: close
+
+{\"error\":{\"message\":\"Endpoint is unavailable.\"}}";
+    let (bad_addr, bad_upstream) = mock_upstream_n(err_payload.to_string(), 1).await;
+
+    let conn = {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::schema::build_v1(&conn).unwrap();
+        for a in crate::agents::agents() {
+            conn.execute(
+                "INSERT OR IGNORE INTO agent (id, kind, display_name, status, last_detected_at, enabled)
+                 VALUES (?1, ?2, ?3, 'ok', 0, 1)",
+                rusqlite::params![a.id, a.kind, a.display_name],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO provider_endpoint (id, kind, display_name, has_api_key, status, models_json)
+             VALUES ('ep-bad','custom','test',1,'valid',?1)",
+            rusqlite::params![r#"{"available":["m-bad"],"default":"m-bad"}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO endpoint_protocol (endpoint_id, protocol, base_url) VALUES ('ep-bad','anthropic',?1)",
+            rusqlite::params![format!("http://{bad_addr}")],
+        )
+        .unwrap();
+        seed_star_policy_rows(&conn, "claude-code-cli", &[("ep-bad", "m-bad")]);
+        crate::orchestration::capability_registry::rebuild(&conn).unwrap();
+        conn
+    };
+    let state = state_for(conn);
+
+    let body = br#"{"model":"claude-haiku-4-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"bash","description":"run","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}]}"#;
+    let resp = super::protocol_anthropic::handle_bytes(
+        headers(),
+        Bytes::from_static(body),
+        state.clone(),
+        "claude-code-cli",
+    )
+    .await
+    .unwrap();
+    // The upstream 503 surfaces AS-IS, immediately.
+    assert_eq!(resp.status(), hyper::StatusCode::SERVICE_UNAVAILABLE);
+    drop(body_json(resp.into_body()).await);
+
+    // Exactly ONE attempt — the ladder was skipped (no alternative target).
+    assert_eq!(bad_upstream.await.unwrap().len(), 1);
+    let db = state.db.lock().await;
+    let rows: i64 = db
+        .query_row("SELECT count(*) FROM route_request", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "fast-fail must not retry a single-target policy");
+}
+
+/// A mock upstream that accepts the connection and NEVER responds: the
+/// 30s headers-phase timeout fires (auto-advanced by paused tokio time),
+/// the attempt fails as Timeout, and with a single-target policy the agent
+/// gets the gateway 502 immediately instead of hanging forever.
+#[tokio::test(start_paused = true)]
+async fn silent_upstream_hits_phase_timeout_and_surfaces() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let silent = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        // Drain the request, never answer.
+        let mut buf = [0u8; 4096];
+        loop {
+            match socket.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        let _ = socket.shutdown().await;
+    });
+
+    let conn = {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::schema::build_v1(&conn).unwrap();
+        for a in crate::agents::agents() {
+            conn.execute(
+                "INSERT OR IGNORE INTO agent (id, kind, display_name, status, last_detected_at, enabled)
+                 VALUES (?1, ?2, ?3, 'ok', 0, 1)",
+                rusqlite::params![a.id, a.kind, a.display_name],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO provider_endpoint (id, kind, display_name, has_api_key, status, models_json)
+             VALUES ('ep-silent','custom','test',1,'valid',?1)",
+            rusqlite::params![r#"{"available":["m-1"],"default":"m-1"}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO endpoint_protocol (endpoint_id, protocol, base_url) VALUES ('ep-silent','anthropic',?1)",
+            rusqlite::params![format!("http://{addr}")],
+        )
+        .unwrap();
+        seed_star_policy_rows(&conn, "claude-code-cli", &[("ep-silent", "m-1")]);
+        crate::orchestration::capability_registry::rebuild(&conn).unwrap();
+        conn
+    };
+    let state = state_for(conn);
+
+    let body = br#"{"model":"claude-haiku-4-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = super::protocol_anthropic::handle_bytes(
+        headers(),
+        Bytes::from_static(body),
+        state.clone(),
+        "claude-code-cli",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        hyper::StatusCode::BAD_GATEWAY,
+        "silent upstream surfaces as the gateway 502 (Unreachable/timeout)"
+    );
+    let db = state.db.lock().await;
+    let rows: i64 = db
+        .query_row("SELECT count(*) FROM route_request", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "single-target timeout surfaces without retries");
+    silent.abort();
+}
+
+
+/// Common fixture for the timeout e2e tests: schema + agents + ONE custom
+/// endpoint at `addr` (protocol `protocol`) + a single-target `*` policy.
+fn seed_single_endpoint_conn(
+    agent: &str,
+    ep: &str,
+    addr: std::net::SocketAddr,
+    model: &str,
+    protocol: &str,
+) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    crate::schema::build_v1(&conn).unwrap();
+    for a in crate::agents::agents() {
+        conn.execute(
+            "INSERT OR IGNORE INTO agent (id, kind, display_name, status, last_detected_at, enabled)
+             VALUES (?1, ?2, ?3, 'ok', 0, 1)",
+            rusqlite::params![a.id, a.kind, a.display_name],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO provider_endpoint (id, kind, display_name, has_api_key, status, models_json)
+         VALUES (?1,'custom','test',1,'valid',?2)",
+        rusqlite::params![
+            ep,
+            format!(r#"{{"available":["{model}"],"default":"{model}"}}"#)
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO endpoint_protocol (endpoint_id, protocol, base_url) VALUES (?1,?2,?3)",
+        rusqlite::params![ep, protocol, format!("http://{addr}")],
+    )
+    .unwrap();
+    seed_star_policy_rows(&conn, agent, &[(ep, model)]);
+    crate::orchestration::capability_registry::rebuild(&conn).unwrap();
+    conn
+}
+
+/// A mock upstream that accepts one connection, drains the request, writes
+/// `prefix` (partial headers+body), flushes, then NEVER sends more and NEVER
+/// closes — the mid-stream stall shape.
+async fn mock_stalling_upstream(prefix: String) -> std::net::SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 8192];
+        // Drain until the request looks complete (same heuristic as
+        // mock_upstream_n, single read loop).
+        let mut acc = Vec::new();
+        loop {
+            let n = socket.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            acc.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&acc).to_string();
+            let complete = text
+                .split_once("\r\n\r\n")
+                .map(|(head, body)| {
+                    let clen = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if clen > 0 {
+                        body.len() >= clen
+                    } else {
+                        body.contains("0\r\n\r\n")
+                    }
+                })
+                .unwrap_or(false);
+            if complete {
+                break;
+            }
+        }
+        socket.write_all(prefix.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+        // Hold the connection open forever — the stall.
+        let mut hold = [0u8; 64];
+        loop {
+            match socket.read(&mut hold).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    });
+    addr
+}
+
+/// Mid-stream silence timeout: an SSE stream that delivers its first healthy
+/// event and then stalls must TERMINATE with a structured error event after
+/// the silence window — not hang the agent forever.
+///
+/// Real time (not `start_paused`): paused-clock auto-advance races real-TCP
+/// IO delivery during the dial phase, so the test shrinks the silence window
+/// to 1s via the live tuning slot instead.
+#[tokio::test]
+async fn stream_stall_midway_hits_silence_timeout() {
+    // 200 + SSE headers + ONE healthy chat event, then silence.
+    let prefix = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
+        data: {\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"content\":\"partial\"}}]}\n\n".to_string();
+    let addr = mock_stalling_upstream(prefix).await;
+    let state = state_for(seed_single_endpoint_conn(
+        "opencode-desktop",
+        "ep-stall",
+        addr,
+        "m-stall",
+        "openai-comp",
+    ));
+    *state.tuning.write().unwrap() = super::tuning::GatewayTuning {
+        stream_silence_timeout_secs: 1,
+        ..Default::default()
+    };
+
+    let body = br#"{"model":"nestra","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = super::protocol_openai::handle_bytes(
+        headers(),
+        Bytes::from_static(body),
+        state.clone(),
+        "opencode-desktop",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::OK);
+
+    use http_body_util::BodyExt as _;
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("stalled"),
+        "the stall must terminate with a structured error event: {text}"
+    );
+    assert!(
+        text.contains("partial"),
+        "the first healthy event must have been relayed before the stall: {text}"
+    );
+}
+
+/// Buffered total timeout: a NON-streaming upstream that sends headers + a
+/// partial JSON body (content-length lies) and then stalls must surface as
+/// the gateway 502 "interrupted" after the buffered-body window — not hang
+/// forever. Real time with a 1s window (same paused-clock reasoning as the
+/// silence test above).
+#[tokio::test]
+async fn buffered_body_stall_hits_total_timeout() {
+    let prefix = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 4096\r\n\r\n\
+        {\"id\":\"msg_1\",\"content\":[{\"type\":\"text\",\"text\":\"par".to_string();
+    let addr = mock_stalling_upstream(prefix).await;
+    let state = state_for(seed_single_endpoint_conn(
+        "claude-code-cli",
+        "ep-stall",
+        addr,
+        "m-stall",
+        "anthropic",
+    ));
+    *state.tuning.write().unwrap() = super::tuning::GatewayTuning {
+        buffered_body_timeout_secs: 1,
+        ..Default::default()
+    };
+
+    let body = br#"{"model":"claude-haiku-4-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = super::protocol_anthropic::handle_bytes(
+        headers(),
+        Bytes::from_static(body),
+        state.clone(),
+        "claude-code-cli",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        hyper::StatusCode::BAD_GATEWAY,
+        "a stalled buffered body must surface as the gateway 502 (interrupted)"
+    );
+    let db = state.db.lock().await;
+    let rows: i64 = db
+        .query_row("SELECT count(*) FROM route_request", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "single-target stall surfaces without retries");
+}
+
+/// The Responses inbound path (Codex desktop) now shares the headers-phase
+/// timeout: a never-responding upstream surfaces as the gateway 502 instead
+/// of hanging the Codex client forever.
+#[tokio::test(start_paused = true)]
+async fn responses_inbound_dial_timeout_surfaces() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let silent = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        loop {
+            match socket.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        let _ = socket.shutdown().await;
+    });
+
+    let state = state_for(seed_single_endpoint_conn(
+        "codex-desktop",
+        "ep-silent",
+        addr,
+        "m-silent",
+        "openai-responses",
+    ));
+
+    let body = br#"{"model":"nestra","input":[{"role":"user","content":"hi"}],"stream":true}"#;
+    let resp = super::protocol_responses::handle_bytes(
+        headers(),
+        Bytes::from_static(body),
+        state.clone(),
+        "codex-desktop",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        hyper::StatusCode::BAD_GATEWAY,
+        "silent Responses upstream surfaces as the gateway 502 (dial timeout)"
+    );
+    silent.abort();
+}
+
+
+/// Regression: the upstream request MUST carry content-length, never
+/// `transfer-encoding: chunked`. This was the routed-ox-alpha-free 503 root
+/// cause: `GatewayBody` didn't forward `size_hint`, so hyper chunked EVERY
+/// buffered upstream request; opencode-go's edge intermittently holds
+/// chunked request bodies for ~60-90s and then 503s "Endpoint is
+/// unavailable" — while direct clients (undici/curl, always content-length)
+/// kept working, which is why it looked like a provider-side "bad window".
+#[tokio::test]
+async fn upstream_requests_carry_content_length_not_chunked() {
+    // Echo-ish mock: serve one connection, reply 200 JSON, and RETAIN the
+    // raw request bytes for the assertion.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 8192];
+        loop {
+            let n = socket.read(&mut tmp).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            let text = String::from_utf8_lossy(&buf).to_string();
+            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                let clen = head
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+                if clen > 0 && body.len() >= clen {
+                    break;
+                }
+            }
+        }
+        let reply = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{\"id\":\"x\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}";
+        socket.write_all(reply.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+        let _ = socket.shutdown().await;
+        buf
+    });
+
+    let state = state_for(seed_single_endpoint_conn(
+        "claude-code-cli",
+        "ep-cl",
+        addr,
+        "m-1",
+        "anthropic",
+    ));
+    let body = br#"{"model":"claude-haiku-4-5","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = super::protocol_anthropic::handle_bytes(
+        headers(),
+        Bytes::from_static(body),
+        state.clone(),
+        "claude-code-cli",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::OK);
+
+    let raw = String::from_utf8_lossy(&seen.await.unwrap()).to_string();
+    let (head, rest) = raw
+        .split_once("\r\n\r\n")
+        .expect("captured request must parse");
+    let lower = head.to_ascii_lowercase();
+    assert!(
+        lower.starts_with("post /v1/messages"),
+        "unexpected request line: {head}"
+    );
+    assert!(
+        lower.contains("content-length:"),
+        "upstream request must carry content-length (chunked framing is the 503 root cause): {head}"
+    );
+    assert!(
+        !lower.contains("transfer-encoding:"),
+        "upstream request must never be chunked: {head}"
+    );
+    let clen: usize = head
+        .lines()
+        .find_map(|l| {
+            l.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .and_then(|v| v.trim().parse().ok())
+        })
+        .expect("content-length parses");
+    assert_eq!(rest.len(), clen, "content-length must equal the body size");
 }

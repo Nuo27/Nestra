@@ -85,3 +85,32 @@ fn upstream_error_emits_anthropic_error_event() {
     assert!(out.contains("event: error"));
     assert!(out.contains("nestra_upstream_error"));
 }
+
+/// Claude-Code-family strictness: `message_start` MUST carry `usage`
+/// (clients read `message.usage.input_tokens` off the first event and
+/// abort the stream consumer when it's missing — the zcode reconnect
+/// loop), and `message_stop` MUST carry `{"type":"message_stop"}`.
+#[test]
+fn anthropic_stream_start_carries_usage_and_typed_stop() {
+    let upstream = "data: {\"id\":\"c1\",\"model\":\"m\",\"usage\":{\"prompt_tokens\":42},\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}
+
+        data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}
+
+        data: [DONE]
+
+";
+    let out = collect_all(OpenAiToAnthropicStream::new(Full::new(frame(upstream))));
+    // message_start carries usage (first-chunk prompt_tokens when present).
+    let start = out.split("event: content_block_start").next().unwrap();
+    assert!(
+        start.contains("\"usage\":{\"input_tokens\":42,\"output_tokens\":1}"),
+        "message_start must open with a usage object: {start}"
+    );
+    // message_stop carries the typed payload.
+    assert!(
+        out.contains("event: message_stop
+data: {\"type\":\"message_stop\"}"),
+        "message_stop must carry {{\"type\":\"message_stop\"}}: {}",
+        out.split("event: message_delta").nth(1).unwrap_or("")
+    );
+}

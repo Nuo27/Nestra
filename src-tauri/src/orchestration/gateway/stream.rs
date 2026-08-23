@@ -18,7 +18,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use http_body_util::{BodyStream, Full};
+use http_body_util::{BodyExt, BodyStream, Full};
 use hyper::body::{Body, Frame};
 
 use crate::config_writer::ProviderKind;
@@ -56,6 +56,20 @@ impl Body for GatewayBody {
                     })
             }
             GatewayBody::Stream(s) => unsafe { Pin::new_unchecked(s) }.poll_frame(cx),
+        }
+    }
+
+    /// Forward the inner body's size hint. Without this the trait default
+    /// ("unknown length") makes hyper encode EVERY buffered upstream request
+    /// as `transfer-encoding: chunked` — opencode-go's edge holds chunked
+    /// request bodies for ~60-90s and then 503s "Endpoint is unavailable"
+    /// (the ox-alpha-free routed-503 root cause; direct clients send
+    /// content-length and work). A `Full` body reports its exact length so
+    /// hyper emits `content-length` instead.
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        match self {
+            GatewayBody::Full(f) => f.size_hint(),
+            GatewayBody::Stream(_) => hyper::body::SizeHint::new(),
         }
     }
 }
@@ -446,3 +460,214 @@ pub fn observe_responses_chunk(text: &str, obs: &mut StreamObservation) {
 
 #[cfg(test)]
 mod tests;
+
+// ===========================================================================
+// First-event in-band error probe
+//
+// Some upstreams (observed: opencode-go's free models on the chat wire)
+// answer a 200 + SSE stream that terminates IN-BAND with an error-valued
+// terminal `finish_reason` (e.g. "network_error") and zero generated
+// content. Relaying that verbatim hands the agent a "successful" empty
+// response and the retry/migration machinery never fires. The probe reads
+// the FIRST complete SSE event before the gateway commits to relaying: an
+// in-band terminal error fails the attempt (the loop then retries / walks
+// the policy's route-target list); anything healthy is prepended back.
+// ===========================================================================
+
+/// The boxed body type shared by the probe and `PrependBody`.
+pub(crate) type SharedBody = Pin<Box<dyn Body<Data = Bytes, Error = std::io::Error> + Send + Sync>>;
+
+/// Result of probing a 2xx SSE upstream's first complete event.
+pub(crate) enum FirstEventProbe {
+    /// The first event is healthy or indeterminate. `held` carries every
+    /// byte read during the probe and must be relayed before `rest`.
+    Ok { held: Bytes, rest: SharedBody },
+    /// The stream terminated in-band with no generated content (an
+    /// error-valued terminal `finish_reason`, `response.failed`, or an error
+    /// JSON envelope) — the attempt must fail so the retry/migration loop
+    /// can act on it.
+    InBandError { reason: String },
+}
+
+/// Hard cap on probe buffering: the first event of a healthy stream is a
+/// single small chunk; anything larger is passed through unprobed.
+const PROBE_CAP: usize = 256 * 1024;
+
+/// Probe the FIRST complete SSE event of a 2xx upstream response. The probe
+/// window (first-event timeout from the live tuning) bounds an upstream that
+/// opens the stream and then zero-byte hangs (observed on opencode-go) — the
+/// attempt fails in bounded time so the agent gets a prompt, honest error
+/// instead of a multi-minute hang.
+pub(crate) async fn probe_first_sse_event<B>(body: B, timeout: std::time::Duration) -> FirstEventProbe
+where
+    B: Body<Data = Bytes> + Send + Sync + 'static,
+    B::Error: std::fmt::Display,
+{
+    // Box (and normalize the error type — hyper::Error for `Incoming`,
+    // io::Error for wrapped bodies) up front: `Pin<&mut dyn Body>` is Unpin
+    // so `frame()` polls fine, and the remainder moves out unchanged.
+    let mut body: SharedBody =
+        Box::pin(body.map_err(|_| std::io::Error::other("upstream stream error")));
+    // The whole probe (accumulate until the first complete event) is capped —
+    // an upstream that opens the stream and then zero-byte hangs fails here
+    // in bounded time and the attempt is treated as an in-band failure.
+    let probe = tokio::time::timeout(timeout, async {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        if let Some(boundary) = find_event_boundary(&buf) {
+            if let Some(reason) = first_event_is_inband_error(&buf[..boundary]) {
+                return FirstEventProbe::InBandError { reason };
+            }
+            return FirstEventProbe::Ok {
+                held: Bytes::from(std::mem::take(&mut buf)),
+                rest: body,
+            };
+        }
+        if buf.len() > PROBE_CAP {
+            return FirstEventProbe::Ok {
+                held: Bytes::from(std::mem::take(&mut buf)),
+                rest: body,
+            };
+        }
+        match body.as_mut().frame().await {
+            Some(Ok(frame)) => {
+                if let Some(bytes) = frame.data_ref() {
+                    buf.extend_from_slice(bytes);
+                }
+            }
+            // A stream that dies before its first complete event is an
+            // immediate-failure shape — surface it as an in-band error so the
+            // loop retries/migrates instead of relaying a broken body.
+            Some(Err(e)) => {
+                return FirstEventProbe::InBandError {
+                    reason: format!("upstream stream error before first event: {e}"),
+                };
+            }
+            None => {
+                // Stream ended without a complete event boundary — hand the
+                // bytes to the relay verbatim (its truncation handling owns
+                // this shape).
+                return FirstEventProbe::Ok {
+                    held: Bytes::from(std::mem::take(&mut buf)),
+                    rest: body,
+                };
+            }
+        }
+    }
+    });
+    match probe.await {
+        Ok(outcome) => outcome,
+        Err(_) => FirstEventProbe::InBandError {
+            reason: format!(
+                "first SSE event not received within {}s",
+                timeout.as_secs()
+            ),
+        },
+    }
+}
+
+/// Byte offset of the first complete SSE event boundary (`\n\n`), excluding
+/// the boundary itself. Handles `\r\n\r\n` by returning the offset of the
+/// `\r` before the `\n\n`-style split.
+fn find_event_boundary(buf: &[u8]) -> Option<usize> {
+    let lf = buf.windows(2).position(|w| w == b"\n\n")?;
+    let mut end = lf;
+    if end > 0 && buf[end - 1] == b'\r' {
+        end -= 1;
+    }
+    Some(end)
+}
+
+/// `true` (with a reason) when the FIRST SSE event is an in-band terminal
+/// error with no generated content.
+fn first_event_is_inband_error(event_bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(event_bytes).ok()?;
+    let mut data = String::new();
+    let mut event_name = String::new();
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(v.trim());
+        } else if let Some(v) = line.strip_prefix("event:") {
+            event_name = v.trim().to_string();
+        }
+    }
+    if data.is_empty() || data == "[DONE]" {
+        return None;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return None;
+    };
+    // Responses wire: an immediate failed response.
+    if event_name == "response.failed" || v.get("type").and_then(|t| t.as_str()) == Some("response.failed") {
+        let msg = v["response"]["error"]["message"]
+            .as_str()
+            .or_else(|| v["error"]["message"].as_str())
+            .unwrap_or("response.failed");
+        return Some(msg.to_string());
+    }
+    // An error envelope on any wire.
+    if let Some(msg) = v["error"]["message"].as_str() {
+        if !msg.is_empty() {
+            return Some(msg.to_string());
+        }
+    }
+    // Chat wire: a terminal error-valued finish_reason on an empty delta —
+    // the observed opencode failure shape (the ONLY chunk of the stream).
+    if let Some(choice) = v.get("choices").and_then(|c| c.get(0)) {
+        if let Some(fr) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+            let benign = matches!(fr, "stop" | "length" | "tool_calls" | "function_call");
+            if !benign {
+                let empty = |field: &str| {
+                    choice["delta"][field]
+                        .as_str()
+                        .map_or(true, |s| s.is_empty())
+                };
+                let no_tools = choice["delta"]
+                    .get("tool_calls")
+                    .and_then(|t| t.as_array())
+                    .map_or(true, |a| a.is_empty());
+                if empty("content") && empty("reasoning_content") && no_tools {
+                    return Some(format!("finish_reason={fr}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Relays `held` bytes first, then the remaining upstream body — what the
+/// probe hands back so the first event is not swallowed.
+pub(crate) struct PrependBody {
+    held: Option<Bytes>,
+    inner: SharedBody,
+}
+
+impl PrependBody {
+    pub(crate) fn new(held: Bytes, inner: SharedBody) -> Self {
+        Self {
+            held: Some(held),
+            inner,
+        }
+    }
+}
+
+impl Body for PrependBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        if let Some(held) = this.held.take() {
+            if !held.is_empty() {
+                return Poll::Ready(Some(Ok(Frame::data(held))));
+            }
+        }
+        this.inner.as_mut().poll_frame(cx)
+    }
+}

@@ -18,14 +18,19 @@ fn gateway_alias_debug_redacts_sentinel_key() {
 }
 
 #[test]
-fn json_serialize_is_key_sorted_probe() {
-    // Probe: is serde_json built WITHOUT `preserve_order` (Map = BTreeMap —
-    // keys sorted — deterministic output)? If this flips to insertion-order,
-    // writers must sort explicitly before write.
+fn json_serialize_preserves_key_order_probe() {
+    // Probe: serde_json is built WITH `preserve_order` (Map = IndexMap —
+    // parse→modify→serialize keeps the document's original key order).
+    // This is load-bearing for the gateway: `rewrite_model` re-serializes
+    // request bodies, and order-sensitive upstreams (opencode-go's MiniMax
+    // backend rejects alphabetized message objects with
+    // "[1214] Incorrect role information") must see the agent's own field
+    // order. Config writers also benefit: re-writing a user-maintained
+    // config keeps the user's key order instead of re-sorting the file.
     let v: serde_json::Value =
         serde_json::from_str(r#"{"z":1,"a":2,"m":{"y":1,"b":2}}"#).unwrap();
     let out = serde_json::to_string(&v).unwrap();
-    assert_eq!(out, r#"{"a":2,"m":{"b":2,"y":1},"z":1}"#);
+    assert_eq!(out, r#"{"z":1,"a":2,"m":{"y":1,"b":2}}"#);
 }
 
 #[test]

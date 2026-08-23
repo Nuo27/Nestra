@@ -416,8 +416,12 @@ pub fn chat_to_responses(body: &[u8]) -> Bytes {
     if let Some(tc) = obj.remove("tool_choice") {
         out.insert("tool_choice".into(), map_chat_tool_choice(&tc));
     }
-    // max_tokens → max_output_tokens; stop dropped; stream passthrough.
-    if let Some(mt) = obj.remove("max_tokens") {
+    // max_tokens/max_completion_tokens → max_output_tokens; stop dropped;
+    // stream passthrough. (Newer OpenAI clients send max_completion_tokens.)
+    if let Some(mt) = obj
+        .remove("max_tokens")
+        .or_else(|| obj.remove("max_completion_tokens"))
+    {
         out.insert("max_output_tokens".into(), mt);
     }
     obj.remove("stop");
