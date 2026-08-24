@@ -569,3 +569,53 @@ fn affinity_persist_is_debounced() {
         .unwrap();
     assert_eq!(n, 0, "debounced record must skip the setting write");
 }
+
+#[test]
+fn low_remaining_target_is_soft_skipped_for_healthier_target() {
+    let env = TestEnv::new();
+    seed_endpoint(&env.conn, "ep-1", "openai-comp", "https://x", "m-1");
+    seed_endpoint(&env.conn, "ep-2", "openai-comp", "https://y", "m-2");
+    seed_policy(
+        &env.conn,
+        "claude-code-cli",
+        "*",
+        &[("ep-1", "m-1"), ("ep-2", "m-2")],
+    );
+
+    // ep-1 nearly spent (proactive fetch said 3% left) — the walk moves on.
+    env.quota.set_remaining("ep-1", 3.0);
+    let ctx = TaskContext::new_task("claude-code-cli", None);
+    let r = resolve(&ctx, &env.inputs()).unwrap();
+    assert_eq!(r.endpoint_id, "ep-2", "low-remaining target yields to the next");
+
+    // Unknown budget (no signal) never skips: ep-2's signal absent, ep-1
+    // still low → but here both lack a signal on a fresh env.
+    let env2 = TestEnv::new();
+    seed_endpoint(&env2.conn, "ep-1", "openai-comp", "https://x", "m-1");
+    seed_policy(&env2.conn, "claude-code-cli", "*", &[("ep-1", "m-1")]);
+    let r = resolve(&TaskContext::new_task("claude-code-cli", None), &env2.inputs()).unwrap();
+    assert_eq!(r.endpoint_id, "ep-1", "no quota signal → policy order holds");
+}
+
+#[test]
+fn all_targets_low_still_serves_first_rather_than_failing_closed() {
+    let env = TestEnv::new();
+    seed_endpoint(&env.conn, "ep-1", "openai-comp", "https://x", "m-1");
+    seed_endpoint(&env.conn, "ep-2", "openai-comp", "https://y", "m-2");
+    seed_policy(
+        &env.conn,
+        "claude-code-cli",
+        "*",
+        &[("ep-1", "m-1"), ("ep-2", "m-2")],
+    );
+
+    env.quota.set_remaining("ep-1", 1.0);
+    env.quota.set_remaining("ep-2", 0.5);
+
+    let ctx = TaskContext::new_task("claude-code-cli", None);
+    let r = resolve(&ctx, &env.inputs()).unwrap();
+    assert_eq!(
+        r.endpoint_id, "ep-1",
+        "every target low → first still wins (nearly-empty beats fail-closed)"
+    );
+}

@@ -75,6 +75,7 @@ fn abilities_with_context(model_id: &str, ctx: u64) -> HashMap<String, ModelAbil
             attachment: None,
             temperature: None,
             api: None,
+            cost: None,
             limit: Some(ModelLimit { context: ctx, output: 8_000, input: None }),
             modalities: None,
         },
@@ -280,6 +281,7 @@ fn tier_slot(id: &str, ctx: u64) -> crate::config_writer::AliasModel {
             limit: Some(ModelLimit { context: ctx, output: 8_000, input: None }),
             modalities: None,
             api: None,
+            cost: None,
         }),
     }
 }

@@ -104,6 +104,7 @@ fn build_switch_context_merges_cache_with_persisted_override() {
             limit: None,
             modalities: None,
             api: None,
+            cost: None,
         },
     );
     saved.insert(
@@ -116,6 +117,7 @@ fn build_switch_context_merges_cache_with_persisted_override() {
             limit: Some(ModelLimit { context: 1, output: 1, input: None }),
             modalities: None,
             api: None,
+            cost: None,
         },
     );
     db::set_endpoint_model_abilities(

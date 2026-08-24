@@ -769,6 +769,122 @@ pub fn is_known_route_reason(s: &str) -> bool {
 }
 
 // ===========================================================================
+// Usage summary (dashboard)
+// ===========================================================================
+
+/// One (day, agent, endpoint, model) usage bucket. `cost_usd` is computed at
+/// read time against the current price catalog (models.dev + per-endpoint
+/// overrides) — prices change, so spend is never persisted. `None` when no
+/// price is known for any component (unknown ≠ free).
+#[derive(Debug, Clone, Serialize)]
+pub struct UsageRow {
+    pub day: String,
+    pub agent_id: String,
+    pub endpoint_id: String,
+    pub model_id: String,
+    pub requests: i64,
+    pub usage_input: i64,
+    pub usage_output: i64,
+    pub cache_creation: i64,
+    pub cache_read: i64,
+    pub cost_usd: Option<f64>,
+}
+
+/// The two non-overlapping halves of the usage dashboard, returned as
+/// day-grain rows the caller sums: `usage_daily` holds everything pruned out
+/// of `route_request` (lifetime history), the live table holds the current
+/// retention window. A calendar day can appear in both — its rows are
+/// disjoint sets, so summing is exact. `agent` filters; `days` bounds the
+/// window (`None` = lifetime). `prices` resolves (endpoint, model) →
+/// catalog pricing; rows without a price carry `cost_usd: None`.
+pub fn usage_summary_rows(
+    conn: &Connection,
+    agent: Option<&str>,
+    days: Option<u64>,
+    prices: &dyn Fn(&str, &str) -> Option<crate::model_abilities::CostPerMtok>,
+) -> AppResult<Vec<UsageRow>> {
+    let mut rows: Vec<UsageRow> = Vec::new();
+    let mut push = |q: &str, params: &[&dyn rusqlite::ToSql]| -> AppResult<()> {
+        let mut stmt = conn.prepare(q)?;
+        let mapped = stmt.query_map(params, |r| {
+            Ok(UsageRow {
+                day: r.get(0)?,
+                agent_id: r.get(1)?,
+                endpoint_id: r.get(2)?,
+                model_id: r.get(3)?,
+                requests: r.get(4)?,
+                usage_input: r.get(5)?,
+                usage_output: r.get(6)?,
+                cache_creation: r.get(7)?,
+                cache_read: r.get(8)?,
+                cost_usd: None,
+            })
+        })?;
+        rows.extend(mapped.collect::<rusqlite::Result<Vec<_>>>()?);
+        Ok(())
+    };
+
+    // Folded history (exact day strings, newest last).
+    if let Some(d) = days {
+        push(
+            "SELECT day, agent_id, endpoint_id, model_id, requests, usage_input,
+                    usage_output, cache_creation, cache_read
+             FROM usage_daily
+             WHERE (?1 IS NULL OR agent_id = ?1) AND day >= date('now', ?2)
+             ORDER BY day",
+            &[
+                &agent as &dyn rusqlite::ToSql,
+                &format!("-{} days", d.max(1)),
+            ],
+        )?;
+    } else {
+        push(
+            "SELECT day, agent_id, endpoint_id, model_id, requests, usage_input,
+                    usage_output, cache_creation, cache_read
+             FROM usage_daily WHERE ?1 IS NULL OR agent_id = ?1 ORDER BY day",
+            &[&agent as &dyn rusqlite::ToSql],
+        )?;
+    }
+
+    // Live window (rows not yet folded — everything still in route_request).
+    let live_since = days
+        .map(|d| chrono::Utc::now().timestamp_millis() - (d.max(1) as i64 * 86_400_000))
+        .unwrap_or(0);
+    push(
+        "SELECT strftime('%Y-%m-%d', started_at/1000, 'unixepoch'), agent_id,
+                COALESCE(resolved_endpoint_id, ''), COALESCE(resolved_model, ''),
+                count(*), COALESCE(sum(usage_input), 0), COALESCE(sum(usage_output), 0),
+                COALESCE(sum(cache_creation), 0), COALESCE(sum(cache_read), 0)
+         FROM route_request
+         WHERE (?1 IS NULL OR agent_id = ?1) AND started_at >= ?2
+         GROUP BY 1, 2, 3, 4
+         ORDER BY 1",
+        &[&agent as &dyn rusqlite::ToSql, &live_since],
+    )?;
+
+    // Read-time pricing: components with a known price contribute; a row
+    // whose priced components are all unknown carries `None`, never 0.
+    for row in &mut rows {
+        if let Some(p) = prices(&row.endpoint_id, &row.model_id) {
+            let mut cost = 0.0;
+            let mut known = false;
+            let mut per_m = |tokens: i64, price: Option<f64>| {
+                if let Some(pp) = price {
+                    cost += tokens as f64 / 1_000_000.0 * pp;
+                    known = true;
+                }
+            };
+            per_m(row.usage_input, p.input);
+            per_m(row.usage_output, p.output);
+            per_m(row.cache_read, p.cache_read);
+            per_m(row.cache_creation, p.cache_write);
+            row.cost_usd = known.then_some(cost);
+        }
+    }
+    Ok(rows)
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 

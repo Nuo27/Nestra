@@ -59,6 +59,27 @@ pub struct ModelAbilities {
     /// corrections map (provider-verified, like the context limits).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api: Option<String>,
+    /// Catalog pricing (USD per 1M tokens), from models.dev's `cost` map.
+    /// Read path only — the usage dashboard multiplies observed token counts
+    /// by these; never written into agent configs (`to_model_entry_fields`
+    /// maps limit/dialect fields explicitly and ignores this).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<CostPerMtok>,
+}
+
+/// Per-million-token prices (USD). Every field optional — only what the
+/// catalog actually reports; a missing price renders that cost component as
+/// an unknown, never zero (silently-free would understate spend).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CostPerMtok {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -150,6 +171,7 @@ fn parse_entry(v: &serde_json::Value) -> Option<ModelAbilities> {
         .get("modalities")
         .and_then(parse_modalities);
     let api = v.get("api").and_then(|x| x.as_str()).map(String::from);
+    let cost = v.get("cost").and_then(parse_cost);
     if reasoning.is_none()
         && tool_call.is_none()
         && attachment.is_none()
@@ -157,10 +179,29 @@ fn parse_entry(v: &serde_json::Value) -> Option<ModelAbilities> {
         && limit.is_none()
         && modalities.is_none()
         && api.is_none()
+        && cost.is_none()
     {
         return None;
     }
-    Some(ModelAbilities { reasoning, tool_call, attachment, temperature, limit, modalities, api })
+    Some(ModelAbilities { reasoning, tool_call, attachment, temperature, limit, modalities, api, cost })
+}
+
+/// Parse models.dev's `cost: { input, output, cache_read, cache_write }`
+/// (USD per 1M tokens). `None` when the map is absent or reports nothing.
+fn parse_cost(v: &serde_json::Value) -> Option<CostPerMtok> {
+    let obj = v.as_object()?;
+    let num = |k: &str| obj.get(k).and_then(|x| x.as_f64());
+    let c = CostPerMtok {
+        input: num("input"),
+        output: num("output"),
+        cache_read: num("cache_read"),
+        cache_write: num("cache_write"),
+    };
+    (c.input.is_some()
+        || c.output.is_some()
+        || c.cache_read.is_some()
+        || c.cache_write.is_some())
+        .then_some(c)
 }
 
 /// Merge override layers onto a base index keyed by TAIL segment: an
@@ -457,6 +498,7 @@ pub fn merge_field_overrides(
         },
         modalities: override_.modalities.or(default.modalities),
         api: override_.api.or(default.api),
+        cost: override_.cost.or(default.cost),
     }
 }
 
@@ -674,7 +716,7 @@ fn parse_pi_entry(v: &serde_json::Value) -> Option<ModelAbilities> {
     if reasoning.is_none() && limit.is_none() && api.is_none() {
         return None;
     }
-    Some(ModelAbilities { reasoning, tool_call: None, attachment: None, temperature: None, limit, modalities: None, api })
+    Some(ModelAbilities { reasoning, tool_call: None, attachment: None, temperature: None, limit, modalities: None, api, cost: None })
 }
 
 /// Build the abilities index from one pi.dev provider catalog. Keys are

@@ -94,43 +94,11 @@ fn load_or_create_master_key() -> AppResult<[u8; 32]> {
     Ok(key)
 }
 
-/// Atomic write with restrictive perms: the temp file is created 0600
-/// (umask-independent) and fsynced before the rename, so a crash can never
-/// leave a zero-length or world-readable key file behind. `rename` atomically
-/// replaces the target on both Unix and Windows.
+/// Atomic write with restrictive perms (0600 temp + fsync + rename, plus the
+/// Windows sharing-violation backoff ladder) — delegates to the single shared
+/// implementation in `config_writer` so the two call sites can't drift.
 fn atomic_write(path: &Path, bytes: &[u8]) -> AppResult<()> {
-    use std::io::Write;
-    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("keychain-entry");
-    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = parent.join(format!(".{file_name}.tmp.{}.{seq}", std::process::id()));
-
-    let res = (|| -> AppResult<()> {
-        #[cfg(unix)]
-        let mut f = {
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp)?
-        };
-        #[cfg(not(unix))]
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp, path).map_err(AppError::Io)?;
-        Ok(())
-    })();
-    if res.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    res
+    crate::config_writer::atomic_write(path, bytes)
 }
 
 pub fn set(provider_id: &str, key: &str) -> AppResult<()> {

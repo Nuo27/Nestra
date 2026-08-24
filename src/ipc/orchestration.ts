@@ -245,6 +245,36 @@ export async function detectedRoles(
   });
 }
 
+/// One (day, agent, endpoint, model) usage bucket. Mirrors `store::UsageRow`.
+/// `cost_usd` is computed at read time against the current price catalog;
+/// `null` = no price known for this model (unknown spend, not free).
+export interface UsageRow {
+  day: string;
+  agent_id: string;
+  endpoint_id: string;
+  model_id: string;
+  requests: number;
+  usage_input: number;
+  usage_output: number;
+  cache_creation: number;
+  cache_read: number;
+  cost_usd: number | null;
+}
+
+/// Usage dashboard rows: folded lifetime history (`usage_daily`) plus the
+/// live retention window (`route_request`) — disjoint halves the backend
+/// guarantees never overlap per row. `agentId` filters; `days` bounds the
+/// window (omitted = lifetime).
+export async function usageSummary(
+  agentId?: string,
+  days?: number,
+): Promise<UsageRow[]> {
+  return invoke<UsageRow[]>("orch_usage_summary", {
+    agentId: agentId ?? null,
+    days: days ?? null,
+  });
+}
+
 /// `routing_policy` row — keyed `(agent_id, role)`. `role = "*"` is the
 /// catch-all default; otherwise it's a `SubagentRole::as_policy_key()`.
 /// Mirrors `RoutingPolicyRow` (store.rs:31-48).

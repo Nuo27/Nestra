@@ -11,6 +11,7 @@ fn ab(reasoning: bool, tool_call: bool, attachment: bool, limit: Option<ModelLim
         limit,
         modalities: None,
         api: None,
+        cost: None,
     }
 }
 
@@ -68,6 +69,7 @@ fn ab_with_api(api: &str) -> ModelAbilities {
     ModelAbilities {
         reasoning: Some(true),
         api: Some(api.into()),
+        cost: None,
         ..ModelAbilities::default()
     }
 }

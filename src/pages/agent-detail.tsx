@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { Workflow, ListTree, ArrowRight, Users, ShieldCheck } from "lucide-react";
+import { Workflow, ListTree, ArrowRight, Users, ShieldCheck, Coins } from "lucide-react";
 import { AgentKindBadge } from "../components/agents/AgentKindBadge";
 import { Page } from "../components/layout/Page";
 import { PageHeader, BackLink } from "../components/layout/PageHeader";
@@ -28,6 +28,7 @@ import {
   tasks,
   agentGatewayEnabled,
   detectedRoles,
+  usageSummary,
   type TaskSummary,
   type RouteMigrationRow,
 } from "../ipc/orchestration";
@@ -134,6 +135,8 @@ function AgentDetailBody({
       >
         <AgentTasks agentId={agent.id} />
       </CollapsibleSection>
+
+      <UsageCard agentId={agent.id} />
     </div>
   ) : (
     <ProviderConfigPanel agent={agent} endpoints={endpoints} />
@@ -205,6 +208,116 @@ function DetectedRolesCard({ agentId }: { agentId: string }) {
           </Link>
         ))}
       </div>
+    </CollapsibleSection>
+  );
+}
+
+/// Gateway-observed usage for this agent, last 30 days: totals + per-model
+/// breakdown. The backend unions folded lifetime history with the live
+/// window; spend is priced at read time (`cost_usd: null` rows carry tokens
+/// but no dollars — flagged, never silently free). Hidden when no traffic.
+function UsageCard({ agentId }: { agentId: string }) {
+  const { t } = useTranslation();
+  const q = useQuery({
+    queryKey: ["orchestration", "usage", agentId],
+    queryFn: () => usageSummary(agentId, 30),
+    refetchInterval: 15000,
+  });
+  const rows = q.data ?? [];
+  if (!q.isLoading && rows.length === 0) return null;
+
+  const totals = rows.reduce(
+    (a, r) => ({
+      requests: a.requests + r.requests,
+      input: a.input + r.usage_input,
+      output: a.output + r.usage_output,
+      cacheRead: a.cacheRead + r.cache_read,
+      cacheWrite: a.cacheWrite + r.cache_creation,
+      cost: a.cost + (r.cost_usd ?? 0),
+      unknown: a.unknown || r.cost_usd == null,
+    }),
+    { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, unknown: false },
+  );
+  const byModel = new Map<string, typeof totals & { model: string; endpoint: string }>();
+  for (const r of rows) {
+    const key = `${r.endpoint_id || "—"} / ${r.model_id || "—"}`;
+    const cur =
+      byModel.get(key) ??
+      { ...totals, requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, unknown: false, model: r.model_id || "—", endpoint: r.endpoint_id || "—" };
+    cur.requests += r.requests;
+    cur.input += r.usage_input;
+    cur.output += r.usage_output;
+    cur.cacheRead += r.cache_read;
+    cur.cacheWrite += r.cache_creation;
+    cur.cost += r.cost_usd ?? 0;
+    cur.unknown = cur.unknown || r.cost_usd == null;
+    byModel.set(key, cur);
+  }
+  const fmt = (n: number) => n.toLocaleString();
+  const fmtUsd = (n: number) => (n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`);
+
+  return (
+    <CollapsibleSection
+      icon={<Coins data-icon size={14} />}
+      title={t("agentDetail.usage")}
+      hint={t("agentDetail.usageHint")}
+    >
+      {q.isLoading ? (
+        <Skeleton className="h-8 w-full" />
+      ) : (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-2xs text-muted tabular">
+            <span>
+              <span className="text-fg">{fmt(totals.requests)}</span>{" "}
+              {t("agentDetail.usageRequests")}
+            </span>
+            <span>
+              <span className="text-fg">{fmt(totals.input)}</span> {t("agentDetail.usageIn")}
+            </span>
+            <span>
+              <span className="text-fg">{fmt(totals.output)}</span> {t("agentDetail.usageOut")}
+            </span>
+            <span>
+              <span className="text-fg">{fmt(totals.cacheRead)}</span> {t("cache.read")}
+            </span>
+            <span className="ml-auto">
+              {t("agentDetail.usageSpend")}{" "}
+              <span className="text-fg">{fmtUsd(totals.cost)}</span>
+              {totals.unknown && (
+                <span className="ml-1 text-warning" title={t("agentDetail.usageSpendUnknown")}>
+                  ~+
+                </span>
+              )}
+            </span>
+          </div>
+          <ul className="space-y-1">
+            {[...byModel.entries()].map(([key, m]) => (
+              <li
+                key={key}
+                className="flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-2xs text-muted tabular"
+              >
+                <span className="min-w-0 flex-1 truncate">
+                  <span className="text-fg">{m.model}</span>
+                  <span className="text-subtle"> @ {m.endpoint}</span>
+                </span>
+                <span>
+                  {fmt(m.requests)} {t("agentDetail.usageRequests")}
+                </span>
+                <span>
+                  {t("agentDetail.usageIn")} {fmt(m.input)}
+                </span>
+                <span>
+                  {t("agentDetail.usageOut")} {fmt(m.output)}
+                </span>
+                <span>
+                  {t("agentDetail.usageSpend")}{" "}
+                  {m.cost > 0 || !m.unknown ? fmtUsd(m.cost) : "—"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </CollapsibleSection>
   );
 }

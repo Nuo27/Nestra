@@ -98,17 +98,81 @@ pub fn open_readonly(data_dir: &std::path::Path) -> AppResult<Connection> {
     Ok(conn)
 }
 
-/// Migrator entrypoint. Delegates to [`crate::schema::migrate`], which builds
-/// the canonical v1 schema on first launch and refuses a pre-release database
-/// (any `schema_version` other than 1) per the fresh-data policy. See
-/// `schema.rs` for the full contract and the credential-boundary guarantees.
+/// Migrator entrypoint. Snapshots a version-mismatched database first (see
+/// [`pre_migration_backup`]), then delegates to [`crate::schema::migrate`],
+/// which builds the canonical v1 schema on first launch and refuses a
+/// pre-release database (any `schema_version` other than 1) per the
+/// fresh-data policy. See `schema.rs` for the full contract and the
+/// credential-boundary guarantees.
 pub fn migrate(conn: &Connection) -> AppResult<()> {
+    pre_migration_backup(conn)?;
     crate::schema::migrate(conn)?;
     // Keep the `agent` table in lock-step with the current agent registry: a
     // new AgentSpec appears on first launch as a `missing` row. Idempotent.
     let now = chrono::Utc::now().timestamp_millis();
     sync_agents_from_registry(conn, now)?;
     Ok(())
+}
+
+/// Copy the database file aside BEFORE a schema migration touches it. Only
+/// fires when the on-disk version exists and differs from the app's — a
+/// same-version or brand-new launch is a no-op. The snapshot lands next to
+/// the db file in `db_backups/v<from>-to-v<to>-<ts>/nestra.db` and the
+/// newest 3 are kept. A failed snapshot FAILS the migration: migrating
+/// without a safety copy is exactly the scenario this exists to prevent
+/// (mirrors cc-switch's pre_migration_backup guarantee).
+fn pre_migration_backup(conn: &Connection) -> AppResult<()> {
+    use rusqlite::OptionalExtension;
+    // PRAGMA database_list's first row is "main"; its file column is empty
+    // for in-memory test databases — nothing to snapshot there.
+    let db_path = conn
+        .query_row("PRAGMA database_list", [], |r| {
+            r.get::<_, Option<String>>(2)
+        })
+        .optional()?
+        .flatten()
+        .map(std::path::PathBuf::from);
+    let Some(db_path) = db_path else {
+        return Ok(());
+    };
+    let Some(parent) = db_path.parent() else {
+        return Ok(());
+    };
+
+    match crate::schema::on_disk_version(conn)? {
+        Some(v) if v != crate::schema::SCHEMA_VERSION => v,
+        _ => return Ok(()),
+    };
+    // Fold the WAL into the main file so the copy is complete on its own.
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    let ts = chrono::Utc::now().timestamp_millis();
+    let from = crate::schema::on_disk_version(conn)?
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "fresh".into());
+    let root = parent.join("db_backups");
+    let dir = root.join(format!(
+        "v{from}-to-v{}-{ts}",
+        crate::schema::SCHEMA_VERSION
+    ));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::copy(&db_path, dir.join("nestra.db"))?;
+    rotate_backup_snapshots(&root);
+    tracing::info!(snapshot = %dir.display(), "pre-migration db snapshot taken");
+    Ok(())
+}
+
+/// Keep only the newest 3 snapshot dirs — names end in a millisecond
+/// timestamp, so lexicographic order IS age order.
+fn rotate_backup_snapshots(root: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    dirs.sort();
+    while dirs.len() > 3 {
+        let oldest = dirs.remove(0);
+        let _ = std::fs::remove_dir_all(oldest);
+    }
 }
 
 /// Insert-or-ignore every agent declared in [`crate::agents::AGENTS`] into
@@ -1035,6 +1099,36 @@ pub fn prune_observability_data(conn: &Connection) -> AppResult<u64> {
         .max(1); // clamp: 0 would prune everything immediately
     let now = chrono::Utc::now().timestamp_millis();
     let cutoff = now - (days as i64 * 86_400_000);
+
+    // v2: fold the departing tasks' token counts into the lifetime usage
+    // rollup FIRST. Fold-select and delete use the same task predicate in
+    // the same transaction, and the upsert only ever ADDS what the delete
+    // removes — exactly-once even across re-runs.
+    conn.execute(
+        "INSERT INTO usage_daily
+           (day, agent_id, endpoint_id, model_id, requests,
+            usage_input, usage_output, cache_creation, cache_read)
+         SELECT strftime('%Y-%m-%d', r.started_at / 1000, 'unixepoch'),
+                r.agent_id,
+                COALESCE(r.resolved_endpoint_id, ''),
+                COALESCE(r.resolved_model, ''),
+                count(*),
+                COALESCE(sum(r.usage_input), 0),
+                COALESCE(sum(r.usage_output), 0),
+                COALESCE(sum(r.cache_creation), 0),
+                COALESCE(sum(r.cache_read), 0)
+         FROM route_request r
+         JOIN task t ON t.id = r.task_id
+         WHERE t.started_at < ?1
+         GROUP BY 1, 2, 3, 4
+         ON CONFLICT(day, agent_id, endpoint_id, model_id) DO UPDATE SET
+           requests      = requests + excluded.requests,
+           usage_input   = usage_input + excluded.usage_input,
+           usage_output  = usage_output + excluded.usage_output,
+           cache_creation = cache_creation + excluded.cache_creation,
+           cache_read    = cache_read + excluded.cache_read",
+        rusqlite::params![cutoff],
+    )?;
 
     // Deleting `task` rows cascades to route_request → route_migration.
     let tasks = conn.execute(

@@ -1,18 +1,20 @@
 //! Canonical schema — single source of truth for every table.
 //!
 //! The entire schema is defined here as one canonical block (`SCHEMA_V1`),
-//! built in one shot and stamped `schema_version = 1`. There is no incremental
-//! migration code; future schema evolution resumes versioning from v1
-//! (v2 = additive `ALTER` block appended to [`migrate`]).
+//! built in one shot and stamped with [`SCHEMA_VERSION`]. There is no
+//! per-version ALTER history: additive changes extend the canonical DDL
+//! (every statement is `IF NOT EXISTS`, so re-running `build_v1` upgrades an
+//! older install in place) and bump [`SCHEMA_VERSION`]; [`migrate`] routes.
 //!
-//! ## Fresh-data policy
+//! ## Version policy
 //!
-//! Nestra builds the database from `SCHEMA_V1` on first launch. An existing
-//! database whose `schema_version` is anything other than `1` is treated as a
-//! pre-release build's data directory: [`migrate`] returns a clear error and
-//! the caller exits safely without modifying the database, starting workers,
-//! or initializing application state. Public v0.1.0 does not migrate or import
-//! any pre-release database.
+//! Nestra builds the database from `SCHEMA_V1` on first launch. A database
+//! at an OLDER known version (v1) is upgraded in place by the idempotent
+//! canonical rebuild, after `db::pre_migration_backup` snapshots the file.
+//! A database at an UNKNOWN version — a pre-release build, or one newer
+//! than this app — is refused: [`migrate`] returns a clear error and the
+//! caller exits safely without modifying the database, starting workers,
+//! or initializing application state.
 //!
 //! **Credential boundary:** no table carries a credential, API-key, token, or
 //! secret column. Credentials live only in `secrets.rs` and are resolved at
@@ -30,9 +32,10 @@
 use crate::error::{AppError, AppResult};
 use rusqlite::Connection;
 
-/// The one canonical schema version. Future additive changes bump this and add
-/// a guarded `ALTER` block to [`migrate`].
-pub const SCHEMA_VERSION: i32 = 1;
+/// The one canonical schema version. v2 added the `usage_daily` lifetime
+/// rollup + `idx_route_request_agent_started` (usage dashboard); the
+/// idempotent canonical rebuild carries older installs forward.
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// The full canonical schema as one DDL string. Every table Nestra owns is
 /// declared here exactly once — there is no per-version ALTER history.
@@ -295,6 +298,31 @@ CREATE INDEX IF NOT EXISTS idx_route_request_session ON route_request(agent_id, 
 -- This index fixes that read, which scales with lifetime request volume.
 CREATE INDEX IF NOT EXISTS idx_route_request_logical_session
   ON route_request(logical_session, started_at);
+-- v2: per-agent usage summary over the live window (the usage dashboard's
+-- `WHERE agent_id = ? AND started_at >= ?` range scan).
+CREATE INDEX IF NOT EXISTS idx_route_request_agent_started
+  ON route_request(agent_id, started_at);
+
+-- v2: daily usage rollup — the lifetime half of the usage dashboard.
+-- `route_request` rows are cascade-deleted with their tasks once past the
+-- retention window; `db::prune_observability_data` folds each departing
+-- task's token counts HERE first (same transaction, accumulate-upsert), so
+-- the dashboard keeps lifetime history while the hot tables stay bounded.
+-- The two halves never double-count: a row lives in exactly one of them.
+-- `cost` is NOT stored — prices change, so spend is computed at read time
+-- against the current catalog (models.dev + per-endpoint overrides).
+CREATE TABLE IF NOT EXISTS usage_daily (
+  day             TEXT NOT NULL,            -- UTC 'YYYY-MM-DD'
+  agent_id        TEXT NOT NULL,
+  endpoint_id     TEXT NOT NULL,            -- '' when a request never resolved
+  model_id        TEXT NOT NULL,
+  requests        INTEGER NOT NULL,
+  usage_input     INTEGER NOT NULL,
+  usage_output    INTEGER NOT NULL,
+  cache_creation  INTEGER NOT NULL,
+  cache_read      INTEGER NOT NULL,
+  PRIMARY KEY (day, agent_id, endpoint_id, model_id)
+);
 
 -- One row per migration event. Records why a request moved from one endpoint
 -- to another. Reason vocabulary: 'quota_exhausted' | 'rate_limit' | 'temp_5xx'
@@ -562,7 +590,7 @@ fn ensure_column(
 
 /// Current on-disk schema version, or `None` when the DB is empty (no
 /// `schema_version` table at all — a brand-new install).
-fn on_disk_version(conn: &Connection) -> AppResult<Option<i32>> {
+pub(crate) fn on_disk_version(conn: &Connection) -> AppResult<Option<i32>> {
     let has_table: i64 = conn.query_row(
         "SELECT count(*) FROM sqlite_master
          WHERE type = 'table' AND name = 'schema_version'",
@@ -585,29 +613,30 @@ fn on_disk_version(conn: &Connection) -> AppResult<Option<i32>> {
 
 /// Schema migrator. Logic:
 ///   - empty DB (no `schema_version` table) → [`build_v1`].
-///   - already at the canonical v1 → idempotent rebuild (cheap no-op).
-///   - any other version → error. This is the fresh-data policy: a pre-release
-///     build's data directory is NOT migrated. The caller must surface this as
-///     a clear message and exit without modifying the database or starting
-///     workers.
-///
-/// When the next additive schema change ships (v2), a `Some(v) if v >= 2` arm
-/// goes here to apply guarded `ALTER` blocks.
+///   - v1 or current → idempotent canonical rebuild: upgrades older KNOWN
+///     versions in place (every statement is `IF NOT EXISTS`) and backfills
+///     tables added in a patch release without bumping the version.
+///   - any other version → error. Either a pre-release build's data
+///     directory or a database written by a newer app; the caller must
+///     surface this as a clear message and exit without modifying the
+///     database or starting workers.
 pub fn migrate(conn: &Connection) -> AppResult<()> {
     match on_disk_version(conn)? {
         None => build_v1(conn),
-        Some(SCHEMA_VERSION) => {
-            // Already at v1. `build_v1` is idempotent (CREATE TABLE IF NOT
-            // EXISTS), so re-running is a cheap no-op that also backfills any
-            // table added in a patch release without bumping the version.
+        Some(1) | Some(SCHEMA_VERSION) => {
+            // Idempotent: re-running the canonical DDL upgrades v1 → v2
+            // (additions only) and is a no-op on a current database. The
+            // stamp is upserted last-ish; a crash before it leaves the old
+            // version, and the next launch simply re-runs to convergence —
+            // `db::pre_migration_backup` snapshotted the file beforehand.
             build_v1(conn)
         }
         // A pre-release or unrecognized database. Refuse to guess: do NOT
         // migrate, do NOT modify, do NOT start the app against it. The caller
         // shows a clear message and exits safely.
         Some(other) => Err(AppError::Internal(format!(
-            "This data directory is from a pre-release build of Nestra (database schema version {other}). \
-             Public v0.1.0 does not migrate pre-release data. Back up and remove this directory, then relaunch:\n  {}",
+            "This data directory carries database schema version {other}, which this version of Nestra does not recognize \
+             (pre-release data, or written by a newer app). Back up and remove this directory, then relaunch:\n  {}",
             crate::db::data_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "<Nestra data dir>".into())

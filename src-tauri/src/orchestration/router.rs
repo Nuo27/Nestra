@@ -400,16 +400,29 @@ pub fn steady_state(
     })
 }
 
+/// Remaining-budget threshold (percent) below which the policy-target walk
+/// prefers the next target. Fed by the proactive quota fetch
+/// (`QuotaState::set_remaining`); unknown budget never triggers a skip.
+const LOW_REMAINING_PCT: f64 = 5.0;
+
 /// Walk the policy's ordered route-target list and return the first
 /// `(endpoint, model)` whose endpoint exists, is healthy, quota-ok, and has
 /// not already failed on this request (migration exclusion). No capability
 /// filtering — an explicit target is the user's stated intent. `None` when
 /// the list is empty or nothing qualifies.
+///
+/// Quota-window awareness: a target whose last known remaining budget is at
+/// or below [`LOW_REMAINING_PCT`] is soft-skipped when a later target still
+/// has headroom (the user's priority order is otherwise preserved — this
+/// only avoids routing into a window about to fail). When EVERY qualifying
+/// target is low, the first one still wins: a nearly-empty window beats
+/// failing closed. `None` (no quota signal) never skips.
 fn pick_by_targets(
     ctx: &TaskContext,
     policy: &store::RoutingPolicyRow,
     inputs: &RouterInputs<'_>,
 ) -> AppResult<Option<(String, String, RouteReason)>> {
+    let mut low_fallback: Option<(String, String)> = None;
     for target in policy.targets() {
         if ctx.failed_endpoints.iter().any(|e| e == &target.endpoint) {
             continue;
@@ -424,8 +437,14 @@ fn pick_by_targets(
         }
         if inputs.health.is_degraded(&target.endpoint, &target.model)
                 || inputs.quota.is_exhausted(&target.endpoint)
-            {
+        {
             continue;
+        }
+        if let Some(r) = inputs.quota.remaining(&target.endpoint) {
+            if r <= LOW_REMAINING_PCT {
+                low_fallback.get_or_insert((target.endpoint.clone(), target.model.clone()));
+                continue;
+            }
         }
         return Ok(Some((
             target.endpoint.clone(),
@@ -433,7 +452,7 @@ fn pick_by_targets(
             RouteReason::Policy,
         )));
     }
-    Ok(None)
+    Ok(low_fallback.map(|(endpoint, model)| (endpoint, model, RouteReason::Policy)))
 }
 
 /// Pure-read answer to "if the current endpoint fails, is there anywhere

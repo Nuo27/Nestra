@@ -461,6 +461,11 @@ pub fn restore_factory(config_path: &Path) -> AppResult<()> {
 /// when the target already exists, the target's own permission bits are
 /// re-applied before the rename — so a pre-existing 0600 key file stays 0600
 /// instead of silently widening to the umask default.
+///
+/// The final rename is retried on a short backoff ladder (0/10/50/100ms):
+/// on Windows it can fail with a sharing violation while another process
+/// (AV scan, an agent re-reading its config) briefly holds the target open.
+/// A persistent failure still surfaces to the caller.
 pub fn atomic_write(path: &Path, data: &[u8]) -> AppResult<()> {
     use std::io::Write;
     let parent = path
@@ -493,8 +498,17 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> AppResult<()> {
         f.write_all(data)?;
         f.sync_all()?;
         drop(f);
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        let mut last_err: Option<std::io::Error> = None;
+        for backoff_ms in [0u64, 10, 50, 100] {
+            if backoff_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+            }
+            match std::fs::rename(&tmp, path) {
+                Ok(()) => return Ok(()),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.expect("rename ladder ran at least once").into())
     })();
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -518,6 +532,80 @@ fn create_private(path: &Path) -> AppResult<std::fs::File> {
 #[cfg(not(unix))]
 fn create_private(path: &Path) -> AppResult<std::fs::File> {
     Ok(std::fs::File::create(path)?)
+}
+
+// ---- switch transactions ---------------------------------------------------
+
+/// Pre-write bytes of one config file (and whether it existed at all).
+type FileSnapshot = (PathBuf, Option<Vec<u8>>);
+
+/// Run `apply_set` as a mini-transaction: the live bytes of `config_path` plus
+/// the adapter's [`ConfigAdapter::extra_config_paths`] are snapshotted first;
+/// if the write fails midway, every file is restored to its pre-switch state
+/// (files the switch created are removed). This is deliberately separate from
+/// the per-switch `ensure_backup` inside adapters — that backup holds the
+/// pre-NESTRA original, not the pre-SWITCH state, so it cannot undo a failed
+/// A→B switch.
+pub fn apply_set_atomic(
+    adapter: &dyn ConfigAdapter,
+    config_path: &Path,
+    set: &ProviderSet,
+) -> AppResult<bool> {
+    let snap = snapshot_for(adapter, config_path);
+    match adapter.apply_set(config_path, set) {
+        Ok(created) => Ok(created),
+        Err(e) => {
+            report_rollback(&snap);
+            Err(e)
+        }
+    }
+}
+
+/// Gateway-alias variant of [`apply_set_atomic`] — same snapshot/rollback
+/// contract around [`ConfigAdapter::apply_gateway_set`].
+pub fn apply_gateway_set_atomic(
+    adapter: &dyn ConfigAdapter,
+    config_path: &Path,
+    alias: &GatewayAlias,
+) -> AppResult<bool> {
+    let snap = snapshot_for(adapter, config_path);
+    match adapter.apply_gateway_set(config_path, alias) {
+        Ok(created) => Ok(created),
+        Err(e) => {
+            report_rollback(&snap);
+            Err(e)
+        }
+    }
+}
+
+fn snapshot_for(adapter: &dyn ConfigAdapter, config_path: &Path) -> Vec<FileSnapshot> {
+    let mut snap = vec![(config_path.to_path_buf(), std::fs::read(config_path).ok())];
+    for p in adapter.extra_config_paths(config_path) {
+        snap.push((p.clone(), std::fs::read(&p).ok()));
+    }
+    snap
+}
+
+/// Restore a snapshot in reverse order, attempting every file even when one
+/// fails (a half-rolled-back switch is still better than none); the first
+/// failure is logged, not surfaced — the caller is already returning the
+/// original write error.
+fn report_rollback(snap: &[FileSnapshot]) {
+    for (path, old) in snap.iter().rev() {
+        let res = match old {
+            Some(bytes) => atomic_write(path, bytes),
+            // File did not exist before the switch: remove it, unless the
+            // failed write never got around to creating it.
+            None => match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(AppError::Io(e)),
+            },
+        };
+        if let Err(e) = res {
+            tracing::warn!(path = %path.display(), error = %e, "switch rollback incomplete");
+        }
+    }
 }
 
 #[cfg(test)]

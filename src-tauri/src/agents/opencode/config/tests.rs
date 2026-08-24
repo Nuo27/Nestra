@@ -38,6 +38,7 @@ fn live_write_realistic_opencode_json() {
                     input: None }),
                             modalities: None,
                             api: None,
+                            cost: None,
     },
         );
     }
@@ -68,6 +69,7 @@ fn live_write_realistic_opencode_json() {
                     input: None }),
                             modalities: None,
                             api: None,
+                            cost: None,
     },
         );
     }
@@ -152,6 +154,7 @@ fn models_map_emits_matched_abilities() {
             limit: Some(ModelLimit { context: 128_000, output: 16_384, input: None }),
             modalities: None,
             api: None,
+            cost: None,
         },
     );
     let ctx = SwitchContext {
@@ -354,6 +357,7 @@ fn apply_gateway_set_passes_alias_abilities_through() {
                 }),
                 modalities: None,
                 api: None,
+                cost: None,
             }),
         },
         tier_aliases: None,
@@ -401,6 +405,7 @@ fn apply_set_emits_ability_fields_into_model_entry() {
                 input: None }),
                         modalities: None,
                         api: None,
+                        cost: None,
     },
     );
     OpenCode.apply(&cfg, &ctx).unwrap();
@@ -453,6 +458,7 @@ fn apply_set_writes_realistic_minimax_plus_zai_config() {
                 input: None }),
                         modalities: None,
                         api: None,
+                        cost: None,
     },
     );
     minimax.model_abilities.insert(
@@ -468,6 +474,7 @@ fn apply_set_writes_realistic_minimax_plus_zai_config() {
                 input: None }),
                         modalities: None,
                         api: None,
+                        cost: None,
     },
     );
 
@@ -493,6 +500,7 @@ fn apply_set_writes_realistic_minimax_plus_zai_config() {
                 input: None }),
                         modalities: None,
                         api: None,
+                        cost: None,
     },
     );
     zai.model_abilities.insert(
@@ -508,6 +516,7 @@ fn apply_set_writes_realistic_minimax_plus_zai_config() {
                 input: None }),
                         modalities: None,
                         api: None,
+                        cost: None,
     },
     );
     zai.model_abilities.insert(
@@ -523,6 +532,7 @@ fn apply_set_writes_realistic_minimax_plus_zai_config() {
                 input: None }),
                         modalities: None,
                         api: None,
+                        cost: None,
     },
     );
 

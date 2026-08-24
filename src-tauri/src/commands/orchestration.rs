@@ -375,3 +375,42 @@ pub fn orch_session_tasks(
         limit.unwrap_or(20).max(1).min(100),
     )
 }
+
+/// Usage dashboard rows: per-(day, agent, endpoint, model) token + cache
+/// counts with read-time USD cost. Prices resolve endpoint-level ability
+/// overrides first, then the models.dev catalog; rows with no known price
+/// carry `cost_usd: null` (unknown spend, not free).
+#[tauri::command]
+pub fn orch_usage_summary(
+    state: State<'_, crate::AppState>,
+    agent_id: Option<String>,
+    days: Option<u64>,
+) -> AppResult<Vec<crate::orchestration::store::UsageRow>> {
+    use std::collections::HashMap;
+    let conn = state.db_read.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+    let global = crate::model_abilities::load_index(&conn)?;
+    let mut overrides: HashMap<String, HashMap<String, crate::model_abilities::ModelAbilities>> =
+        HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, model_abilities_json FROM provider_endpoint
+             WHERE model_abilities_json IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, json) = row?;
+            overrides.insert(id, crate::model_abilities::parse_overrides(Some(&json)));
+        }
+    }
+    let prices = |endpoint: &str, model: &str| -> Option<crate::model_abilities::CostPerMtok> {
+        let norm = crate::model_abilities::normalize(model);
+        overrides
+            .get(endpoint)
+            .and_then(|m| m.get(model).or_else(|| m.get(&norm)))
+            .and_then(|a| a.cost.clone())
+            .or_else(|| global.get(model).and_then(|a| a.cost.clone()))
+    };
+    crate::orchestration::store::usage_summary_rows(&conn, agent_id.as_deref(), days, &prices)
+}

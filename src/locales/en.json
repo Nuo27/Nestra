@@ -705,7 +705,14 @@
     "noGatewayTraffic": "no gateway traffic",
     "noGatewayTrafficHint": "Once this agent is routed and a request flows through, each task appears here with its full route lineage: requested model → resolved provider, route reason, prompt-cache metrics, and generation-broken flags.",
     "reviewTitle": "Review runtime",
-    "reviewHint": "Spawn isolated review sessions on finished work"
+    "reviewHint": "Spawn isolated review sessions on finished work",
+    "usage": "Usage & spend",
+    "usageHint": "gateway-observed tokens, last 30 days · spend priced live from the model catalog",
+    "usageRequests": "requests",
+    "usageIn": "in",
+    "usageOut": "out",
+    "usageSpend": "spend",
+    "usageSpendUnknown": "some models unpriced"
   },
   "routingPolicy": {
     "notSaved": "Policy not saved",

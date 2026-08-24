@@ -166,6 +166,113 @@ fn atomic_write_creates_parent_dirs() {
     assert_eq!(fs::read_to_string(&cfg).unwrap(), "x");
 }
 
+/// A persistent rename failure (here: the target is a directory, which no
+/// amount of backoff fixes) must exhaust the retry ladder, surface the error,
+/// and clean the temp file — the contract the Windows sharing-violation
+/// backoff relies on for its bounded-failure path.
+#[test]
+fn atomic_write_rename_retry_exhaustion_surfaces_error_and_cleans_temp() {
+    let (tmp, _tmp_g) = tempfile_dir();
+    let target = tmp.join("occupied");
+    fs::create_dir(&target).unwrap();
+    assert!(atomic_write(&target, b"x").is_err());
+    // Only the (untouched) directory remains — the temp was removed.
+    let entries: Vec<_> = fs::read_dir(&tmp).unwrap().collect();
+    assert_eq!(entries.len(), 1, "temp file must not survive a failed write");
+    assert!(entries[0].as_ref().unwrap().path().is_dir());
+}
+
+// ---- switch transactions (apply_set_atomic) --------------------------------
+
+/// Two-file mock adapter (main + sibling `auth.json`, the Pi shape). `fail_at`
+/// injects a failure after that many files were written, exercising the
+/// rollback contract's restore/remove paths.
+struct TwoFileMock {
+    fail_at: usize,
+}
+
+impl ConfigAdapter for TwoFileMock {
+    fn accepts(&self) -> &'static [ProviderKind] {
+        &[ProviderKind::Custom]
+    }
+    fn model_selection(&self) -> ModelSelection {
+        ModelSelection::FreeForm
+    }
+    fn apply_set(&self, config_path: &Path, _set: &ProviderSet) -> AppResult<bool> {
+        let extra = extra_path(config_path);
+        atomic_write(config_path, b"NEW-MAIN")?;
+        if self.fail_at == 1 {
+            return Err(AppError::Validation("injected mid-switch failure".into()));
+        }
+        atomic_write(&extra, b"NEW-EXTRA")?;
+        if self.fail_at == 2 {
+            return Err(AppError::Validation("injected mid-switch failure".into()));
+        }
+        Ok(true)
+    }
+    fn restore(&self, _config_path: &Path) -> AppResult<()> {
+        Ok(())
+    }
+    fn extra_config_paths(&self, config_path: &Path) -> Vec<PathBuf> {
+        vec![extra_path(config_path)]
+    }
+}
+
+fn extra_path(config_path: &Path) -> PathBuf {
+    config_path.with_file_name("auth.json")
+}
+
+fn empty_set() -> ProviderSet {
+    ProviderSet {
+        entries: vec![],
+        default_provider_id: String::new(),
+        default_model: String::new(),
+    }
+}
+
+#[test]
+fn apply_set_atomic_rolls_back_every_file_on_mid_switch_failure() {
+    let (tmp, _tmp_g) = tempfile_dir();
+    let cfg = tmp.join("models.json");
+    fs::write(&cfg, "OLD-MAIN").unwrap();
+    fs::write(&extra_path(&cfg), "OLD-EXTRA").unwrap();
+
+    let err = apply_set_atomic(&TwoFileMock { fail_at: 1 }, &cfg, &empty_set())
+        .expect_err("injected failure must surface");
+    assert!(err.to_string().contains("injected"));
+
+    // Both files hold their PRE-SWITCH bytes — not the pre-Nestra backup.
+    assert_eq!(fs::read_to_string(&cfg).unwrap(), "OLD-MAIN");
+    assert_eq!(fs::read_to_string(&extra_path(&cfg)).unwrap(), "OLD-EXTRA");
+    assert_eq!(fs::read_dir(&tmp).unwrap().count(), 2, "no temp residue");
+}
+
+#[test]
+fn apply_set_atomic_removes_files_the_failed_switch_created() {
+    let (tmp, _tmp_g) = tempfile_dir();
+    let cfg = tmp.join("models.json");
+    fs::write(&cfg, "OLD-MAIN").unwrap();
+    // auth.json did not exist; the mock writes it, then fails.
+
+    apply_set_atomic(&TwoFileMock { fail_at: 2 }, &cfg, &empty_set())
+        .expect_err("injected failure must surface");
+
+    assert_eq!(fs::read_to_string(&cfg).unwrap(), "OLD-MAIN");
+    assert!(!extra_path(&cfg).exists(), "created file must be removed");
+}
+
+#[test]
+fn apply_set_atomic_success_writes_through_without_rollback() {
+    let (tmp, _tmp_g) = tempfile_dir();
+    let cfg = tmp.join("models.json");
+    fs::write(&cfg, "OLD-MAIN").unwrap();
+
+    assert!(apply_set_atomic(&TwoFileMock { fail_at: 0 }, &cfg, &empty_set()).unwrap());
+
+    assert_eq!(fs::read_to_string(&cfg).unwrap(), "NEW-MAIN");
+    assert_eq!(fs::read_to_string(&extra_path(&cfg)).unwrap(), "NEW-EXTRA");
+}
+
 /// Returns `(path, guard)`: the guard deletes the directory when it
 /// drops (end of the test fn, including panics). The old hand-rolled
 /// dirs leaked thousands of `nestra-cfg-test-*` folders in the system

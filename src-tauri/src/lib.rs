@@ -9,6 +9,7 @@ mod logging;
 mod model_abilities;
 mod mcp;
 pub mod orchestration;
+mod panic_hook;
 mod quota_refresh;
 mod review;
 mod schema;
@@ -71,11 +72,17 @@ pub struct AppState {
     /// so the spawn task can store the handle after `.manage()` already cloned
     /// the state.
     pub gateway: orchestration::gateway::control::GatewayControl,
+    /// Per-agent locks serializing every config-rewrite path (switch, mode
+    /// toggle, alias refresh) — see `commands::AgentSwitchLocks`.
+    pub switch_locks: commands::AgentSwitchLocks,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     logging::init();
+    // Crash reports append to <log_dir>/crash.log; the previous session's
+    // log is retained as nestra.log.1 — see both modules.
+    panic_hook::install();
 
     let data_dir = db::data_dir().expect("failed to resolve data dir");
     std::fs::create_dir_all(&data_dir).expect("failed to create data dir");
@@ -137,6 +144,7 @@ pub fn run() {
         gateway_tuning: gateway_tuning.clone(),
         reviews: review::ReviewRegistry::default(),
         gateway: gateway_control,
+        switch_locks: Default::default(),
     };
 
     tauri::Builder::default()
@@ -449,6 +457,8 @@ pub fn run() {
             commands::orchestration::orch_tasks,
             commands::orchestration::orch_detected_roles,
             commands::orchestration::orch_session_tasks,
+            // Usage dashboard (tokens + read-time cost per day/agent/model)
+            commands::orchestration::orch_usage_summary,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

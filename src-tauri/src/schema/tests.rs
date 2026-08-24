@@ -285,6 +285,7 @@ fn no_secret_columns_in_orchestration_tables() {
         "route_request",
         "route_migration",
         "model_catalog",
+        "usage_daily",
     ];
     // Parse column names out of SCHEMA_V1 for the orchestration tables.
     for table in orchestration_tables {
@@ -544,4 +545,120 @@ fn build_v1_migrates_legacy_routing_policy_to_route_targets() {
         .query_row("SELECT count(*) FROM routing_policy", [], |r| r.get(0))
         .unwrap();
     assert_eq!(n, 1);
+}
+
+// ---- v2 (usage_daily + idx_route_request_agent_started) --------------------
+
+/// Rewind a freshly-built database to a genuine v1 shape: drop the v2
+/// additions and re-stamp version 1.
+fn rewind_to_v1(conn: &Connection) {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS usage_daily;
+         DROP INDEX IF EXISTS idx_route_request_agent_started;
+         DELETE FROM schema_version WHERE version >= 2;
+         INSERT INTO schema_version (version, applied_at) VALUES (1, 0);",
+    )
+    .unwrap();
+}
+
+fn table_exists(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+        rusqlite::params![name],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap()
+        == 1
+}
+
+/// v1 → v2: the idempotent canonical rebuild upgrades in place, keeps
+/// existing data, and re-stamps.
+#[test]
+fn v1_database_upgrades_to_v2_in_place() {
+    let conn = Connection::open_in_memory().unwrap();
+    build_v1(&conn).unwrap();
+    rewind_to_v1(&conn);
+    conn.execute(
+        "INSERT INTO provider_endpoint (id, kind, display_name, has_api_key, status)
+         VALUES ('ep-x','custom','X',0,'unvalidated')",
+        [],
+    )
+    .unwrap();
+
+    migrate(&conn).unwrap();
+
+    assert!(table_exists(&conn, "usage_daily"), "v2 rollup table created");
+    let idx: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='index'
+             AND name='idx_route_request_agent_started'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(idx, 1, "v2 dashboard index created");
+    let v: i64 = conn
+        .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, 2, "stamped at v2");
+    let n: i64 = conn
+        .query_row("SELECT count(*) FROM provider_endpoint WHERE id='ep-x'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1, "pre-existing data survives the upgrade");
+}
+
+/// A crash mid-migration (DDL applied, stamp not yet) must converge on the
+/// next launch — the version row still says v1, so migrate re-runs the
+/// idempotent rebuild and completes. No third state exists.
+#[test]
+fn interrupted_v2_migration_converges_on_relaunch() {
+    let conn = Connection::open_in_memory().unwrap();
+    build_v1(&conn).unwrap();
+    rewind_to_v1(&conn);
+    // Simulate the crash window: the v2 table was created, but the version
+    // stamp never landed.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS usage_daily (
+           day TEXT NOT NULL, agent_id TEXT NOT NULL, endpoint_id TEXT NOT NULL,
+           model_id TEXT NOT NULL, requests INTEGER NOT NULL, usage_input INTEGER NOT NULL,
+           usage_output INTEGER NOT NULL, cache_creation INTEGER NOT NULL,
+           cache_read INTEGER NOT NULL,
+           PRIMARY KEY (day, agent_id, endpoint_id, model_id));",
+    )
+    .unwrap();
+
+    migrate(&conn).unwrap();
+
+    let v: i64 = conn
+        .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, 2, "relaunch completes the interrupted migration");
+    assert!(table_exists(&conn, "usage_daily"));
+}
+
+/// The per-agent live-usage aggregation (store::usage_summary_rows' live
+/// half) must range-scan `idx_route_request_agent_started`, not full-scan.
+/// SQL mirrors the query in `orchestration/store.rs`.
+#[test]
+fn usage_query_uses_agent_started_index() {
+    let conn = Connection::open_in_memory().unwrap();
+    build_v1(&conn).unwrap();
+    let plan: String = conn
+        .query_row(
+            "EXPLAIN QUERY PLAN
+             SELECT strftime('%Y-%m-%d', started_at/1000, 'unixepoch'), agent_id,
+                    COALESCE(resolved_endpoint_id, ''), COALESCE(resolved_model, ''),
+                    count(*), COALESCE(sum(usage_input), 0), COALESCE(sum(usage_output), 0),
+                    COALESCE(sum(cache_creation), 0), COALESCE(sum(cache_read), 0)
+             FROM route_request
+             WHERE agent_id = ?1 AND started_at >= ?2
+             GROUP BY 1, 2, 3, 4",
+            rusqlite::params!["pi-cli", 0i64],
+            |r| r.get::<_, String>(3),
+        )
+        .unwrap();
+    assert!(
+        plan.contains("idx_route_request_agent_started"),
+        "usage aggregation must use the v2 index, got plan: {plan}"
+    );
 }

@@ -286,3 +286,122 @@ fn count(conn: &Connection, table: &str, where_clause: &str) -> i64 {
     let sql = format!("SELECT count(*) FROM {table} WHERE {where_clause}");
     conn.query_row(&sql, [], |r| r.get(0)).unwrap()
 }
+
+// ---- pre-migration snapshot -------------------------------------------------
+
+/// A version-mismatched on-disk database gets snapshotted BEFORE the
+/// migrator refuses it — the file copy is the user's recovery path when a
+/// future v2 migration goes wrong.
+#[test]
+fn migrate_snapshots_version_mismatched_db_before_refusing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let conn = Connection::open(tmp.path().join("nestra.db")).unwrap();
+    crate::schema::build_v1(&conn).unwrap();
+    // Fake a pre-release version: build_v1 wrote version 1; bump it so the
+    // migrator sees a mismatch.
+    conn.execute_batch("UPDATE schema_version SET version = 99;")
+        .unwrap();
+
+    let res = migrate(&conn);
+    assert!(res.is_err(), "non-v1 database must still be refused");
+
+    let backups = tmp.path().join("db_backups");
+    let mut snaps: Vec<_> = std::fs::read_dir(&backups)
+        .expect("db_backups created")
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(snaps.len(), 1, "exactly one snapshot taken");
+    let snap = snaps.remove(0);
+    assert!(
+        snap.to_string_lossy().contains("v99-to-v"),
+        "snapshot name records the version transition: {}",
+        snap.display()
+    );
+    assert!(snap.join("nestra.db").exists(), "snapshot holds the db file");
+}
+
+/// Same-version and fresh databases take no snapshot — the safety net must
+/// not litter the data dir on every launch.
+#[test]
+fn migrate_takes_no_snapshot_when_version_matches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let conn = Connection::open(tmp.path().join("nestra.db")).unwrap();
+    migrate(&conn).unwrap(); // fresh → build_v1
+    migrate(&conn).unwrap(); // v1 → idempotent rebuild
+    assert!(
+        !tmp.path().join("db_backups").exists(),
+        "no snapshot without a version change"
+    );
+}
+
+#[test]
+fn backup_rotation_keeps_newest_three() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("db_backups");
+    std::fs::create_dir_all(root.join("v1-to-v2-100")).unwrap();
+    std::fs::create_dir_all(root.join("v1-to-v2-200")).unwrap();
+    std::fs::create_dir_all(root.join("v1-to-v2-300")).unwrap();
+    std::fs::create_dir_all(root.join("v1-to-v2-400")).unwrap();
+    std::fs::create_dir_all(root.join("v1-to-v2-500")).unwrap();
+
+    rotate_backup_snapshots(&root);
+
+    let mut left: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, vec!["v1-to-v2-300", "v1-to-v2-400", "v1-to-v2-500"]);
+}
+/// Prune folds departing usage into `usage_daily` exactly once: sums land,
+/// rows leave, and a re-run changes nothing.
+#[test]
+fn prune_folds_usage_exactly_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let conn = Connection::open(tmp.path().join("nestra.db")).unwrap();
+    migrate(&conn).unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let old = now - 40 * 86_400_000;
+
+    conn.execute(
+        "INSERT INTO task (id, lifecycle, started_at) VALUES ('t-old','done',?1)",
+        rusqlite::params![old],
+    )
+    .unwrap();
+    for (i, (model, inp, out)) in [("m-a", 100, 200), ("m-b", 10, 20)].iter().enumerate() {
+        conn.execute(
+            "INSERT INTO route_request
+               (request_id, task_id, agent_id, resolved_model, route_reason,
+                started_at, usage_input, usage_output)
+             VALUES (?1, 't-old', 'pi-cli', ?2, 'policy', ?3, ?4, ?5)",
+            rusqlite::params![format!("r-{i}"), model, old, inp, out],
+        )
+        .unwrap();
+    }
+
+    let pruned = prune_observability_data(&conn).unwrap();
+    assert_eq!(pruned, 1, "one old task pruned");
+
+    let (reqs, total_in): (i64, i64) = conn
+        .query_row(
+            "SELECT sum(requests), sum(usage_input) FROM usage_daily",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((reqs, total_in), (2, 110), "both requests folded with their tokens");
+
+    let left: i64 = conn
+        .query_row("SELECT count(*) FROM route_request", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0, "source rows deleted after folding");
+
+    // Re-run: nothing left to fold, sums unchanged (exactly-once).
+    prune_observability_data(&conn).unwrap();
+    let total_in2: i64 = conn
+        .query_row("SELECT sum(usage_input) FROM usage_daily", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(total_in2, 110, "no double count on re-run");
+}

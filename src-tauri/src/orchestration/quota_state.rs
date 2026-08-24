@@ -43,13 +43,24 @@ pub struct EndpointQuotaState {
     /// TTL (provider-specific reset window) to auto-clear; the store clears it
     /// on the next successful observation.
     pub exhausted_at_ms: Option<i64>,
+    /// Last known REMAINING budget, percent 0–100, fed by the proactive quota
+    /// fetch (`endpoint_fetch_quota` → `set_remaining`). `None` = no signal —
+    /// the router treats unknown as unconstrained. Quota-window-aware routing:
+    /// the policy-target walk soft-skips endpoints at or near empty when a
+    /// healthier target exists (see `router::LOW_REMAINING_PCT`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_pct: Option<f64>,
 }
 
 impl EndpointQuotaState {
     /// JSON-encode for the `last_quota_state` column. `None` when the state is
     /// the all-default (nothing worth persisting).
     pub fn to_persisted_json(&self) -> Option<String> {
-        if !self.exhausted && self.reason.is_none() && self.exhausted_at_ms.is_none() {
+        if !self.exhausted
+            && self.reason.is_none()
+            && self.exhausted_at_ms.is_none()
+            && self.remaining_pct.is_none()
+        {
             return None;
         }
         serde_json::to_string(self).ok()
@@ -96,8 +107,28 @@ impl QuotaState {
                 exhausted: true,
                 reason,
                 exhausted_at_ms: Some(now),
+                remaining_pct: Some(0.0),
             },
         );
+    }
+
+    /// Record the last known remaining budget (percent 0–100) from a
+    /// successful proactive fetch. Updates the entry in place, preserving
+    /// any fresher reactive exhaustion; inserts a clean entry when unseen.
+    /// A remaining of 0 does NOT set `exhausted` — only the gateway's own
+    /// observation may declare that.
+    pub fn set_remaining(&self, endpoint_id: &str, remaining_pct: f64) {
+        let mut map = self.inner.lock().expect("quota lock poisoned");
+        let entry = map
+            .entry(endpoint_id.to_string())
+            .or_insert_with(EndpointQuotaState::default);
+        entry.remaining_pct = Some(remaining_pct.clamp(0.0, 100.0));
+    }
+
+    /// Last known remaining budget (percent 0–100); `None` = no signal.
+    pub fn remaining(&self, endpoint_id: &str) -> Option<f64> {
+        let map = self.inner.lock().expect("quota lock poisoned");
+        map.get(endpoint_id).and_then(|s| s.remaining_pct)
     }
 
     /// Clear exhaustion for an endpoint (called when the gateway observes a
@@ -167,7 +198,7 @@ pub fn load_all_from_db(conn: &Connection) -> AppResult<QuotaState> {
             .ok()
             .flatten();
         let state = EndpointQuotaState::from_persisted_json(json.as_deref());
-        if state.exhausted {
+        if state.exhausted || state.remaining_pct.is_some() {
             // Insert the PERSISTED state directly — `mark_exhausted` would
             // stamp `exhausted_at_ms` with NOW, silently discarding the
             // persisted timestamp (breaking the TTL auto-clear and the UI's

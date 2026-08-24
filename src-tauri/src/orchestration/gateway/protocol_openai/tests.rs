@@ -63,6 +63,7 @@ fn models_payload_carries_real_abilities_when_resolved() {
         }),
         modalities: None,
         api: None,
+        cost: None,
     };
     let v = models_payload(Some(&a));
     let m = &v["data"][0];

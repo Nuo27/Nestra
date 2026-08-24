@@ -9,6 +9,7 @@ fn ab(reasoning: bool, tool_call: bool, attachment: bool) -> ModelAbilities {
         limit: Some(ModelLimit { context: 200_000, output: 8_000, input: None }),
         modalities: None,
         api: None,
+        cost: None,
     }
 }
 
@@ -186,6 +187,7 @@ fn to_model_entry_fields_emits_only_present_keys() {
         limit: None,
         modalities: None,
         api: None,
+        cost: None,
     };
     let f2 = to_model_entry_fields(&a2);
     let keys2: Vec<&str> = f2.iter().map(|(k, _)| k.as_str()).collect();
@@ -201,6 +203,7 @@ fn at(context: u64) -> ModelAbilities {
         limit: Some(ModelLimit { context, output: 8_000, input: None }),
         modalities: None,
         api: None,
+        cost: None,
     }
 }
 
@@ -219,6 +222,7 @@ fn claude_code_model_id_passes_through_when_limit_absent() {
         limit: None,
         modalities: None,
    api: None,
+   cost: None,
     };
     assert_eq!(claude_code_model_id("glm-5.2", Some(&a)), "glm-5.2");
 }
@@ -271,6 +275,7 @@ fn full(
         limit: Some(ModelLimit { context: ctx, output: out, input: None }),
         modalities: None,
         api: None,
+        cost: None,
     }
 }
 
@@ -285,6 +290,7 @@ fn merge_field_overrides_wins_only_on_set_fields() {
         limit: None,
         modalities: None,
    api: None,
+   cost: None,
     };
     let merged = merge_field_overrides(def, ov);
     assert_eq!(merged.reasoning, Some(false));
@@ -305,6 +311,7 @@ fn merge_field_overrides_fills_gaps_when_default_is_empty() {
         limit: None,
         modalities: None,
    api: None,
+   cost: None,
     };
     let ov = full(true, true, true, false, 100_000, 4_000);
     let merged = merge_field_overrides(def, ov);
@@ -331,6 +338,7 @@ fn merge_into_unions_keys_and_resolves_collisions() {
             limit: None,
             modalities: None,
        api: None,
+       cost: None,
     },
     );
     // New model id the cache doesn't know about.
@@ -414,6 +422,7 @@ fn corrections_layer_wins_over_models_dev_for_minimax_m3() {
             limit: Some(ModelLimit { context: 512_000, output: 128_000, input: None }),
             modalities: None,
             api: None,
+            cost: None,
         },
     );
     let corrections = subset_for(&load_corrections(), &["MiniMax-M3".into()]);
@@ -440,6 +449,7 @@ fn user_overrides_defeat_corrections_layer() {
             limit: Some(ModelLimit { context: 512_000, output: 128_000, input: None }),
             modalities: None,
             api: None,
+            cost: None,
         },
     );
     let corrections = subset_for(&load_corrections(), &["MiniMax-M3".into()]);
@@ -455,6 +465,7 @@ fn user_overrides_defeat_corrections_layer() {
             limit: Some(ModelLimit { context: 42, output: 13, input: None }),
             modalities: None,
             api: None,
+            cost: None,
         },
     );
     let merged = merge_into(with_corrections, user);
@@ -496,6 +507,7 @@ fn to_model_entry_fields_emits_modalities_in_schema_shape() {
             output: vec![Modality::Text],
         }),
         api: None,
+        cost: None,
     };
     let fields = to_model_entry_fields(&a);
     let modalities_field = fields
@@ -589,4 +601,38 @@ fn pi_catalog_host_matching() {
     assert_eq!(pi_catalog_for_base_url("https://api.minimaxi.com/anthropic"), Some("minimax-cn"));
     assert_eq!(pi_catalog_for_base_url("https://api.z.ai/api/paas/v4"), Some("zai"));
     assert_eq!(pi_catalog_for_base_url("https://api.openai.com/v1"), None);
+}
+
+#[test]
+fn parse_entry_reads_cost_map() {
+    let a = parse_entry(&serde_json::json!({
+        "cost": { "input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75 }
+    }))
+    .expect("cost-only entry is worth keeping");
+    let c = a.cost.expect("cost parsed");
+    assert_eq!(c.input, Some(3.0));
+    assert_eq!(c.output, Some(15.0));
+    assert_eq!(c.cache_read, Some(0.3));
+    assert_eq!(c.cache_write, Some(3.75));
+
+    // Partial map: missing components stay None, not zero.
+    let a = parse_entry(&serde_json::json!({ "cost": { "input": 1.0 } })).unwrap();
+    let c = a.cost.unwrap();
+    assert_eq!(c.input, Some(1.0));
+    assert_eq!(c.output, None);
+
+    // Empty/absent map → no cost field, and a cost-only-empty entry is None.
+    let a = parse_entry(&serde_json::json!({ "reasoning": true })).unwrap();
+    assert!(a.cost.is_none());
+    assert!(parse_entry(&serde_json::json!({ "cost": {} })).is_none());
+}
+
+#[test]
+fn merge_keeps_override_cost_over_default() {
+    let base = parse_entry(&serde_json::json!({ "cost": { "input": 1.0 } })).unwrap();
+    let over = parse_entry(&serde_json::json!({ "cost": { "input": 9.0, "output": 2.0 } })).unwrap();
+    let merged = merge_field_overrides(base, over);
+    let c = merged.cost.unwrap();
+    assert_eq!(c.input, Some(9.0), "override price wins");
+    assert_eq!(c.output, Some(2.0));
 }

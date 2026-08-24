@@ -740,6 +740,7 @@ fn parse_models_entry(m: &serde_json::Value) -> Option<crate::model_abilities::M
         limit,
         modalities: None,
         api: None,
+        cost: None,
     })
 }
 
@@ -859,6 +860,10 @@ pub async fn endpoint_fetch_quota(
     id: String,
 ) -> AppResult<crate::endpoint_quota::EndpointQuota> {
     let db = state.db.clone();
+    // Quota-window-aware routing feed: the worst (most-used) item's remaining
+    // percent lands in the router's reactive store.
+    let orch_quota = state.orch_quota.clone();
+    let feed_id = id.clone();
     run_blocking(move || {
         // Load endpoint + stored config under one lock, then release before
         // the network fetch.
@@ -911,6 +916,11 @@ pub async fn endpoint_fetch_quota(
         // worker is allowed to arm and the quota bars unlock. This is the
         // single chokepoint for "data has been correctly retrieved".
         if quota.ok && !quota.items.is_empty() {
+            // `pct` is the USED percentage (100 = exhausted): remaining is
+            // 100 minus the worst item, clamped. Feeds the router's
+            // low-remaining soft skip (pick_by_targets).
+            let worst_used = quota.items.iter().map(|i| i.pct).fold(f64::MIN, f64::max);
+            orch_quota.set_remaining(&feed_id, 100.0 - worst_used);
             let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
             if let Err(e) = crate::quota_refresh::mark_provisioned_public(&conn, &id) {
                 tracing::warn!(endpoint = %id, error = %e, "failed to stamp provisioned");

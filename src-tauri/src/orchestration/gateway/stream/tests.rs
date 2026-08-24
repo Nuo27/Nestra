@@ -127,7 +127,6 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":77,"outpu
 }
 // ---- first-event in-band error probe ----
 
-use super::*;
 use http_body_util::Full;
 
 fn probe_over(bytes: &'static [u8]) -> FirstEventProbe {

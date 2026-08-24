@@ -541,3 +541,112 @@ fn no_persisted_secret_fields() {
         }
     }
 }
+// ---- usage summary -----------------------------------------------------------
+
+fn seed_usage_task(
+    conn: &Connection,
+    task_id: &str,
+    started_at: i64,
+    agent: &str,
+    endpoint: Option<&str>,
+    model: &str,
+    inp: i64,
+    out: i64,
+) {
+    if let Some(ep) = endpoint {
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM provider_endpoint WHERE id = ?1",
+                rusqlite::params![ep],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if n == 0 {
+            conn.execute(
+                "INSERT INTO provider_endpoint (id, kind, display_name, has_api_key, status)
+                 VALUES (?1,'custom','E',0,'unvalidated')",
+                rusqlite::params![ep],
+            )
+            .unwrap();
+        }
+    }
+    conn.execute(
+        "INSERT INTO task (id, lifecycle, started_at) VALUES (?1, 'inflight', ?2)",
+        rusqlite::params![task_id, started_at],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO route_request
+           (request_id, task_id, agent_id, resolved_endpoint_id, resolved_model,
+            route_reason, started_at, usage_input, usage_output)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'policy', ?6, ?7, ?8)",
+        rusqlite::params![
+            format!("req-{task_id}-{started_at}"),
+            task_id,
+            agent,
+            endpoint,
+            model,
+            started_at,
+            inp,
+            out
+        ],
+    )
+    .unwrap();
+}
+
+fn no_prices(_: &str, _: &str) -> Option<crate::model_abilities::CostPerMtok> {
+    None
+}
+
+/// Pruned tasks land in `usage_daily`, live ones stay in `route_request`, and
+/// the summary returns BOTH halves — summing them reconstructs the true
+/// lifetime total with no double count.
+#[test]
+fn usage_summary_unions_folded_and_live_without_double_count() {
+    let conn = fresh_db();
+    let now = chrono::Utc::now().timestamp_millis();
+    let day = 86_400_000i64;
+    // Old task (past retention) — prune folds it into usage_daily.
+    seed_usage_task(&conn, "t-old", now - 40 * day, "pi-cli", Some("ep-1"), "m-a", 1000, 2000);
+    // Same calendar day as "now-ish" is impossible to guarantee; use distinct
+    // agents/models so the buckets are comparable.
+    crate::db::prune_observability_data(&conn).unwrap();
+    // Live task.
+    seed_usage_task(&conn, "t-new", now, "pi-cli", Some("ep-1"), "m-a", 3000, 4000);
+
+    let rows = usage_summary_rows(&conn, None, None, &no_prices).unwrap();
+    let total_in: i64 = rows.iter().map(|r| r.usage_input).sum();
+    let total_out: i64 = rows.iter().map(|r| r.usage_output).sum();
+    assert_eq!(total_in, 4000, "folded 1000 + live 3000");
+    assert_eq!(total_out, 6000, "folded 2000 + live 4000");
+    assert!(
+        rows.iter().any(|r| r.day.len() == 10),
+        "day strings are YYYY-MM-DD"
+    );
+}
+
+#[test]
+fn usage_summary_filters_agent_and_computes_cost_at_read_time() {
+    let conn = fresh_db();
+    let now = chrono::Utc::now().timestamp_millis();
+    seed_usage_task(&conn, "t-a", now, "pi-cli", Some("ep-1"), "m-a", 1_000_000, 1_000_000);
+    seed_usage_task(&conn, "t-b", now, "zcode-desktop", Some("ep-1"), "m-b", 500, 500);
+
+    let prices = |_ep: &str, m: &str| -> Option<crate::model_abilities::CostPerMtok> {
+        (m == "m-a").then(|| crate::model_abilities::CostPerMtok {
+            input: Some(3.0),
+            output: Some(15.0),
+            ..Default::default()
+        })
+    };
+    let rows = usage_summary_rows(&conn, Some("pi-cli"), None, &prices).unwrap();
+    assert_eq!(rows.len(), 1, "agent filter holds");
+    assert_eq!(rows[0].model_id, "m-a");
+    // 1M in @ $3 + 1M out @ $15 = $18; cache components unpriced → ignored.
+    assert!((rows[0].cost_usd.unwrap() - 18.0).abs() < 1e-9);
+
+    // Unpriced model → unknown spend, not free.
+    let rows = usage_summary_rows(&conn, Some("zcode-desktop"), None, &prices).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].cost_usd.is_none());
+}

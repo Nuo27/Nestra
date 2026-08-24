@@ -9,8 +9,11 @@ pub fn init() {
     };
     let _ = std::fs::create_dir_all(&log_dir);
 
-    // Single file, truncated on each launch. Local-only tool — no rotation.
+    // One retained generation: the previous session's log survives as
+    // `nestra.log.1` so a crash report (crash.log) ships with its session's
+    // tail. Best-effort — a failed rotate falls through to truncate.
     let log_path = log_dir.join("nestra.log");
+    rotate_previous(&log_dir);
     let file = match OpenOptions::new()
         .create(true)
         .write(true)
@@ -42,6 +45,18 @@ pub fn init() {
     let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
+/// Move the previous session's `nestra.log` to `nestra.log.1` (replacing the
+/// older `.1`). No-op when no previous log exists.
+fn rotate_previous(log_dir: &std::path::Path) {
+    let current = log_dir.join("nestra.log");
+    if !current.exists() {
+        return;
+    }
+    let rotated = log_dir.join("nestra.log.1");
+    let _ = std::fs::remove_file(&rotated);
+    let _ = std::fs::rename(&current, &rotated);
+}
+
 /// `fmt::MakeWriter` wrapper around `Arc<Mutex<File>>`: each `make_writer()`
 /// call clones the Arc and locks it, so the returned guard serializes one
 /// event's write.
@@ -62,3 +77,6 @@ impl tracing_subscriber::fmt::MakeWriter<'_> for MutexGuardWriter {
         MutexGuardWriter(self.0.clone())
     }
 }
+
+#[cfg(test)]
+mod tests;

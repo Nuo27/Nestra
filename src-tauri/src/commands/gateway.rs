@@ -63,6 +63,7 @@ pub async fn agent_set_gateway_enabled(
 
     let parts = snapshot_state(&state);
     let db = state.db.clone();
+    let _lock = state.switch_locks.lock_of(&agent_id).await;
     run_blocking(move || {
         let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
 
@@ -106,7 +107,7 @@ fn write_gateway_alias_blocking(
     let config_path = crate::db::home_dir()?.join(&spec.config.relative_path);
     let prefixed_base = format!("{base_url}/{agent_id}");
     let alias = build_gateway_alias(conn, agent_id, &prefixed_base, token);
-    adapter.apply_gateway_set(&config_path, &alias)?;
+    crate::config_writer::apply_gateway_set_atomic(adapter.as_ref(), &config_path, &alias)?;
     tracing::info!("agent '{agent_id}' now routed via gateway {base_url}");
     Ok(())
 }
@@ -219,11 +220,13 @@ pub(crate) async fn refresh_alias_if_routed(state: &State<'_, crate::AppState>, 
     let db = state.db.clone();
     let aid = agent_id.to_string();
     let base_url = snap.base_url;
+    let lock = state.switch_locks.lock_of(agent_id).await;
     let res = run_blocking(move || {
         let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
         write_gateway_alias_blocking(&conn, &aid, &base_url, &token)
     })
     .await;
+    drop(lock);
     if let Err(e) = res {
         tracing::warn!("alias refresh failed for agent '{agent_id}': {e}");
     }

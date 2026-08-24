@@ -698,7 +698,14 @@
     "noGatewayTraffic": "无网关流量",
     "noGatewayTrafficHint": "一旦此智能体被路由且请求流过，每个任务都会出现在这里，包含完整的路由谱系：请求的模型 → 解析的提供商、路由原因、提示缓存指标和代次中断标志。",
     "reviewTitle": "评审运行时",
-    "reviewHint": "在完成的工作上派生隔离评审会话"
+    "reviewHint": "在完成的工作上派生隔离评审会话",
+    "usage": "用量与花费",
+    "usageHint": "网关观测 token，近 30 天 · 花费按模型目录价实时计算",
+    "usageRequests": "请求",
+    "usageIn": "输入",
+    "usageOut": "输出",
+    "usageSpend": "花费",
+    "usageSpendUnknown": "部分模型无价格"
   },
   "routingPolicy": {
     "notSaved": "策略未保存",

@@ -10,7 +10,6 @@
 //! body shape) is behind an upstream 503 that direct requests don't hit.
 
 use super::tests_e2e::{seed_star_policy_rows, state_for};
-use super::*;
 use bytes::Bytes;
 use http::HeaderMap;
 

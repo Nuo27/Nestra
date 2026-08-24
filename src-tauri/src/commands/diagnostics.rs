@@ -87,9 +87,12 @@ pub async fn diag_export_logs(dest_path: String) -> AppResult<()> {
             return Err(AppError::NotFound("no logs yet".into()));
         }
         std::fs::create_dir_all(&dest_path)?;
+        // The log dir is entirely Nestra-owned (nestra.log, the retained
+        // nestra.log.1, crash.log), so every regular file ships — an
+        // extension filter would silently drop the rotated .1.
         for entry in std::fs::read_dir(&log_dir)?.flatten() {
             let path = entry.path();
-            if path.extension().map(|e| e == "log").unwrap_or(false) {
+            if path.is_file() {
                 let file_name = path.file_name().unwrap();
                 let target = std::path::PathBuf::from(&dest_path).join(file_name);
                 std::fs::copy(&path, &target)?;

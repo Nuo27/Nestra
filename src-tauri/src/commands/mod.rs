@@ -26,9 +26,36 @@ pub mod settings;
 pub mod skills;
 pub mod updates;
 
+#[cfg(test)]
+mod tests;
+
 use crate::error::{AppError, AppResult};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
+
+/// Per-agent async locks serializing every path that rewrites an agent's
+/// config file (provider switch, gateway mode toggle, alias refresh). Two
+/// concurrent writers for the SAME agent would tear each other's multi-file
+/// writes; different agents proceed in parallel. Entries live for the
+/// process — bounded by the closed agent registry, so no eviction needed.
+///
+/// Callers must release the guard BEFORE calling another entry point that
+/// takes the same lock (e.g. a switch followed by `refresh_alias_if_routed`)
+/// — `tokio::sync::Mutex` is not reentrant and would deadlock.
+#[derive(Default)]
+pub struct AgentSwitchLocks(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
+
+impl AgentSwitchLocks {
+    /// The shared lock for `agent_id`. Clone the `Arc` and `.lock().await` it.
+    pub async fn lock_of(&self, agent_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self
+            .0
+            .lock()
+            .expect("agent switch lock map poisoned");
+        map.entry(agent_id.to_string()).or_default().clone()
+    }
+}
 
 /// Run a blocking closure on the Tauri async runtime's thread pool so it never
 /// stalls the webview/UI thread. Sync `#[tauri::command]` fns run on the main

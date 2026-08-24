@@ -16,6 +16,7 @@ fn abilities_with(context: u64) -> ModelAbilities {
         }),
         modalities: None,
         api: None,
+        cost: None,
     }
 }
 
@@ -70,6 +71,7 @@ fn unknown_capability_does_not_filter() {
         limit: None,
         modalities: None,
         api: None,
+        cost: None,
     };
     assert!(satisfies(
         &CapabilityReq {
