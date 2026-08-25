@@ -9,14 +9,13 @@ pub mod mcp;
 pub mod sessions;
 
 use crate::agents::spec::{
-    AgentKind, AgentSpec, Capability, ConfigRef, DetectSpec, GatewayWire, SessionRef,
+    AgentSpec, Capability, ConfigRef, DetectSpec, GatewayWire, SessionRef,
 };
 
 pub static SPEC: AgentSpec = AgentSpec {
     id: "claude-code-cli",
     display_name: "Claude Code CLI",
     kind: "claude-code-cli",
-    agent_kind: AgentKind::Cli,
     detect: DetectSpec {
         binary_candidates: &["claude"],
         install_paths: &[],

@@ -28,6 +28,11 @@ use http_body_util::{BodyExt, BodyStream};
 use hyper::body::{Body, Frame};
 use serde_json::{Map, Value};
 
+use super::convert::{
+    chat_usage_from_anthropic, finish_reason_to_stop_reason, stop_reason_to_finish_reason,
+    usage_anthropic_from_chat,
+};
+
 /// One in-flight tool-call block, keyed by the OpenAI `tool_call.index`.
 struct ToolState {
     /// Assigned at `content_block_start` EMISSION time (not at first sight) —
@@ -68,51 +73,7 @@ pub struct OpenAiToAnthropicStream {
 }
 
 fn sse(event: &str, data: &Value) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(format!("event: {event}\n").as_bytes());
-    out.extend_from_slice(b"data: ");
-    out.extend_from_slice(serde_json::to_string(data).unwrap_or_else(|_| "{}".into()).as_bytes());
-    out.extend_from_slice(b"\n\n");
-    out
-}
-
-fn usage_map(usage: &Value) -> Map<String, Value> {
-    let prompt = usage.get("prompt_tokens").and_then(Value::as_u64);
-    let completion = usage.get("completion_tokens").and_then(Value::as_u64);
-    let cached = usage
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let cache_write = usage
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("cache_write_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let mut m = Map::new();
-    if let Some(p) = prompt {
-        m.insert("input_tokens".into(), Value::from(p.saturating_sub(cached + cache_write)));
-    }
-    if let Some(c) = completion {
-        m.insert("output_tokens".into(), Value::from(c));
-    }
-    if cached > 0 {
-        m.insert("cache_read_input_tokens".into(), Value::from(cached));
-    }
-    if cache_write > 0 {
-        m.insert("cache_creation_input_tokens".into(), Value::from(cache_write));
-    }
-    m
-}
-
-fn map_stop_reason(r: &str) -> &'static str {
-    match r {
-        "stop" => "end_turn",
-        "length" => "max_tokens",
-        "tool_calls" => "tool_use",
-        "content_filter" => "end_turn",
-        _ => "end_turn",
-    }
+    super::stream_responses::sse(event, data.clone()).to_vec()
 }
 
 impl OpenAiToAnthropicStream {
@@ -249,7 +210,7 @@ impl OpenAiToAnthropicStream {
         // usage (the final chunk carries it when include_usage was set).
         if let Some(usage) = chunk.get("usage") {
             if !usage.is_null() {
-                self.state.latest_usage = Some(usage_map(usage));
+                self.state.latest_usage = Some(usage_anthropic_from_chat(usage));
             }
         }
 
@@ -365,7 +326,7 @@ impl OpenAiToAnthropicStream {
 
         // finish_reason — hold it for message_delta at [DONE].
         if let Some(reason) = first.get("finish_reason").and_then(Value::as_str) {
-            self.state.stop_reason = Some(map_stop_reason(reason).to_string());
+            self.state.stop_reason = Some(finish_reason_to_stop_reason(reason).to_string());
         }
     }
 
@@ -623,14 +584,6 @@ impl AnthropicToChatStream {
         frames
     }
 
-    fn map_stop_reason(r: &str) -> &'static str {
-        match r {
-            "tool_use" => "tool_calls",
-            "max_tokens" => "length",
-            _ => "stop",
-        }
-    }
-
     fn emit_done(&mut self) {
         self.out.extend_from_slice(b"data: [DONE]\n\n");
     }
@@ -640,7 +593,7 @@ impl AnthropicToChatStream {
         let mut choice = Map::new();
         choice.insert("index".into(), Value::from(0));
         choice.insert("delta".into(), Value::Object(delta));
-        choice.insert("finish_reason".into(), Value::String(Self::map_stop_reason(stop_reason).into()));
+        choice.insert("finish_reason".into(), Value::String(stop_reason_to_finish_reason(stop_reason).into()));
         self.emit_chunk(Value::Array(vec![Value::Object(choice)]), usage);
         self.emit_done();
         self.finished = true;
@@ -856,33 +809,6 @@ impl Body for AnthropicToChatStream {
                 Poll::Pending => return Poll::Pending,
             }
         }
-    }
-}
-
-/// Anthropic usage map → OpenAI chat usage (`prompt_tokens` /
-/// `completion_tokens` / `prompt_tokens_details.cached_tokens`), mirroring
-/// `convert::anthropic_to_chat`'s buffered mapping for the stream path.
-fn chat_usage_from_anthropic(u: &Value) -> Option<Value> {
-    let mut usage = Map::new();
-    if let Some(i) = u.get("input_tokens").and_then(Value::as_u64) {
-        usage.insert("prompt_tokens".into(), Value::from(i));
-    }
-    if let Some(o) = u.get("output_tokens").and_then(Value::as_u64) {
-        usage.insert("completion_tokens".into(), Value::from(o));
-    }
-    let cached = u.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let cache_write = u.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
-    if cached > 0 || cache_write > 0 {
-        let mut details = Map::new();
-        if cached > 0 {
-            details.insert("cached_tokens".into(), Value::from(cached));
-        }
-        usage.insert("prompt_tokens_details".into(), Value::Object(details));
-    }
-    if usage.is_empty() {
-        None
-    } else {
-        Some(Value::Object(usage))
     }
 }
 

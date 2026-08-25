@@ -9,14 +9,13 @@ pub mod mcp;
 pub mod sessions;
 
 use crate::agents::spec::{
-    AgentKind, AgentSpec, Capability, ConfigRef, DetectSpec, DetectorPath, GatewayWire, SessionRef,
+    AgentSpec, Capability, ConfigRef, DetectSpec, DetectorPath, GatewayWire, SessionRef,
 };
 
 pub static SPEC: AgentSpec = AgentSpec {
     id: "zcode-desktop",
     display_name: "ZCode Desktop",
     kind: "zcode-desktop",
-    agent_kind: AgentKind::Desktop,
     detect: DetectSpec {
         // The agent CLI ships bundled inside the Electron app
         // (`resources/glm/zcode.cjs`) and is not on PATH — detection is by

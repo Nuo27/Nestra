@@ -3,7 +3,7 @@ import type { Session } from "../ipc";
 // ---- date bucketing for the list ----
 // Bucket labels are translation KEYS — the list renders `t(b.labelKey)` so
 // the date groups localize with the rest of the page.
-export type Bucket = { key: string; labelKey: string; sessions: Session[] };
+type Bucket = { key: string; labelKey: string; sessions: Session[] };
 export function bucketByDate(sessions: Session[]): Bucket[] {
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 
-use super::identity::{RouteReason, TaskLifecycle};
+use super::identity::TaskLifecycle;
 
 // ===========================================================================
 // routing_policy
@@ -752,20 +752,6 @@ pub fn list_model_catalog(conn: &Connection, endpoint_id: &str) -> AppResult<Vec
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
-}
-
-/// `true` when a stored `route_reason` value is one the code emits. Used by
-/// callers (and tests) to validate before persisting — keeps the reason
-/// vocabulary honest even though the column itself is free-text.
-pub fn is_known_route_reason(s: &str) -> bool {
-    [
-        RouteReason::Explicit.as_str(),
-        RouteReason::Affinity.as_str(),
-        RouteReason::Capability.as_str(),
-        RouteReason::Fallback.as_str(),
-        RouteReason::NoEligible.as_str(),
-    ]
-    .contains(&s)
 }
 
 // ===========================================================================

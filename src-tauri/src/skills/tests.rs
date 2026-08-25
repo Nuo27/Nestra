@@ -199,10 +199,4 @@ fn rewrite_frontmatter_name_preserves_rest() {
     assert_eq!(rewrite_frontmatter_name("no frontmatter", "x"), None);
 }
 
-fn temp_home() -> (PathBuf, tempfile::TempDir) {
-    let dir = tempfile::Builder::new()
-        .prefix("")
-        .tempdir()
-        .expect("tempdir");
-    (dir.path().to_path_buf(), dir)
-}
+use crate::testutil::temp_home;

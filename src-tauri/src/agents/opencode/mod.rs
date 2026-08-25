@@ -10,14 +10,13 @@ pub mod mcp;
 pub mod sessions;
 
 use crate::agents::spec::{
-    AgentKind, AgentSpec, Capability, ConfigRef, DetectSpec, DetectorPath, GatewayWire, SessionRef,
+    AgentSpec, Capability, ConfigRef, DetectSpec, DetectorPath, GatewayWire, SessionRef,
 };
 
 pub static SPEC: AgentSpec = AgentSpec {
     id: "opencode-desktop",
     display_name: "OpenCode Desktop",
     kind: "opencode-desktop",
-    agent_kind: AgentKind::Desktop,
     detect: DetectSpec {
         binary_candidates: &[],
         install_paths: &[

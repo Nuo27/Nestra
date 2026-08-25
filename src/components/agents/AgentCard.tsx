@@ -339,7 +339,7 @@ function AgentStatusBanner({
 /// toggle: enabling captures it, disabling wipes the binding set + restores
 /// it. No standalone restore UI.
 
-export function CapabilityBadge({ agent }: { agent: AgentInfo }) {
+function CapabilityBadge({ agent }: { agent: AgentInfo }) {
   const { t } = useTranslation();
   if (agent.supported_protocols.length === 0) return null;
   const protocols = agent.supported_protocols.join(", ");

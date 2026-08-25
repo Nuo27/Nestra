@@ -321,26 +321,5 @@ pub fn satisfies(req: &CapabilityReq, abilities: &ModelAbilities) -> bool {
     true
 }
 
-/// All `(endpoint_id, model_id)` pairs whose merged abilities satisfy `req`.
-/// Built from the `model_catalog` table (so call [`rebuild`] first if
-/// endpoints changed). Returns endpoint-then-model id pairs the router ranks.
-pub fn eligible_models(
-    conn: &Connection,
-    req: &CapabilityReq,
-) -> AppResult<Vec<(String, String, ModelAbilities)>> {
-    let endpoints = db::list_endpoints(conn)?;
-    let mut out = Vec::new();
-    for ep in &endpoints {
-        for row in store::list_model_catalog(conn, &ep.id)? {
-            let abilities: ModelAbilities =
-                serde_json::from_str(&row.abilities_json).unwrap_or_default();
-            if satisfies(req, &abilities) {
-                out.push((ep.id.clone(), row.model_id, abilities));
-            }
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests;

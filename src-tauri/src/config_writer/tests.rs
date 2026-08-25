@@ -111,43 +111,6 @@ fn factory_force_overwrites() {
 }
 
 #[test]
-fn factory_restore_is_repeatable_and_preserves_snapshot() {
-    let (tmp, _tmp_g) = tempfile_dir();
-    let cfg = tmp.join("cfg.json");
-    fs::write(&cfg, "ORIG").unwrap();
-    capture_factory(&cfg, false).unwrap();
-    fs::write(&cfg, "NESTRA-OWNED").unwrap();
-
-    restore_factory(&cfg).unwrap();
-    assert_eq!(fs::read_to_string(&cfg).unwrap(), "ORIG");
-    assert!(factory_path_for(&cfg).exists(), "factory preserved");
-
-    // mutate + restore again —still works, snapshot untouched
-    fs::write(&cfg, "NESTRA-AGAIN").unwrap();
-    restore_factory(&cfg).unwrap();
-    assert_eq!(fs::read_to_string(&cfg).unwrap(), "ORIG");
-}
-
-#[test]
-fn factory_restore_deletes_file_when_no_original_existed() {
-    let (tmp, _tmp_g) = tempfile_dir();
-    let cfg = tmp.join("cfg.json");
-    capture_factory(&cfg, false).unwrap(); // sentinel
-    fs::write(&cfg, "{}").unwrap();
-    restore_factory(&cfg).unwrap();
-    assert!(!cfg.exists());
-    // factory file (sentinel) still around for a repeat restore
-    assert!(factory_path_for(&cfg).exists());
-}
-
-#[test]
-fn factory_restore_without_snapshot_errors() {
-    let (tmp, _tmp_g) = tempfile_dir();
-    let cfg = tmp.join("cfg.json");
-    assert!(restore_factory(&cfg).is_err());
-}
-
-#[test]
 fn atomic_write_replaces_existing_and_leaves_no_temp() {
     let (tmp, _tmp_g) = tempfile_dir();
     let cfg = tmp.join("cfg.json");

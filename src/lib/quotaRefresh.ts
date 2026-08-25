@@ -23,7 +23,7 @@ import {
 const DEFAULT_REFRESH: RefreshSettings = { endpoints: {} };
 
 /// Per-endpoint fallback when the settings blob has no entry yet.
-const DEFAULT_CFG: RefreshEndpointConfig = {
+export const DEFAULT_CFG: RefreshEndpointConfig = {
   enabled: false,
   protocol: null,
   model: null,

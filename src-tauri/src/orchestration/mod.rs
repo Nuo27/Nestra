@@ -35,6 +35,6 @@ pub mod router;
 pub mod store;
 
 pub use identity::{
-    BudgetTier, CapabilityReq, CacheStrategy, CredentialHandle, NativeTaskRef, ResolvedRoute,
+    BudgetTier, CapabilityReq, CacheStrategy, CredentialHandle, ResolvedRoute,
     RoleSource, RouteReason, RouteRecord, SubagentRole, TaskContext, TaskLifecycle,
 };

@@ -13,6 +13,19 @@ export function statusToneClass(status: number | null): string {
 type CapabilityKey = keyof AgentCapability;
 
 /**
+ * Lookup of display name by agent id, built from the agent list the backend
+ * already returns. Replaces the old per-page hardcoded label maps that had to
+ * be kept in sync with the backend by hand. Unknown ids fall back to the id
+ * itself so a stale reference never renders blank.
+ */
+export function useAgentLabels() {
+  const agentQ = useQuery({ queryKey: qk.agents(), queryFn: agentList });
+  const labels = new Map<string, string>();
+  for (const c of agentQ.data ?? []) labels.set(c.id, c.display_name);
+  return (id: string) => labels.get(id) ?? id;
+}
+
+/**
  * Unified "active agents" selector for every feature that needs to list agents
  * (Skills, MCP, anything future). Returns only agents that are:
  *   - detected + connected (status ok), AND

@@ -1,9 +1,5 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Tauri expects a fixed port and no obfuscation
 export default defineConfig({
@@ -15,11 +11,6 @@ export default defineConfig({
     host: "127.0.0.1",
   },
   envPrefix: ["VITE_", "TAURI_"],
-  resolve: {
-    alias: {
-      "@": resolve(__dirname, "src"),
-    },
-  },
   build: {
     target: "es2022",
     rollupOptions: {

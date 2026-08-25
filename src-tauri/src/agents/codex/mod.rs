@@ -13,14 +13,13 @@ pub mod sessions;
 pub mod sync;
 
 use crate::agents::spec::{
-    AgentKind, AgentSpec, Capability, ConfigRef, DetectSpec, DetectorPath, GatewayWire, SessionRef,
+    AgentSpec, Capability, ConfigRef, DetectSpec, DetectorPath, GatewayWire, SessionRef,
 };
 
 pub static SPEC: AgentSpec = AgentSpec {
     id: "codex-desktop",
     display_name: "Codex Desktop",
     kind: "codex-desktop",
-    agent_kind: AgentKind::Desktop,
     detect: DetectSpec {
         // The CLI ships bundled inside the Desktop app under a hash-named
         // `bin\<hash>\codex.exe` — unstable, not on PATH; detection is by

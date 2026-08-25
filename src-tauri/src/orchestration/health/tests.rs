@@ -154,18 +154,6 @@ fn model_isolation_keeps_healthy_models_routable() {
     assert!(!h.is_degraded("ep-unseen", "m-any"), "unseen targets are eligible");
 }
 
-#[test]
-fn outcome_from_response_classifies() {
-    assert!(matches!(
-        HealthOutcome::from_response(200, "", false),
-        HealthOutcome::Ok
-    ));
-    assert!(matches!(
-        HealthOutcome::from_response(429, "too many requests", false),
-        HealthOutcome::Fail(FailureClass::RateLimit)
-    ));
-}
-
 /// Seed a `ProviderHealth` with one endpoint in an explicit breaker state
 /// (the map is private, but this child module may touch it — avoids sleeping
 /// on real recovery waits).

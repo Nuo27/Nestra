@@ -1,14 +1,7 @@
 use super::*;
+use crate::testutil::temp_home;
 use std::io::Write;
 use std::path::PathBuf;
-
-fn temp_home() -> (PathBuf, tempfile::TempDir) {
-    let dir = tempfile::Builder::new()
-        .prefix("nestra-store-test-")
-        .tempdir()
-        .expect("tempdir");
-    (dir.path().to_path_buf(), dir)
-}
 
 fn with_home<R>(home: &std::path::Path, f: impl FnOnce() -> R) -> R {
     let _guard = crate::HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());

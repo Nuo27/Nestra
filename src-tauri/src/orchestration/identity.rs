@@ -13,7 +13,6 @@
 //!   (clarification #2). `task_id` is Nestra's own routing/work identity; it is
 //!   NOT required to be 1:1 with any agent's notion of "task". An agent-native
 //!   task handle, when the agent exposes one, is carried optionally in
-//!   [`NativeTaskRef`] and is never load-bearing for routing.
 //! - A `Request` is one HTTP call. Retries and migrations within a single Task
 //!   issue new `request_id`s without changing `task_id` — that is how logical
 //!   continuity is preserved across provider migration (correction #2).
@@ -228,24 +227,6 @@ impl Default for RoleSource {
     }
 }
 
-/// Optional agent-native task handle (clarification #2). Carried verbatim for
-/// UI/observability correlation; **never** load-bearing for routing. The
-/// router keys off `task_id` (Nestra-owned); this ref is opaque to it.
-///
-/// Populated by an inbound adapter when the agent exposes structured task
-/// metadata (Claude `Task` tool call, OpenCode task tool, Pi task). Left
-/// `None` otherwise — no adapter is rejected for not supplying it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NativeTaskRef {
-    /// Agent id this ref belongs to (`claude-code-cli` | `opencode-desktop` | `pi-cli`).
-    pub agent: String,
-    /// Coarse kind, e.g. `"task_tool_call"`, `"user_turn"`, `"pi_task"`.
-    /// Free-form; the router does not interpret it.
-    pub kind: String,
-    /// Agent-native id, preserved verbatim. Never reinterpreted by Nestra.
-    pub ref_id: String,
-}
-
 /// Capabilities a Task requires of its resolved model. Derived by the inbound
 /// adapter from the request (e.g. an image attachment ⇒ `vision = true`; a
 /// tool-using turn ⇒ `tool_call = true`) and consumed by the router's
@@ -383,9 +364,6 @@ impl TaskLifecycle {
 /// Every id except `agent_id` is Nestra-assigned at parse time:
 /// - `task_id` / `parent_task_id` / `request_id` are Nestra UUIDs.
 /// - `logical_session_id` is the agent-native session id, carried verbatim.
-///
-/// `native_task_ref` is the ONLY agent-native identity here, and it is
-/// optional + non-load-bearing (clarification #2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskContext {
     /// Stable agent registry id (`claude-code-cli` | `opencode-desktop` | `pi-cli`).
@@ -409,7 +387,6 @@ pub struct TaskContext {
     pub role_source: RoleSource,
     /// Optional agent-native task handle (clarification #2). Never
     /// load-bearing for routing.
-    pub native_task_ref: Option<NativeTaskRef>,
     /// Model the agent asked for (from the request body), if any. Advisory —
     /// the router may resolve a different model.
     pub requested_model: Option<String>,
@@ -450,7 +427,6 @@ impl TaskContext {
             request_id: Uuid::new_v4(),
             subagent_role: SubagentRole::Main,
             role_source: RoleSource::Heuristic,
-            native_task_ref: None,
             requested_model: None,
             requested_provider: None,
             budget_tier: None,
@@ -525,10 +501,6 @@ pub enum CacheStrategy {
     /// `routing_policy.inject_cache_control` (default off). Breakpoint choice
     /// is decided from official semantics, not in this enum.
     AnthropicExplicit,
-    /// DeepSeek automatic caching (URL-detected; no body mutation).
-    DeepSeekAuto,
-    /// OpenRouter provider-specific caching (URL-detected; no body mutation).
-    OpenRouterPassthrough,
 }
 
 impl Default for CacheStrategy {

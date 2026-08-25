@@ -292,7 +292,6 @@ a:focus-visible,
  *
  *   .surface-field   → inputs, selects, switches: "fill me in"  (recessed)
  *   .surface-panel   → cards / panels                              (flat)
- *   .surface-raised  → popovers / dialogs                          (raised)
  *   .surface-action  → primary CTA — filled accent                 (solid)
  *   .surface-outline → secondary button — outline box              (outline)
  * ──────────────────────────────────────────────────────────────────────── */
@@ -304,11 +303,6 @@ a:focus-visible,
 .surface-panel {
   background: var(--bg-surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-}
-.surface-raised {
-  background: var(--bg-overlay);
-  border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
 }
 .surface-action {

@@ -8,19 +8,17 @@ import { useEffect, useRef, useState } from "react";
 /// `value` is clamped to 0–100, shown as a whole percent. Visual treatment
 /// is terminal-flavoured: a thin gap between every cell gives a "lossy"
 /// segmented look, the filled body carries a soft colour glow, and the
-/// leading-edge cell pulses like a cursor. `tone` auto-colours by depletion
-/// severity so a near-full quota reads red without the caller picking colour.
-type GlyphSet = "block" | "shade" | "fine";
-type Tone = "auto" | "accent" | "success" | "warning" | "danger";
+/// leading-edge cell pulses like a cursor. Colour is auto-assigned by
+/// depletion severity so a near-full quota reads red without the caller
+/// picking colour.
+type GlyphSet = "block" | "fine";
 
 const FILLED: Record<GlyphSet, string> = {
   block: "█",
-  shade: "▓",
   fine: "■",
 };
 const TRACK: Record<GlyphSet, string> = {
   block: "░",
-  shade: "▒",
   fine: "·",
 };
 
@@ -29,49 +27,30 @@ const TRACK: Record<GlyphSet, string> = {
 /// still fits the container.
 const GAP = "\u2009";
 
-/// Depletion thresholds for `tone="auto"`. ≥80% used = danger (near reset),
+/// Depletion thresholds for the auto tone. ≥80% used = danger (near reset),
 /// ≥50% = warning, else success.
-function autoTone(pct: number): Exclude<Tone, "auto"> {
+function autoTone(pct: number): "success" | "warning" | "danger" {
   if (pct >= 80) return "danger";
   if (pct >= 50) return "warning";
   return "success";
 }
 
-const TONE_CLASS: Record<Exclude<Tone, "auto">, string> = {
-  accent: "text-accent",
+const TONE_CLASS: Record<"success" | "warning" | "danger", string> = {
   success: "text-success",
   warning: "text-warning",
   danger: "text-danger",
 };
 
+/// Floor on the computed cell count so tiny containers stay legible.
+const MIN_CELLS = 8;
+
 export function AsciiBar({
   value,
   size = "block",
-  tone = "auto",
-  fillClass,
-  trackClass = "text-subtle",
-  className,
-  minCells = 8,
-  fixedCells,
-  title,
   pulse = true,
 }: {
   value: number;
   size?: GlyphSet;
-  /** Colour by depletion: auto picks success/warning/danger from value. */
-  tone?: Tone;
-  /** Overrides tone. When omitted, the tone's class is used. */
-  fillClass?: string;
-  /** Tailwind class for the empty track portion. */
-  trackClass?: string;
-  className?: string;
-  /** Floor on the computed cell count so tiny containers stay legible. */
-  minCells?: number;
-  /** When set, render exactly this many cells with no ResizeObserver
-   *  measuring — a fixed-width bar for inline use (compact badges, rows).
-   *  Overrides `minCells` and the adaptive container-width sizing. */
-  fixedCells?: number;
-  title?: string;
   /** Pulse the leading-edge cursor cell (disable for static contexts). */
   pulse?: boolean;
 }) {
@@ -81,23 +60,20 @@ export function AsciiBar({
   // Measure the rendered width of one *unit* (glyph + gap) so the cell count
   // fits the container exactly even with the inter-cell spacing. `clientWidth`
   // is the inner content box, so the bar already respects the parent's
-  // left/right padding. Skipped entirely when `fixedCells` is set — that path
-  // renders a deterministic cell count for inline/badge contexts where
-  // container-width sizing would be noisy.
+  // left/right padding.
   const unit = fillGlyph + GAP;
   const measureRef = useRef<HTMLSpanElement | null>(null);
   const sizerRef = useRef<HTMLSpanElement | null>(null);
-  const [measuredCells, setMeasuredCells] = useState(minCells);
+  const [measuredCells, setMeasuredCells] = useState(MIN_CELLS);
 
   useEffect(() => {
-    if (fixedCells !== undefined) return;
     const el = measureRef.current;
     const sizer = sizerRef.current;
     if (!el || !sizer) return;
     const recompute = () => {
       const unitW = sizer.getBoundingClientRect().width;
       if (unitW > 0) {
-        const n = Math.max(minCells, Math.floor(el.clientWidth / unitW));
+        const n = Math.max(MIN_CELLS, Math.floor(el.clientWidth / unitW));
         setMeasuredCells((cur) => (cur === n ? cur : n));
       }
     };
@@ -105,19 +81,18 @@ export function AsciiBar({
     const ro = new ResizeObserver(recompute);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [minCells, unit, fixedCells]);
-
-  const cells = fixedCells !== undefined ? fixedCells : measuredCells;
+  }, [unit]);
 
   // NaN/Infinity must not render "NaN%" or make `String.repeat` throw on
   // negative/Infinity cell counts — clamp to finite, non-negative values.
   const safeValue = Number.isFinite(value) ? value : 0;
   const pct = Math.max(0, Math.min(100, safeValue));
   const pctInt = Math.round(pct);
-  const safeCells = Number.isFinite(cells) ? Math.max(0, Math.floor(cells)) : 0;
+  const safeCells = Number.isFinite(measuredCells)
+    ? Math.max(0, Math.floor(measuredCells))
+    : 0;
   const filled = Math.round((pct / 100) * safeCells);
-  const resolvedTone = tone === "auto" ? autoTone(pct) : tone;
-  const fillClassFinal = fillClass ?? TONE_CLASS[resolvedTone];
+  const fillClassFinal = TONE_CLASS[autoTone(pct)];
 
   // Body = all filled cells except the bright pulsing leading-edge cursor.
   const bodyLen = Math.max(0, filled - 1);
@@ -129,8 +104,8 @@ export function AsciiBar({
   return (
     <span
       ref={measureRef}
-      className={`relative block whitespace-pre tabular leading-none ${className ?? ""}`}
-      title={title ?? `${pctInt}%`}
+      className="relative block whitespace-pre tabular leading-none"
+      title={`${pctInt}%`}
     >
       {/* hidden unit (glyph + gap) used to sample the rendered cell width */}
       <span ref={sizerRef} className="pointer-events-none absolute opacity-0">
@@ -146,7 +121,7 @@ export function AsciiBar({
           {cursorStr}
         </span>
       )}
-      <span className={trackClass}>{trackStr}</span>
+      <span className="text-subtle">{trackStr}</span>
     </span>
   );
 }

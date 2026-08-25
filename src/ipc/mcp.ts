@@ -43,7 +43,6 @@ export const mcpImportScan = () => invoke<ImportCandidate[]>("mcp_import_scan");
 export const mcpImportAll = () => invoke<McpServer[]>("mcp_import_all");
 export const mcpImportOne = (agentId: string, name: string) =>
   invoke<McpServer>("mcp_import_one", { agentId, name });
-export const mcpSyncAgent = (agentId: string) => invoke<void>("mcp_sync_agent", { agentId });
 export const mcpSyncAll = () => invoke<void>("mcp_sync_all");
 /// Click-to-test a server. `latency_ms` is `null` on a hard failure
 /// (spawn error, no command, …); `reason` carries the human-readable cause.

@@ -12,14 +12,13 @@ pub mod mcp;
 pub mod sessions;
 
 use crate::agents::spec::{
-    AgentKind, AgentSpec, Capability, ConfigRef, DetectSpec, GatewayWire, SessionRef,
+    AgentSpec, Capability, ConfigRef, DetectSpec, GatewayWire, SessionRef,
 };
 
 pub static SPEC: AgentSpec = AgentSpec {
     id: "pi-cli",
     display_name: "Pi CLI",
     kind: "pi-cli",
-    agent_kind: AgentKind::Cli,
     detect: DetectSpec {
         binary_candidates: &["pi"],
         install_paths: &[],

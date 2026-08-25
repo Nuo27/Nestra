@@ -5,7 +5,7 @@ import { AgentKindBadge } from "../agents/AgentKindBadge"
 /// single-select), each segment here is an independent on/off — the bordered
 /// row gives the radio-group *look*, but the semantics are multi-select
 /// (a skill/MCP can be enabled for several agents at once).
-export interface AgentToggleItem {
+interface AgentToggleItem {
   id: string
   label: string
   checked: boolean
@@ -95,7 +95,7 @@ export function AgentToggleGroup({
 
 export type AgentState = "absent" | "disabled" | "enabled"
 
-export interface AgentStateItem {
+interface AgentStateItem {
   id: string
   label: string
   state: AgentState

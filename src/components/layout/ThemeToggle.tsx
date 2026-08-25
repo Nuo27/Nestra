@@ -6,7 +6,7 @@ import { Tip } from "../ui/tooltip";
 
 /// Resolve a ThemePref to the concrete theme that should render now.
 /// `system` reads matchMedia; dark/light are literal.
-export function resolvePreferred(pref: ThemePref): "dark" | "light" {
+function resolvePreferred(pref: ThemePref): "dark" | "light" {
   if (pref !== "system") return pref;
   return window.matchMedia("(prefers-color-scheme: light)").matches
     ? "light"
@@ -14,7 +14,7 @@ export function resolvePreferred(pref: ThemePref): "dark" | "light" {
 }
 
 /// Push the effective theme onto <html data-theme=…>, which the CSS keys off.
-export function applyTheme(pref: ThemePref) {
+function applyTheme(pref: ThemePref) {
   document.documentElement.dataset.theme = resolvePreferred(pref);
 }
 

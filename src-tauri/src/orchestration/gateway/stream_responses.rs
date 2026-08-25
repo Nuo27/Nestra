@@ -28,6 +28,8 @@ use http_body_util::BodyExt as _;
 use hyper::body::{Body, Frame};
 use serde_json::{Map, Value};
 
+use super::convert::{stop_reason_to_finish_reason, usage_anthropic_from_responses};
+
 type InnerStream = BoxBody<Bytes, std::io::Error>;
 
 /// Flat Responses-wire event (output_item.added / deltas / dones): the data
@@ -53,8 +55,9 @@ fn sse_response(event: &str, resp: Map<String, Value>) -> Bytes {
 }
 
 /// SSE framing helper: `event: <name>\ndata: <json>\n\n`. An empty event
-/// name emits a bare `data:` frame (chat chunks convention).
-fn sse(event: &str, data: Value) -> Bytes {
+/// name emits a bare `data:` frame (chat chunks convention). Shared with
+/// `stream_convert` (Vec form) via its thin adapter.
+pub(super) fn sse(event: &str, data: Value) -> Bytes {
     let head = if event.is_empty() {
         String::new()
     } else {
@@ -205,24 +208,6 @@ impl Utf8Accum {
             }
         }
     }
-}
-
-/// Responses usage object → Anthropic usage (input excludes cached tokens).
-fn anthropic_usage_from_responses(usage: &Value) -> Option<Value> {
-    let input = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let output = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let cached = usage
-        .get("input_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let mut u = Map::new();
-    u.insert("input_tokens".into(), Value::from(input.saturating_sub(cached)));
-    u.insert("output_tokens".into(), Value::from(output));
-    if cached > 0 {
-        u.insert("cache_read_input_tokens".into(), Value::from(cached));
-    }
-    Some(Value::Object(u))
 }
 
 /// Responses usage object → chat usage (prompt/completion tokens).
@@ -785,17 +770,16 @@ impl ResponsesToAnthropicStream {
         ev.insert("type".into(), Value::String("message_delta".into()));
         ev.insert("delta".into(), Value::Object(delta));
         if let Some(usage) = self.latest_usage.clone() {
-            if let Some(u) = anthropic_usage_from_responses(&usage) {
-                // Anthropic's message_delta.usage accepts ONLY output_tokens
-                // — input/cache fields belong in message_start (and the
-                // message_start above carries zeros; full usage lands in the
-                // delta we're allowed to send).
-                let mut delta_usage = Map::new();
-                if let Some(ot) = u.get("output_tokens").cloned() {
-                    delta_usage.insert("output_tokens".into(), ot);
-                }
-                ev.insert("usage".into(), Value::Object(delta_usage));
+            // Anthropic's message_delta.usage accepts ONLY output_tokens
+            // — input/cache fields belong in message_start (and the
+            // message_start above carries zeros; full usage lands in the
+            // delta we're allowed to send).
+            let u = usage_anthropic_from_responses(&usage);
+            let mut delta_usage = Map::new();
+            if let Some(ot) = u.get("output_tokens").cloned() {
+                delta_usage.insert("output_tokens".into(), ot);
             }
+            ev.insert("usage".into(), Value::Object(delta_usage));
         }
         self.out.extend_from_slice(&sse("message_delta", Value::Object(ev)));
         self.out.extend_from_slice(&sse("message_stop", serde_json::json!({ "type": "message_stop" })));
@@ -963,11 +947,12 @@ impl ResponsesToChatStream {
     }
 
     fn chat_finish_reason(&self) -> Value {
-        match self.stop_reason.as_deref() {
-            Some("tool_use") => Value::String("tool_calls".into()),
-            Some("max_tokens") => Value::String("length".into()),
-            _ => Value::String("stop".into()),
-        }
+        let reason = self
+            .stop_reason
+            .as_deref()
+            .map(stop_reason_to_finish_reason)
+            .unwrap_or("stop");
+        Value::String(reason.into())
     }
 
     fn chunk(&mut self, delta: Value, finish: Option<Value>) {

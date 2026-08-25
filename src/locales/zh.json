@@ -17,9 +17,6 @@
     "confirm": "确认",
     "reset": "重置",
     "delete": "删除",
-    "reveal": "显示",
-    "open": "打开",
-    "back": "返回",
     "exportLogs": "导出日志",
     "error": "错误",
     "moveUp": "上移 {{name}}",
@@ -93,16 +90,6 @@
     "http": "http",
     "tok": "tok",
     "policy": "策略目标"
-  },
-  "lifecycle": {
-    "title": "任务生命周期",
-    "born": "已创建",
-    "routed": "已路由",
-    "inflight": "进行中",
-    "migrating": "迁移中",
-    "generationBroken": "代次已中断",
-    "done": "已完成",
-    "failed": "失败"
   },
   "sync": {
     "syncError": "同步错误",
@@ -678,7 +665,6 @@
   },
   "agentRouting": {
     "titleSuffix": "路由",
-    "help": "策略将 (智能体, 角色) 映射到 首选 / 回退 / 允许模型。网关解析每个请求：显式 → 亲和 → 能力 → 失败关闭。",
     "steadyTitle": "当前生效路由",
     "steadyHint": "在当前策略下，新请求会解析到哪——试运行，不发送请求。保存策略后自动更新。",
     "steadyContext": "{{n}} 上下文",
@@ -693,17 +679,12 @@
   "agentDetail": {
     "helpGateway": "Direct 模式将真实提供商写入此智能体的配置。Routed 模式通过 Nestra 网关发送流量 — 按任务解析提供商/模型，支持配额感知回退和迁移。",
     "helpPlain": "已安装的编码智能体。",
-    "policyTitle": "路由策略",
-    "policyHint": "(智能体, 角色) → 首选 / 回退 / 允许模型 · 匹配顺序：精确角色 → 档位 tier:* → 通配 *",
     "tasks": "任务",
     "tasksHint": "运行 → 任务 → 请求",
     "detectedRoles": "检测到的角色",
-    "detectedRolesHint": "路由请求中出现的子代理角色 · 在路由页面编辑策略",
     "roleChipTip": "{{count}} 次请求 · 编辑 {{role}} 的策略",
     "noGatewayTraffic": "无网关流量",
     "noGatewayTrafficHint": "一旦此智能体被路由且请求流过，每个任务都会出现在这里，包含完整的路由谱系：请求的模型 → 解析的提供商、路由原因、提示缓存指标和代次中断标志。",
-    "reviewTitle": "评审运行时",
-    "reviewHint": "在完成的工作上派生隔离评审会话",
     "usage": "用量与花费",
     "usageHint": "网关观测 token，近 30 天 · 花费按模型目录价实时计算",
     "usageRequests": "请求",
@@ -960,7 +941,6 @@
   },
   "agentReview": {
     "titleSuffix": "评审",
-    "help": "在已完成的工作上派生一个隔离的 Pi 评审会话。它以 pi:reviewer 角色经网关路由,实时展示评审过程并返回裁决——不触碰主上下文。",
     "newTitle": "新建评审",
     "newHint": "评审是一个独立的 Pi 会话,按 pi:reviewer 策略路由到对应提供商。",
     "pickSession": "选择一个 Pi 会话…",

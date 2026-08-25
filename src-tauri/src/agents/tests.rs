@@ -56,23 +56,6 @@ fn known_agents_present() {
     }
 }
 
-/// Agent ids follow the naming convention: CLI agents end in `-cli`,
-/// desktop agents in `-desktop`.
-#[test]
-fn agent_ids_follow_kind_suffix_convention() {
-    for a in agents() {
-        let expected_suffix = match a.agent_kind {
-            AgentKind::Cli => "-cli",
-            AgentKind::Desktop => "-desktop",
-        };
-        assert!(
-            a.id.ends_with(expected_suffix),
-            "{} violates the agent-id naming convention (expected {expected_suffix} suffix)",
-            a.id
-        );
-    }
-}
-
 /// Every manageable agent's `config.writer` must resolve to an adapter —
 /// a typo or a new writer key silently disables config writing for that
 /// agent otherwise.

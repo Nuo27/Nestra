@@ -2,7 +2,7 @@ import type { ModelAbilities, Modalities } from "../ipc";
 
 /** Resolved value + provenance for one capability field on one model row.
  *  Used by the disclosure to label each toggle with its source. */
-export type AbilityRow = {
+type AbilityRow = {
   /** What the writer will actually emit (override if set, else default). */
   effective?: boolean | undefined;
   /** Whether the value is from the user's override map. */

@@ -3,7 +3,6 @@ import { useTranslation } from "react-i18next";
 import {
   agentReadConfig,
   agentRemoveDetected,
-  type AgentConfigContent,
   type AgentInfo,
   type DetectedProvider,
 } from "../../ipc";
@@ -54,7 +53,10 @@ export function AgentConfigDialog({ agent, onClose }: { agent: AgentInfo; onClos
           <DialogDescription>{t("agents.previewDialogDesc")}</DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-2">
-          <ConfigPreviewSection agent={agent} readConfig={readConfig} />
+          <div className="pt-2">
+            <Note>{t("agents.configPreviewTitle", { name: agent.display_name })}</Note>
+            <ConfigFilePreview path={readConfig?.path ?? null} content={readConfig?.content ?? null} />
+          </div>
           <DetectedProviders
             agent={agent}
             detected={readConfig?.detected}
@@ -70,7 +72,7 @@ export function AgentConfigDialog({ agent, onClose }: { agent: AgentInfo; onClos
   );
 }
 
-export function ConfigFilePreview({
+function ConfigFilePreview({
   path,
   content,
 }: {
@@ -94,27 +96,11 @@ export function ConfigFilePreview({
   );
 }
 
-export function ConfigPreviewSection({
-  agent,
-  readConfig,
-}: {
-  agent: AgentInfo;
-  readConfig?: AgentConfigContent | undefined;
-}) {
-  const { t } = useTranslation();
-  return (
-    <div className="pt-2">
-      <Note>{t("agents.configPreviewTitle", { name: agent.display_name })}</Note>
-      <ConfigFilePreview path={readConfig?.path ?? null} content={readConfig?.content ?? null} />
-    </div>
-  );
-}
-
 /// Providers that already live in the agent's config file but aren't managed by
 /// Nestra (user-configured directly in the agent). Shown with a per-row delete.
 /// Managed `nestra-*` entries are filtered out — those belong to the binding
 /// list above.
-export function DetectedProviders({
+function DetectedProviders({
   agent,
   detected,
   onRemove,

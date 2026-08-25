@@ -161,7 +161,7 @@ export function composeEndpointConfig(
 
 /// Inputs to the single-refresh-authority decision. Pure so the deadline logic
 /// is unit-testable without a React/jsdom harness.
-export interface CatchUpRefreshArgs {
+interface CatchUpRefreshArgs {
   auto: boolean;
   isFetching: boolean;
   /** Absolute deadline for the next auto-refresh (epoch ms); 0 = not armed. */

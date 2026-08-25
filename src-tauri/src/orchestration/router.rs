@@ -588,16 +588,11 @@ fn build_route(
     // for responses-class models.
     let wire = wire_for_model(ctx, inputs.conn, endpoint_id, model, protocol)?;
 
-    // Cache strategy is wire-aware: Anthropic-wire requests can use explicit
-    // caching (gated by policy.inject_cache_control — the gateway honors
-    // it); OpenRouter/DeepSeek are auto-cache; everything else off. This is
-    // a hint, not a constraint (plan §7).
+    // Cache strategy is wire-aware: only Anthropic-wire requests with the
+    // policy's `inject_cache_control` set get explicit caching — everything
+    // else is off. This is a hint, not a constraint (plan §7).
     let cache_strategy = if inject_cache && wire == ProviderKind::Anthropic {
         CacheStrategy::AnthropicExplicit
-    } else if is_openrouter(&base_url) {
-        CacheStrategy::OpenRouterPassthrough
-    } else if is_deepseek(&base_url) {
-        CacheStrategy::DeepSeekAuto
     } else {
         CacheStrategy::Off
     };
@@ -689,14 +684,6 @@ fn catalog_api(
     let abilities: crate::model_abilities::ModelAbilities =
         serde_json::from_str(&row.abilities_json).unwrap_or_default();
     Ok(abilities.api)
-}
-
-fn is_openrouter(url: &str) -> bool {
-    url.contains("openrouter.ai")
-}
-
-fn is_deepseek(url: &str) -> bool {
-    url.contains("deepseek.com")
 }
 
 #[cfg(test)]

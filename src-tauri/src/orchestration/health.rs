@@ -152,16 +152,6 @@ pub enum HealthOutcome {
     Fail(FailureClass),
 }
 
-impl HealthOutcome {
-    pub fn from_response(status: u16, body: &str, timeout: bool) -> Self {
-        if (200..300).contains(&status) {
-            HealthOutcome::Ok
-        } else {
-            HealthOutcome::Fail(FailureClass::classify(status, body, timeout))
-        }
-    }
-}
-
 /// The circuit-breaker state machine per endpoint (cc-switch-style
 /// Closed/Open/HalfOpen). Transitions are evaluated lazily at
 /// record/query time — there is no background prober task.

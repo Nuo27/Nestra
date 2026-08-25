@@ -1,13 +1,6 @@
 use super::*;
-use std::path::{Path, PathBuf};
-
-fn temp_home() -> (PathBuf, tempfile::TempDir) {
-    let dir = tempfile::Builder::new()
-        .prefix("nestra-mcp-test-")
-        .tempdir()
-        .expect("tempdir");
-    (dir.path().to_path_buf(), dir)
-}
+use crate::testutil::temp_home;
+use std::path::Path;
 
 /// Mark `pi-mcp-adapter` as installed inside a fake home (the npm-dir
 /// fallback of `adapter_installed_at`), so pi's `mcp_available` runtime

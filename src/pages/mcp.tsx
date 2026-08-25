@@ -3,7 +3,6 @@ import { useTranslation } from "react-i18next";
 import { useMemo, useState } from "react";
 import { Cable, Plus } from "lucide-react";
 import {
-  agentList,
   mcpDelete,
   mcpImportOne,
   mcpList,
@@ -15,8 +14,7 @@ import {
   type McpServer,
   type ProbeResult,
 } from "../ipc";
-import { useMCPCapableAgents } from "../lib/agents";
-import { Card } from "../components/controls/Card";
+import { useAgentLabels, useMCPCapableAgents } from "../lib/agents";
 import { Button } from "../components/controls/Button";
 import { Page } from "../components/layout/Page";
 import type { AgentState } from "../components/controls/AgentToggleGroup";
@@ -26,23 +24,12 @@ import { SyncIndicator } from "../components/feedback/SyncIndicator";
 import { qk } from "../lib/queries";
 import { ErrorBanner } from "../components/feedback/ErrorBanner";
 import { EmptyState } from "../components/feedback/EmptyState";
-import { Skeleton } from "../components/ui/skeleton";
+import { ListSkeletonCard } from "../components/feedback/ListSkeletonCard";
 import { extractError } from "../ipc/errors";
 import { useUI } from "../stores/ui";
 import { McpImportSection } from "../components/mcp/McpImportSection";
 import { McpServerDialog } from "../components/mcp/McpServerDialog";
 import { McpServerList, type McpAgentOption } from "../components/mcp/McpServerList";
-
-/// Lookup of display name by agent id, built from the agent list the backend
-/// already returns (with a `supports_mcp` flag). This replaces the old
-/// hardcoded `MCP_AGENT_IDS` / `AGENT_LABELS` that had to be kept in sync
-/// with `mcp/providers.rs` by hand.
-function useAgentLabels() {
-  const agentQ = useQuery({ queryKey: qk.agents(), queryFn: agentList });
-  const labels = new Map<string, string>();
-  for (const c of agentQ.data ?? []) labels.set(c.id, c.display_name);
-  return (id: string) => labels.get(id) ?? id;
-}
 
 export function McpPage() {
   const { t } = useTranslation();
@@ -255,15 +242,7 @@ export function McpPage() {
 
       {tab === "managed" && (
         <>
-          {q.isLoading && (
-            <Card padding="md">
-              <div className="space-y-3">
-                <Skeleton className="h-4 w-1/4" />
-                <Skeleton className="h-8 w-full" />
-                <Skeleton className="h-8 w-full" />
-              </div>
-            </Card>
-          )}
+          {q.isLoading && <ListSkeletonCard />}
 
           {q.isError && (
             <ErrorBanner onRetry={() => q.refetch()}>

@@ -412,7 +412,7 @@ pub fn factory_path_for(config_path: &Path) -> PathBuf {
 /// Capture the current live config as the Factory Configuration. Once-only
 /// unless `force`: a re-capture only happens when the user explicitly asks to
 /// overwrite the factory snapshot. When no live config exists the sentinel is
-/// stored so a later `restore_factory` knows to delete the file Nestra created
+/// stored so a future restore knows to delete the file Nestra created
 /// rather than write empty bytes over it.
 pub fn capture_factory(config_path: &Path, force: bool) -> AppResult<()> {
     let factory = factory_path_for(config_path);
@@ -423,27 +423,6 @@ pub fn capture_factory(config_path: &Path, force: bool) -> AppResult<()> {
         std::fs::copy(config_path, &factory)?;
     } else {
         std::fs::write(&factory, NO_ORIGINAL_SENTINEL)?;
-    }
-    Ok(())
-}
-
-/// Restore the live config from the Factory Configuration. Unlike
-/// `restore_from_backup`, the factory file is **not** removed —the snapshot
-/// is permanent so the user can restore repeatedly.
-pub fn restore_factory(config_path: &Path) -> AppResult<()> {
-    let factory = factory_path_for(config_path);
-    if !factory.exists() {
-        return Err(AppError::NotFound(
-            "no factory configuration saved".to_string(),
-        ));
-    }
-    let content = std::fs::read_to_string(&factory)?;
-    if content == NO_ORIGINAL_SENTINEL {
-        if config_path.exists() {
-            std::fs::remove_file(config_path)?;
-        }
-    } else {
-        atomic_write(config_path, content.as_bytes())?;
     }
     Ok(())
 }

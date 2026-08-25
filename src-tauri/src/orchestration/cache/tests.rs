@@ -1,9 +1,5 @@
 use super::*;
 
-fn json(s: &str) -> serde_json::Value {
-    serde_json::from_str(s).unwrap()
-}
-
 #[test]
 fn disabled_policy_returns_unchanged() {
     let body = br#"{"model":"x","messages":[]}"#;

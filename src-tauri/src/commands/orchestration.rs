@@ -163,37 +163,6 @@ fn read_catalog(conn: &rusqlite::Connection) -> AppResult<Vec<ModelCatalogEntry>
     Ok(out)
 }
 
-/// Reactive quota snapshot for every endpoint, read from the persisted
-/// `last_quota_state` column.
-/// The gateway refreshes the in-memory store in real
-/// time and the same command will return the fresher data.
-#[tauri::command]
-pub fn orch_quota_state(state: State<'_, crate::AppState>) -> AppResult<Vec<QuotaStateEntry>> {
-    let conn = state.db_read.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-    let store = crate::orchestration::quota_state::load_all_from_db(&conn)?;
-    let mut out = Vec::new();
-    for ep in db::list_endpoints(&conn)? {
-        let s = store.get(&ep.id);
-        out.push(QuotaStateEntry {
-            endpoint_id: ep.id,
-            display_name: ep.display_name,
-            exhausted: s.exhausted,
-            reason: s.reason,
-            exhausted_at_ms: s.exhausted_at_ms,
-        });
-    }
-    Ok(out)
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct QuotaStateEntry {
-    pub endpoint_id: String,
-    pub display_name: String,
-    pub exhausted: bool,
-    pub reason: Option<String>,
-    pub exhausted_at_ms: Option<i64>,
-}
-
 /// Dry-run the router against the live policy + catalog + quota + health
 /// Lets the user see exactly
 /// which `(endpoint, model, reason)` a Task with these parameters would

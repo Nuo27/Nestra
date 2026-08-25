@@ -42,9 +42,10 @@ use crate::orchestration::identity::{
     ResolvedRoute, RoleSource, SubagentRole, TaskContext, TaskLifecycle,
 };
 use crate::orchestration::migration;
-use crate::orchestration::router::{self, RouterInputs};
+
 
 use super::forward::{ForwardFuture, ForwardOutcome};
+use super::protocol_openai::rewrite_model;
 use super::stream::{
     GatewayBody, ObservedUsage, StreamObservation, observe_anthropic_chunk,
     observe_openai_chat_chunk, observe_responses_chunk, read_request_body,
@@ -56,9 +57,10 @@ use super::GatewayState;
 /// keep-alive connections internally, so repeat requests to the same
 /// provider skip the TLS handshake — a per-request client paid it every
 /// time, a measured 100-300ms tax on every routed call).
-/// Public to the sibling OpenAI/Responses handlers so all dials share one
-/// pool.
-fn shared_upstream_client() -> &'static Client<HttpsConnector<HttpConnector>, GatewayBody> {
+/// `pub(super)` so the sibling OpenAI/Responses handlers share one pool;
+/// dial sites clone it (a hyper `Client` is a cheap `Arc` handle — cloning
+/// does NOT create a new pool).
+pub(super) fn shared_upstream_client() -> &'static Client<HttpsConnector<HttpConnector>, GatewayBody> {
     static CLIENT: std::sync::OnceLock<Client<HttpsConnector<HttpConnector>, GatewayBody>> =
         std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -77,12 +79,6 @@ fn shared_upstream_client() -> &'static Client<HttpsConnector<HttpConnector>, Ga
     })
 }
 
-/// Back-compat alias for the dial sites: returns a clone of the shared
-/// client (hyper `Client` is a cheap `Arc` handle — cloning does NOT create
-/// a new pool).
-pub(super) fn upstream_client() -> Client<HttpsConnector<HttpConnector>, GatewayBody> {
-    shared_upstream_client().clone()
-}
 
 /// Handle one Anthropic Messages request end-to-end. `agent_id` is supplied
 /// by the dispatcher (extracted from the path prefix, or defaulted to
@@ -196,23 +192,9 @@ pub async fn handle_bytes(
         side_effect_risk,
         // Resolve closure: re-resolves per attempt; the router skips
         // degraded + quota-exhausted endpoints, so a post-failure
-        // re-resolve picks a different endpoint automatically. It is a
-        // FUTURE (not a blocking call) because the gateway runs on the Tokio
-        // runtime — blocking_lock() would panic on a worker thread.
-        move |ctx: &TaskContext| -> super::forward::ResolveFuture {
-            let st = loop_state.clone();
-            let ctx = ctx.clone();
-            Box::pin(async move {
-                let conn = st.db.lock().await;
-                let inputs = RouterInputs {
-                    conn: &conn,
-                    health: &st.health,
-                    quota: &st.quota,
-                    affinity: &st.affinity,
-                };
-                router::resolve(&ctx, &inputs)
-            })
-        },
+        // re-resolve picks a different endpoint automatically (a FUTURE,
+        // not a blocking call — see forward::make_resolver).
+        super::forward::make_resolver(loop_state),
         // Forward closure: one protocol-specific dial + relay. Receives the
         // per-attempt ctx so the relay's usage backfill targets the CURRENT
         // attempt's `route_request` row (the loop rotates request_id on every
@@ -267,35 +249,6 @@ async fn forward_one(
             _ => rewritten,
         },
     };
-    let upstream_key = match (state.credential_reader)(&route.endpoint_id) {
-        Ok(Some(k)) => k,
-        Ok(None) => {
-            return ForwardOutcome::Unreachable {
-                timeout: false,
-                message: format!("no API key for endpoint '{}'", route.endpoint_id),
-            }
-        }
-        Err(e) => {
-            return ForwardOutcome::Unreachable {
-                timeout: false,
-                message: format!("credential read error: {e}"),
-            }
-        }
-    };
-    // The URL join follows the resolved wire (`route.protocol`). An
-    // unparseable base_url is a config error, not a retry opportunity — the
-    // request carries real credentials, so we fail closed instead of falling
-    // back to a loopback URL that would receive them.
-    let upstream_url =
-        match crate::protocol_url::parse_upstream_uri(&route.base_url, route.protocol) {
-            Ok(u) => u,
-            Err(e) => {
-                return ForwardOutcome::Unreachable {
-                    timeout: false,
-                    message: e,
-                }
-            }
-        };
     // Diagnostics header: lets the upstream (and the mock) echo back exactly
     // how this request was routed — which endpoint/model, why, and which
     // subagent role. Seen by the user in the reply text (mock echoes it).
@@ -313,55 +266,18 @@ async fn forward_one(
         hyper::header::HeaderValue::from_str(&diag)
             .unwrap_or_else(|_| hyper::header::HeaderValue::from_static("error")),
     );
-    let upstream_req = match build_upstream_request(&upstream_url, &diag_headers, upstream_key, upstream_body, bridging)
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return ForwardOutcome::Unreachable {
-                timeout: false,
-                message: format!("build request: {e}"),
-            }
-        }
-    };
-    let client = upstream_client();
-    let tuning = super::tuning::snapshot(&state.tuning);
-    let upstream_resp = match tokio::time::timeout(
-        std::time::Duration::from_secs(tuning.headers_timeout_secs),
-        client.request(upstream_req),
-    )
-    .await
-    {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            return ForwardOutcome::Unreachable {
-                timeout: error_is_timeout(&e),
-                message: e.to_string(),
-            };
-        }
-        Err(_) => {
-            return ForwardOutcome::Unreachable {
-                timeout: true,
-                message: format!(
-                    "upstream did not send response headers within {}s",
-                    tuning.headers_timeout_secs
-                ),
-            };
-        }
-    };
-    let status = upstream_resp.status();
-    let resp_headers = upstream_resp.headers().clone();
-    let relay = match probe_and_relay(
-        state.clone(),
+    let (status, resp_headers, relay) = match super::forward::dial_upstream(
+        state,
+        &route,
         request_id,
-        route.protocol,
-        upstream_resp,
-        &route.endpoint_id,
-        &route.model,
+        |upstream_url, upstream_key| {
+            build_upstream_request(&upstream_url, &diag_headers, upstream_key, upstream_body, bridging)
+        },
     )
     .await
     {
-        Ok(relay) => relay,
-        Err(in_band_failure) => return in_band_failure,
+        Ok(v) => v,
+        Err(f) => return f,
     };
     // Convert the upstream body back to Anthropic when bridging. The pair
     // (inbound=Anthropic, upstream=route.protocol) picks the converter.
@@ -409,50 +325,8 @@ pub(super) fn error_is_timeout(e: &hyper_util::client::legacy::Error) -> bool {
 /// by agent prefix; both forms are accepted so prefix-less and agent-prefixed
 /// configs both match). Trailing slash / query tolerated.
 fn path_is_messages(p: &str) -> bool {
-    let path = p.split('?').next().unwrap_or(p);
-    let trimmed = path.trim_end_matches('/');
-    if trimmed == "/v1/messages" {
-        return true;
-    }
-    // `/<agent-id>/v1/messages` — strip the leading /<segment>/ and re-check.
-    if let Some(rest) = trimmed.strip_prefix('/') {
-        if let Some(after_agent) = rest.split_once('/') {
-            // `after_agent.1` is `v1/messages` (NO leading slash) — normalize
-            // to `/v1/messages` before comparing.
-            let candidate = format!("/{}", after_agent.1);
-            return candidate == "/v1/messages";
-        }
-    }
-    false
+    super::path_matches(p, &["/v1/messages"])
 }
-
-/// Rewrite the `model` field in an Anthropic Messages body to `resolved_model`.
-/// Returns the original bytes unchanged when the body isn't JSON or has no
-/// `model` field (the upstream will reject it; we don't invent a model).
-fn rewrite_model(body: &[u8], resolved_model: &str) -> Bytes {
-    let mut v: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(_) => return Bytes::copy_from_slice(body),
-    };
-    let obj = match v.as_object_mut() {
-        Some(o) => o,
-        None => return Bytes::copy_from_slice(body),
-    };
-    if obj.contains_key("model") {
-        obj.insert(
-            "model".to_string(),
-            serde_json::Value::String(resolved_model.to_string()),
-        );
-        Bytes::from(serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec()))
-    } else {
-        Bytes::copy_from_slice(body)
-    }
-}
-
-/// Build the upstream URL from the resolved base_url + path. The base_url may
-/// or may not end in `/v1`; we normalize so the final URL hits
-/// `<base>/v1/messages`.
-
 
 /// Build the upstream request, copying through the agent's headers minus the
 /// hop-by-hop set, and setting `x-api-key` + `anthropic-version` if the agent
@@ -690,7 +564,7 @@ where
         let mut u = ObservedUsage::default();
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf) {
             if let Some(usage_obj) = v.get("usage").and_then(|u| u.as_object()) {
-                use crate::orchestration::gateway::stream::merge_usage_obj_pub as merge;
+                use crate::orchestration::gateway::stream::merge_usage_obj as merge;
                 merge(usage_obj, &mut u);
             }
         }
@@ -772,13 +646,16 @@ pub(super) async fn probe_and_relay(
             Err(ForwardOutcome::Responded {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 headers,
-                body: error_body(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    &format!(
-                        "nestra gateway: upstream in-band stream error from {}/{}: {}",
-                        log_endpoint, log_model, reason
-                    ),
-                ),
+                body: GatewayBody::json_full(serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "nestra_gateway_error",
+                        "message": format!(
+                            "nestra gateway: upstream in-band stream error from {}/{}: {}",
+                            log_endpoint, log_model, reason
+                        )
+                    }
+                })),
                 usage: None,
                 tool_calls: None,
                 tool_names: None,
@@ -1101,23 +978,15 @@ impl hyper::body::Body for ObservingBody {
     }
 }
 
-/// Build the agent-facing JSON error response.
+/// Build the agent-facing JSON error response (Anthropic error envelope).
 pub(super) fn error_response(status: StatusCode, message: &str) -> Response<GatewayBody> {
-    let mut resp = Response::new(error_body(status, message));
-    *resp.status_mut() = status;
-    resp.headers_mut().insert(
-        hyper::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    resp
-}
-
-fn error_body(_status: StatusCode, message: &str) -> GatewayBody {
-    let body = serde_json::json!({
-        "type": "error",
-        "error": { "type": "nestra_gateway_error", "message": message }
-    });
-    GatewayBody::json_full(body)
+    super::json_response(
+        status,
+        serde_json::json!({
+            "type": "error",
+            "error": { "type": "nestra_gateway_error", "message": message }
+        }),
+    )
 }
 
 /// Build the agent-facing response from the upstream's status + headers +

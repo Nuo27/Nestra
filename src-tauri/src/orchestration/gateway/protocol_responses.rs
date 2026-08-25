@@ -23,7 +23,7 @@ use crate::orchestration::identity::{
     ResolvedRoute, RoleSource, SubagentRole, TaskContext, TaskLifecycle,
 };
 use crate::orchestration::migration;
-use crate::orchestration::router::{self, RouterInputs};
+
 
 use super::forward::ForwardOutcome;
 use super::protocol_openai::{build_upstream_request, error_response, parse_body_model, rewrite_model};
@@ -111,20 +111,7 @@ pub async fn handle_bytes(
         agent,
         started_at,
         side_effect_risk,
-        move |ctx: &TaskContext| -> super::forward::ResolveFuture {
-            let st = loop_state.clone();
-            let ctx = ctx.clone();
-            Box::pin(async move {
-                let conn = st.db.lock().await;
-                let inputs = RouterInputs {
-                    conn: &conn,
-                    health: &st.health,
-                    quota: &st.quota,
-                    affinity: &st.affinity,
-                };
-                router::resolve(&ctx, &inputs)
-            })
-        },
+        super::forward::make_resolver(loop_state),
         move |ctx: &TaskContext, route: &ResolvedRoute| -> super::forward::ForwardFuture {
             let route = route.clone();
             let st = forward_state.clone();
@@ -157,99 +144,27 @@ async fn forward_one(
         _ => super::convert_responses::responses_to_chat_request(&rewritten),
     };
     let upstream_kind = route.protocol;
-    let upstream_key = match (state.credential_reader)(&route.endpoint_id) {
-        Ok(Some(k)) => k,
-        Ok(None) => {
-            return ForwardOutcome::Unreachable {
-                timeout: false,
-                message: format!("no API key for endpoint '{}'", route.endpoint_id),
-            }
-        }
-        Err(e) => {
-            return ForwardOutcome::Unreachable {
-                timeout: false,
-                message: format!("credential read error: {e}"),
-            }
-        }
-    };
-    let upstream_url = match crate::protocol_url::parse_upstream_uri(&route.base_url, upstream_kind)
-    {
-        Ok(u) => u,
-        Err(e) => {
-            return ForwardOutcome::Unreachable {
-                timeout: false,
-                message: e,
-            }
-        }
-    };
-    let upstream_req = match build_upstream_request(
-        &upstream_url,
-        &headers,
-        upstream_key,
-        upstream_body,
-        upstream_kind,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            return ForwardOutcome::Unreachable {
-                timeout: false,
-                message: format!("build request: {e}"),
-            }
-        }
-    };
-
-    let client = super::protocol_anthropic::upstream_client();
-    let tuning = super::tuning::snapshot(&state.tuning);
-    let upstream_resp = match tokio::time::timeout(
-        std::time::Duration::from_secs(tuning.headers_timeout_secs),
-        client.request(upstream_req),
-    )
-    .await
-    {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            return ForwardOutcome::Unreachable {
-                timeout: super::protocol_anthropic::error_is_timeout(&e),
-                message: e.to_string(),
-            };
-        }
-        Err(_) => {
-            return ForwardOutcome::Unreachable {
-                timeout: true,
-                message: format!(
-                    "upstream did not send response headers within {}s",
-                    tuning.headers_timeout_secs
-                ),
-            };
-        }
-    };
-
-    let status = upstream_resp.status();
-    let resp_headers = upstream_resp.headers().clone();
-    if !status.is_success() {
-        tracing::warn!(
-            endpoint = %route.endpoint_id,
-            model = %route.model,
-            upstream = %upstream_url,
-            status = status.as_u16(),
-            "gateway: upstream non-success"
-        );
-    }
     // Relay + observe with the same first-event probe the anthropic/chat
     // paths use: an in-band stream error fails the attempt (retry/migrate)
     // instead of relaying a "successful" empty stream to the agent.
-    let relay = match super::protocol_anthropic::probe_and_relay(
-        state.clone(),
-        &request_id.to_string(),
-        upstream_kind,
-        upstream_resp,
-        &route.endpoint_id,
-        &route.model,
+    let (status, resp_headers, relay) = match super::forward::dial_upstream(
+        state,
+        &route,
+        request_id,
+        |upstream_url, upstream_key| {
+            build_upstream_request(
+                &upstream_url,
+                &headers,
+                upstream_key,
+                upstream_body,
+                upstream_kind,
+            )
+        },
     )
     .await
     {
-        Ok(relay) => relay,
-        Err(in_band_failure) => return in_band_failure,
+        Ok(v) => v,
+        Err(f) => return f,
     };
     // Convert a bridged upstream wire back to the Responses shape the agent
     // speaks; a native responses upstream passes through verbatim.
@@ -280,18 +195,7 @@ async fn forward_one(
 /// WITHOUT the `/v1` segment (mirrors [`super::protocol_openai`]'s chat path
 /// matcher). Trailing slash / query tolerated.
 pub(super) fn path_is_responses(p: &str) -> bool {
-    let path = p.split('?').next().unwrap_or(p);
-    let trimmed = path.trim_end_matches('/');
-    if matches!(trimmed, "/v1/responses" | "/responses") {
-        return true;
-    }
-    if let Some(rest) = trimmed.strip_prefix('/') {
-        if let Some((_agent, r)) = rest.split_once('/') {
-            let candidate = format!("/{r}");
-            return matches!(candidate.as_str(), "/v1/responses" | "/responses");
-        }
-    }
-    false
+    super::path_matches(p, &["/v1/responses", "/responses"])
 }
 
 #[cfg(test)]

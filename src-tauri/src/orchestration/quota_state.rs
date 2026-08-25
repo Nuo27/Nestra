@@ -151,16 +151,7 @@ impl QuotaState {
         map.get(endpoint_id)
             .cloned()
             .unwrap_or_default()
-    }
-
-    /// All endpoints currently marked exhausted (for the health/quota UI card).
-    pub fn exhausted_endpoints(&self) -> Vec<String> {
-        let map = self.inner.lock().expect("quota lock poisoned");
-        map.iter()
-            .filter(|(_, s)| s.exhausted)
-            .map(|(k, _)| k.clone())
-            .collect()
-    }
+}
 
     pub fn clear(&self) {
         self.inner.lock().expect("quota lock poisoned").clear();

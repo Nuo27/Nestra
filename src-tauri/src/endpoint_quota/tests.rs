@@ -1,32 +1,5 @@
 use super::*;
 
-fn item(name: &str, resets_at_ms: Option<i64>) -> QuotaItem {
-    QuotaItem {
-        name: name.into(),
-        pct: 0.0,
-        used: None,
-        total: None,
-        remaining: None,
-        resets_in: None,
-        resets_at_ms,
-        unit: None,
-        is_balance: false,
-    }
-}
-
-fn balance_item(name: &str, pct: f64, remaining: f64, total: f64) -> QuotaItem {
-    QuotaItem {
-        name: name.into(),
-        pct,
-        used: Some(total - remaining),
-        total: Some(total),
-        remaining: Some(remaining),
-        resets_in: None,
-        resets_at_ms: None,
-        unit: Some("USD".into()),
-        is_balance: true,
-    }
-}
 
 fn ep(protocols: &[(&str, &str)]) -> EndpointRow {
     EndpointRow {
@@ -412,53 +385,4 @@ fn fetch_with_plan_opencode_without_creds_is_clear_error() {
     let q = fetch_with_plan(&endpoint, "k", &plan, None);
     assert!(!q.ok);
     assert!(q.error.as_deref().unwrap().contains("cookie + workspace ID not set"));
-}
-
-#[test]
-fn pick_5h_zai() {
-    let items = vec![
-        item("weekly-token", Some(99)),
-        item("5h-token", Some(1234)),
-    ];
-    assert_eq!(pick_five_hour_expiry(&items), Some(1234));
-}
-
-#[test]
-fn pick_5h_minimax_new_shape() {
-    let items = vec![
-        item("claude-sonnet/weekly", Some(99)),
-        item("claude-sonnet/5h", Some(5678)),
-    ];
-    assert_eq!(pick_five_hour_expiry(&items), Some(5678));
-}
-
-#[test]
-fn pick_5h_minimax_flat_no_reset() {
-    // Flat shape returns no reset timestamp on the wire; next fetch
-    // after a successful POST will repopulate it.
-    let items = vec![item("5h-token", None)];
-    assert_eq!(pick_five_hour_expiry(&items), None);
-}
-
-#[test]
-fn pick_5h_returns_none_without_5h_item() {
-    // A balance-shaped item (no 5h name) must not match the window picker.
-    let items = vec![item("balance", None)];
-    assert_eq!(pick_five_hour_expiry(&items), None);
-}
-
-#[test]
-fn pick_5h_first_match_wins() {
-    // New shape sorts alphabetically (claude-haiku/5h before claude-sonnet/5h);
-    // pick the first `*/5h` hit. Stable ordering means deterministic test.
-    let items = vec![
-        item("claude-haiku/5h", Some(11)),
-        item("claude-sonnet/5h", Some(22)),
-    ];
-    assert_eq!(pick_five_hour_expiry(&items), Some(11));
-}
-
-#[test]
-fn pick_5h_empty() {
-    assert_eq!(pick_five_hour_expiry(&[]), None);
 }

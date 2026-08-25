@@ -15,6 +15,7 @@ import {
 import { useUI } from "../../stores/ui";
 import { qk } from "../../lib/queries";
 import { isPlanActive, resolvePlan } from "../../lib/quota";
+import { DEFAULT_CFG } from "../../lib/quotaRefresh";
 import { keepaliveMeta } from "../../lib/keepalive";
 import { fmtMoney } from "../../lib/format";
 import { useResumeInvalidate } from "../../lib/useResumeInvalidate";
@@ -29,7 +30,7 @@ type BadgeSpec = { tone: "success" | "warning" | "danger" | "neutral"; labelKey:
 
 /// Per-endpoint 30-day usage totals folded on the Providers page (one query
 /// for all cards). `unknown` = some rows carry tokens but no catalog price.
-export interface EndpointUsage {
+interface EndpointUsage {
   requests: number;
   input: number;
   output: number;
@@ -178,7 +179,7 @@ function UsageLine({ usage }: { usage: EndpointUsage }) {
 /// `half_open` a warning badge (probe requests in flight). Shares one query
 /// key across all cards (TanStack dedupes; 10s refresh is a cheap in-memory
 /// read).
-export function BreakerBadge({ endpointId }: { endpointId: string }) {
+function BreakerBadge({ endpointId }: { endpointId: string }) {
   const { t } = useTranslation();
   const q = useQuery({
     queryKey: qk.providerHealth(),
@@ -287,18 +288,8 @@ function QuotaSection({ endpoint }: { endpoint: EndpointInfo }) {
   // heuristic (same default as the Quota page's picker). Hooks must run
   // before any early return (items can go 0 ↔ N across fetches).
   const refreshQ = useQuery({ queryKey: qk.quotaRefresh(), queryFn: quotaRefreshGet });
-  const cfg: RefreshEndpointConfig = refreshQ.data?.endpoints[endpoint.id] ?? {
-    enabled: false,
-    protocol: null,
-    model: null,
-    target_quota_name: null,
-    last_status: null,
-    check_rate_secs: 180,
-    reset_grace_secs: 180,
-    extractor: null,
-    query_plan: null,
-    provisioned: null,
-  };
+  const cfg: RefreshEndpointConfig =
+    refreshQ.data?.endpoints[endpoint.id] ?? DEFAULT_CFG;
   // Same gate as the Quota page: the preview only renders when a plan is
   // selected AND a verifying fetch has returned data. Until then the whole
   // section is hidden (no placeholder, no divider) — the user reaches setup

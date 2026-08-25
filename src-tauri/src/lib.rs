@@ -18,6 +18,9 @@ mod session;
 mod skills;
 mod tray;
 
+#[cfg(test)]
+mod testutil;
+
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, WindowEvent};
 
@@ -442,7 +445,6 @@ pub fn run() {
             // Orchestration control plane: model catalog / quota / resolve preview
             commands::orchestration::orch_model_catalog,
             commands::orchestration::orch_model_catalog_rebuild,
-            commands::orchestration::orch_quota_state,
             commands::orchestration::orch_resolve_preview,
             // Gateway: per-agent opt-in + live status
             commands::gateway::agent_set_gateway_enabled,

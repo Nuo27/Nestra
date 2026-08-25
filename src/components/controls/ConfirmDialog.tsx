@@ -55,7 +55,7 @@ let pendingConfirm: { next: (c: PendingConfirm) => void } = {
   next: (c) => c.resolve(false),
 }
 
-export function setConfirmDispatcher(dispatch: (c: PendingConfirm) => void) {
+function setConfirmDispatcher(dispatch: (c: PendingConfirm) => void) {
   pendingConfirm = { next: dispatch }
 }
 

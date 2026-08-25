@@ -1,14 +1,7 @@
 use super::*;
 use crate::db;
 use crate::mcp::providers;
-
-fn temp_home() -> (std::path::PathBuf, tempfile::TempDir) {
-    let dir = tempfile::Builder::new()
-        .prefix("")
-        .tempdir()
-        .expect("tempdir");
-    (dir.path().to_path_buf(), dir)
-}
+use crate::testutil::temp_home;
 
 /// Stdio probe: spawn a Python script that replies to the first line with
 /// a JSON-RPC-shaped object and asserts the probe sees it as OK.

@@ -23,7 +23,7 @@ export function makeGuard() {
     },
   };
 }
-export type Guard = ReturnType<typeof makeGuard>;
+type Guard = ReturnType<typeof makeGuard>;
 
 /// Run `fn`; resolve `{ value }` if still the current generation when it
 /// lands, otherwise `{ stale: true }`.

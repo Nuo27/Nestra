@@ -7,9 +7,9 @@ import { qk } from "../../lib/queries";
 import { useUI } from "../../stores/ui";
 import { Card } from "../controls/Card";
 import { Button } from "../controls/Button";
-import { Skeleton } from "../ui/skeleton";
 import { ErrorBanner } from "../feedback/ErrorBanner";
 import { EmptyState } from "../feedback/EmptyState";
+import { ListSkeletonCard } from "../feedback/ListSkeletonCard";
 import { Badge } from "../ui/badge";
 
 export function McpImportSection({
@@ -36,15 +36,7 @@ export function McpImportSection({
   });
 
   if (q.isLoading) {
-    return (
-      <Card padding="md">
-        <div className="space-y-3">
-          <Skeleton className="h-4 w-1/4" />
-          <Skeleton className="h-8 w-full" />
-          <Skeleton className="h-8 w-full" />
-        </div>
-      </Card>
-    );
+    return <ListSkeletonCard />;
   }
 
   if (q.isError) {

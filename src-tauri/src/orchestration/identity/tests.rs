@@ -164,7 +164,6 @@ fn task_context_new_assigns_fresh_uuids() {
     assert_eq!(ctx.subagent_role, SubagentRole::Main);
     assert_eq!(ctx.role_source, RoleSource::Heuristic);
     assert_eq!(ctx.lifecycle, TaskLifecycle::Born);
-    assert!(ctx.native_task_ref.is_none());
     assert_eq!(ctx.policy_role_key(), "main");
     assert!(ctx.budget_tier.is_none(), "tier defaults to unclassified");
     // Two contexts get distinct request ids.

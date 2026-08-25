@@ -2,17 +2,9 @@
 //! native MCP; the gate decides whether pi appears MCP-capable at all.
 
 use super::adapter_installed_at;
+use crate::testutil::temp_home;
 use std::fs;
 use std::path::PathBuf;
-
-fn temp_home() -> (PathBuf, tempfile::TempDir) {
-    let dir = tempfile::Builder::new()
-        .prefix("pi-adapter-test")
-        .tempdir()
-        .expect("tempdir");
-    let home = dir.path().to_path_buf();
-    (home, dir)
-}
 
 fn write_settings(home: &PathBuf, json: &str) {
     let agent_dir = home.join(".pi").join("agent");

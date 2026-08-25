@@ -15,17 +15,6 @@ fn mark_and_clear_exhaustion() {
 }
 
 #[test]
-fn exhausted_endpoints_lists_only_exhausted() {
-    let q = QuotaState::new();
-    q.mark_exhausted("ep-1", None);
-    q.mark_exhausted("ep-2", None);
-    q.clear_exhausted("ep-1");
-    let mut ex = q.exhausted_endpoints();
-    ex.sort();
-    assert_eq!(ex, vec!["ep-2".to_string()]);
-}
-
-#[test]
 fn persisted_json_round_trips() {
     let s = EndpointQuotaState {
         exhausted: true,

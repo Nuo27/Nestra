@@ -71,15 +71,9 @@ export function QuotaItemRow({
       </div>
       <div className={size === "md" ? "mt-1 font-mono text-xs" : ""}>
         {quiet ? (
-          <AsciiBar
-            value={p}
-            tone="auto"
-            size="fine"
-            pulse={false}
-            trackClass="text-subtle"
-          />
+          <AsciiBar value={p} size="fine" pulse={false} />
         ) : (
-          <AsciiBar value={p} tone="auto" trackClass="text-subtle" />
+          <AsciiBar value={p} />
         )}
       </div>
       {showReset && resetsIn && (

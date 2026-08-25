@@ -24,6 +24,8 @@ use serde_json::{Map, Value};
 
 use super::convert::canonical_json;
 use super::convert::clean_schema;
+use super::convert::tool_content_text;
+use super::convert::usage_anthropic_from_responses;
 
 // ---------------------------------------------------------------------------
 // Request direction: Anthropic Messages → Responses
@@ -275,19 +277,10 @@ fn tool_result_to_function_call_output(block: &Value) -> Option<Value> {
     } else {
         return None;
     }
-    let output = match block.get("content") {
-        Some(Value::String(s)) => Value::String(s.clone()),
-        Some(Value::Array(parts)) => {
-            let text = parts
-                .iter()
-                .filter_map(|p| p.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n");
-            Value::String(text)
-        }
-        _ => Value::String(String::new()),
-    };
-    item.insert("output".into(), output);
+    item.insert(
+        "output".into(),
+        Value::String(tool_content_text(block.get("content"))),
+    );
     Some(Value::Object(item))
 }
 
@@ -632,20 +625,7 @@ pub fn responses_to_anthropic(body: &[u8]) -> Bytes {
 
     // usage: Anthropic input excludes cached tokens.
     if let Some(usage) = obj.get("usage") {
-        let input = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-        let cached = usage
-            .get("input_tokens_details")
-            .and_then(|d| d.get("cached_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let output = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
-        let mut u = Map::new();
-        u.insert("input_tokens".into(), Value::from(input.saturating_sub(cached)));
-        u.insert("output_tokens".into(), Value::from(output));
-        if cached > 0 {
-            u.insert("cache_read_input_tokens".into(), Value::from(cached));
-        }
-        msg.insert("usage".into(), Value::Object(u));
+        msg.insert("usage".into(), usage_anthropic_from_responses(usage));
     }
 
     match serde_json::to_string(&Value::Object(msg)) {

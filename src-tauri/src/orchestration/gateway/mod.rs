@@ -36,9 +36,38 @@ pub mod trace;
 pub mod tuning;
 
 #[cfg(test)]
-mod tests_capture;
-#[cfg(test)]
 mod tests_e2e;
+
+/// `true` when the request path equals any of `suffixes` (`"/v1/messages"`,
+/// `"/models"`, …) either bare or under a `/<agent-id>` dispatcher prefix.
+/// Callers list their own forms (with/without `/v1` as the wire expects).
+/// Trailing slash / query tolerated.
+pub(crate) fn path_matches(p: &str, suffixes: &[&str]) -> bool {
+    let path = p.split('?').next().unwrap_or(p);
+    let trimmed = path.trim_end_matches('/');
+    if suffixes.contains(&trimmed) {
+        return true;
+    }
+    if let Some(rest) = trimmed.strip_prefix('/') {
+        if let Some((_agent, r)) = rest.split_once('/') {
+            let candidate = format!("/{r}");
+            return suffixes.contains(&candidate.as_str());
+        }
+    }
+    false
+}
+
+/// A JSON `Response` with the given status and `application/json` content
+/// type — the shared tail of every agent-facing JSON builder.
+pub(crate) fn json_response(status: StatusCode, body: serde_json::Value) -> hyper::Response<stream::GatewayBody> {
+    let mut resp = hyper::Response::new(stream::GatewayBody::json_full(body));
+    *resp.status_mut() = status;
+    resp.headers_mut().insert(
+        hyper::header::CONTENT_TYPE,
+        hyper::header::HeaderValue::from_static("application/json"),
+    );
+    resp
+}
 
 use std::net::SocketAddr;
 use std::sync::Arc;

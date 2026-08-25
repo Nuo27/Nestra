@@ -121,26 +121,39 @@ pub struct ObservedUsage {
     pub cache_read: Option<i64>,
 }
 
-/// Parse usage tokens out of an SSE event-stream chunk. Anthropic streams the
-/// `usage` object inside `message_start` (input + cache fields) and
-/// `message_delta` (output). This scans one buffered chunk of decoded text for
-/// those fields and accumulates into `usage`. Best-effort: a malformed chunk
-/// is ignored (the next chunk may complete it).
-pub fn observe_usage_chunk(text: &str, usage: &mut ObservedUsage) {
-    // We only care about `message_start` and `message_delta` event types.
-    // Walk data: lines, parse their JSON, and pull usage fields.
+/// Walk an SSE buffer's `data:` payloads, invoking `f` for each parsed JSON
+/// object. `[DONE]` sentinels and unparseable/non-object lines are skipped —
+/// the shared preamble of the per-wire observers below.
+fn for_each_data_payload(
+    text: &str,
+    mut f: impl FnMut(&serde_json::Map<String, serde_json::Value>),
+) {
     for line in text.lines() {
-        let payload = match line.strip_prefix("data: ") {
-            Some(p) => p.trim(),
-            None => continue,
+        let Some(payload) = line.strip_prefix("data: ") else {
+            continue;
         };
+        let payload = payload.trim();
         if payload == "[DONE]" {
             continue;
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
             continue;
         };
-        let Some(obj) = v.as_object() else { continue };
+        if let Some(obj) = v.as_object() {
+            f(obj);
+        }
+    }
+}
+
+/// Parse usage tokens out of an SSE event-stream chunk. Anthropic streams the
+/// `usage` object inside `message_start` (input + cache fields) and
+/// `message_delta` (output). This scans one buffered chunk of decoded text for
+/// those fields and accumulates into `usage`. Best-effort: a malformed chunk
+/// is ignored (the next chunk may complete it).
+fn observe_usage_chunk(text: &str, usage: &mut ObservedUsage) {
+    // We only care about `message_start` and `message_delta` event types.
+    // Walk data: lines, parse their JSON, and pull usage fields.
+    for_each_data_payload(text, |obj| {
         // `message_start` carries { message: { usage: { ... } } }
         if obj.get("type").and_then(|t| t.as_str()) == Some("message_start") {
             if let Some(u) = obj
@@ -150,7 +163,7 @@ pub fn observe_usage_chunk(text: &str, usage: &mut ObservedUsage) {
             {
                 merge_usage_obj(u, usage);
             }
-            continue;
+            return;
         }
         // `message_delta` carries { usage: { output_tokens: N } }
         if obj.get("type").and_then(|t| t.as_str()) == Some("message_delta") {
@@ -158,16 +171,12 @@ pub fn observe_usage_chunk(text: &str, usage: &mut ObservedUsage) {
                 merge_usage_obj(u, usage);
             }
         }
-    }
+    });
 }
 
-/// Public alias so the protocol handler can merge a parsed `usage` object
-/// (non-streaming path) without re-implementing the field walk.
-pub fn merge_usage_obj_pub(u: &serde_json::Map<String, serde_json::Value>, usage: &mut ObservedUsage) {
-    merge_usage_obj(u, usage)
-}
-
-fn merge_usage_obj(u: &serde_json::Map<String, serde_json::Value>, usage: &mut ObservedUsage) {
+/// Merge a parsed `usage` object into the accumulator. `pub(crate)` so the
+/// protocol handlers' non-streaming paths share the field walk.
+pub(crate) fn merge_usage_obj(u: &serde_json::Map<String, serde_json::Value>, usage: &mut ObservedUsage) {
     // Anthropic field names.
     if let Some(n) = u.get("input_tokens").and_then(|x| x.as_i64()) {
         usage.input = Some(n);
@@ -314,20 +323,9 @@ fn bump(map: &mut BTreeMap<String, u64>, name: &str) {
 /// `tool_use`, deduplicated by block id.
 pub fn observe_anthropic_chunk(text: &str, obs: &mut StreamObservation) {
     observe_usage_chunk(text, &mut obs.usage);
-    for line in text.lines() {
-        let Some(payload) = line.strip_prefix("data: ") else {
-            continue;
-        };
-        let payload = payload.trim();
-        if payload == "[DONE]" {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
-            continue;
-        };
-        let Some(obj) = v.as_object() else { continue };
+    for_each_data_payload(text, |obj| {
         if obj.get("type").and_then(|t| t.as_str()) != Some("content_block_start") {
-            continue;
+            return;
         }
         let block = obj.get("content_block");
         let is_tool = block
@@ -342,7 +340,7 @@ pub fn observe_anthropic_chunk(text: &str, obs: &mut StreamObservation) {
                 bump(&mut obs.tool_names, name);
             }
         }
-    }
+    });
 }
 
 /// Observe one buffered text window of an OpenAI Chat Completions SSE stream.
@@ -353,23 +351,12 @@ pub fn observe_anthropic_chunk(text: &str, obs: &mut StreamObservation) {
 /// on every delta, so it is the dedup key (the `id` rides only the first
 /// delta and would double-count).
 pub fn observe_openai_chat_chunk(text: &str, obs: &mut StreamObservation) {
-    for line in text.lines() {
-        let Some(payload) = line.strip_prefix("data: ") else {
-            continue;
-        };
-        let payload = payload.trim();
-        if payload == "[DONE]" {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
-            continue;
-        };
-        let Some(obj) = v.as_object() else { continue };
+    for_each_data_payload(text, |obj| {
         if let Some(u) = obj.get("usage").and_then(|u| u.as_object()) {
             merge_usage_obj(u, &mut obs.usage);
         }
         let Some(choices) = obj.get("choices").and_then(|c| c.as_array()) else {
-            continue;
+            return;
         };
         for choice in choices {
             let Some(tcs) = choice
@@ -403,7 +390,7 @@ pub fn observe_openai_chat_chunk(text: &str, obs: &mut StreamObservation) {
                 }
             }
         }
-    }
+    });
 }
 
 /// Observe one buffered text window of an OpenAI Responses API SSE stream
@@ -413,18 +400,7 @@ pub fn observe_openai_chat_chunk(text: &str, obs: &mut StreamObservation) {
 /// `input_tokens_details.cached_tokens`); tool calls surface as
 /// `function_call` output items, announced by `response.output_item.added`.
 pub fn observe_responses_chunk(text: &str, obs: &mut StreamObservation) {
-    for line in text.lines() {
-        let Some(payload) = line.strip_prefix("data: ") else {
-            continue;
-        };
-        let payload = payload.trim();
-        if payload == "[DONE]" {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
-            continue;
-        };
-        let Some(obj) = v.as_object() else { continue };
+    for_each_data_payload(text, |obj| {
         match obj.get("type").and_then(|t| t.as_str()) {
             Some("response.completed") | Some("response.incomplete") => {
                 if let Some(u) = obj
@@ -458,7 +434,7 @@ pub fn observe_responses_chunk(text: &str, obs: &mut StreamObservation) {
             }
             _ => {}
         }
-    }
+    });
 }
 
 #[cfg(test)]

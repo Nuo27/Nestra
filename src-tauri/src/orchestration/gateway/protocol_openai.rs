@@ -34,7 +34,7 @@ use crate::orchestration::migration;
 use crate::orchestration::router::{self, RouterInputs};
 
 use super::forward::{ForwardFuture, ForwardOutcome};
-use super::stream::{read_request_body, GatewayBody, ObservedUsage};
+use super::stream::{read_request_body, GatewayBody};
 use super::GatewayState;
 
 /// Handle one OpenAI Chat Completions request end-to-end. `agent_id` is the
@@ -163,20 +163,7 @@ pub async fn handle_bytes(
         agent,
         started_at,
         side_effect_risk,
-        move |ctx: &TaskContext| -> super::forward::ResolveFuture {
-            let st = loop_state.clone();
-            let ctx = ctx.clone();
-            Box::pin(async move {
-                let conn = st.db.lock().await;
-                let inputs = RouterInputs {
-                    conn: &conn,
-                    health: &st.health,
-                    quota: &st.quota,
-                    affinity: &st.affinity,
-                };
-                router::resolve(&ctx, &inputs)
-            })
-        },
+        super::forward::make_resolver(loop_state),
         move |ctx: &TaskContext, route: &ResolvedRoute| -> ForwardFuture {
             let route = route.clone();
             let st = forward_state.clone();
@@ -210,110 +197,39 @@ async fn forward_one(
         _ => rewritten,
     };
     let upstream_kind = route.protocol;
-    let upstream_key = match (state.credential_reader)(&route.endpoint_id) {
-        Ok(Some(k)) => k,
-        Ok(None) => {
-            return ForwardOutcome::Unreachable {
-                timeout: false,
-                message: format!("no API key for endpoint '{}'", route.endpoint_id),
-            }
-        }
-        Err(e) => {
-            return ForwardOutcome::Unreachable {
-                timeout: false,
-                message: format!("credential read error: {e}"),
-            }
-        }
-    };
-    // An unparseable base_url is a config error, not a retry opportunity —
-    // the request carries real credentials, so fail closed instead of falling
-    // back to a loopback URL that would receive them.
-    let upstream_url = match crate::protocol_url::parse_upstream_uri(&route.base_url, upstream_kind)
-    {
-        Ok(u) => u,
-        Err(e) => {
-            return ForwardOutcome::Unreachable {
-                timeout: false,
-                message: e,
-            }
-        }
-    };
-    let upstream_req = match build_upstream_request(
-        &upstream_url,
-        &headers,
-        upstream_key,
-        upstream_body,
-        upstream_kind,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            return ForwardOutcome::Unreachable {
-                timeout: false,
-                message: format!("build request: {e}"),
-            }
-        }
-    };
-
-    let client = super::protocol_anthropic::upstream_client();
-    let tuning = super::tuning::snapshot(&state.tuning);
-    let upstream_resp = match tokio::time::timeout(
-        std::time::Duration::from_secs(tuning.headers_timeout_secs),
-        client.request(upstream_req),
+    // Relay + observe reuses the Anthropic relay for the mechanics (it
+    // streams verbatim + observes usage from SSE or buffered JSON); the
+    // OpenAI usage fields differ (prompt_tokens/completion_tokens) but the
+    // shared observer recognizes both vocabularies. The relay's own SSE
+    // accumulator keys off `upstream_kind` (the raw upstream bytes are
+    // chat-wire unless bridged to Responses).
+    let (status, resp_headers, relay) = match super::forward::dial_upstream(
+        state,
+        &route,
+        request_id,
+        |upstream_url, upstream_key| {
+            build_upstream_request(
+                &upstream_url,
+                &headers,
+                upstream_key,
+                upstream_body,
+                upstream_kind,
+            )
+        },
     )
     .await
     {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            return ForwardOutcome::Unreachable {
-                timeout: super::protocol_anthropic::error_is_timeout(&e),
-                message: e.to_string(),
-            };
-        }
-        Err(_) => {
-            return ForwardOutcome::Unreachable {
-                timeout: true,
-                message: format!(
-                    "upstream did not send response headers within {}s",
-                    tuning.headers_timeout_secs
-                ),
-            };
-        }
+        Ok(v) => v,
+        Err(f) => return f,
     };
-
-    let status = upstream_resp.status();
-    let resp_headers = upstream_resp.headers().clone();
-    if !status.is_success() {
-        // The 404-style "page not found" failures are almost always a wrong
-        // dialed URL (off-direction protocol row, bad base layout) — log the
-        // EXACT upstream URL so the failure names itself.
-        tracing::warn!(
-            endpoint = %route.endpoint_id,
-            model = %route.model,
-            upstream = %upstream_url,
-            status = status.as_u16(),
-            "gateway: upstream non-success"
-        );
-    }
-    // Relay + observe. Reuse the Anthropic relay for the mechanics (it streams
-    // verbatim + observes usage from SSE or buffered JSON); the OpenAI usage
-    // fields differ (prompt_tokens/completion_tokens) so we post-process the
-    // observed usage to map them onto our standard input/output fields. The
-    // relay's own SSE accumulator keys off `upstream_kind` (the raw upstream
-    // bytes are chat-wire unless bridged to Responses).
-    let relay = match super::protocol_anthropic::probe_and_relay(
-        state.clone(),
-        &request_id.to_string(),
-        upstream_kind,
-        upstream_resp,
-        &route.endpoint_id,
-        &route.model,
-    )
-    .await
-    {
-        Ok(relay) => relay,
-        Err(in_band_failure) => return in_band_failure,
-    };
-    let usage = relay.usage.map(|u| map_openai_usage(u, &resp_headers));
+    // Usage: the shared observer in `stream::merge_usage_obj` recognizes
+    // BOTH vocabularies (Anthropic + OpenAI field names), so the relay's
+    // captured usage is already correct for the buffered path. Streaming
+    // usage is captured by the relay's SSE accumulator (backfilled after
+    // the stream ends); it is present only when the stream carried a
+    // `usage` chunk — i.e. `stream_options.include_usage` was set by the agent
+    // (the gateway's bridges inject it; a native OpenAI agent's body may not).
+    let usage = relay.usage;
     // Convert a bridged upstream wire back to chat chunks (Responses or
     // Anthropic); native chat passes through verbatim.
     let body = if bridging {
@@ -339,56 +255,18 @@ async fn forward_one(
     }
 }
 
-/// OpenAI usage uses `prompt_tokens` / `completion_tokens` (not
-/// `input_tokens` / `output_tokens`). The shared usage observer in
-/// `stream::merge_usage_obj` now recognizes BOTH vocabularies (Anthropic +
-/// OpenAI field names), so the non-streaming buffered path captures OpenAI
-/// usage automatically and this mapping is an identity passthrough.
-///
-/// Streaming usage is captured by the relay's SSE accumulator (backfilled
-/// after the stream ends); it is present only when the stream carried a
-/// `usage` chunk — i.e. `stream_options.include_usage` was set by the agent
-/// (the gateway's bridges inject it; a native OpenAI agent's body may not).
-fn map_openai_usage(observed: ObservedUsage, _headers: &hyper::HeaderMap) -> ObservedUsage {
-    observed
-}
-
 /// `true` for `/v1/chat/completions` OR `/<agent>/v1/chat/completions` (the
 /// dispatcher routes by agent prefix), and the same forms WITHOUT the `/v1`
 /// segment. The OpenAI-compatible SDK appends `/chat/completions` to the
 /// configured base URL; the base may or may not carry `/v1` (current writers
 /// emit it, older configs lack it). Trailing slash / query tolerated.
 fn path_is_chat_completions(p: &str) -> bool {
-    let path = p.split('?').next().unwrap_or(p);
-    let trimmed = path.trim_end_matches('/');
-    if matches!(trimmed, "/v1/chat/completions" | "/chat/completions") {
-        return true;
-    }
-    if let Some(rest) = trimmed.strip_prefix('/') {
-        if let Some((_agent, r)) = rest.split_once('/') {
-            // `/<agent>/…` — normalize the remainder (NO leading slash).
-            let candidate = format!("/{r}");
-            return matches!(candidate.as_str(), "/v1/chat/completions" | "/chat/completions");
-        }
-    }
-    false
+    super::path_matches(p, &["/v1/chat/completions", "/chat/completions"])
 }
-
 /// `true` for `/v1/models` / `/<agent>/v1/models` and their no-`/v1` forms —
 /// the OpenAI-compatible SDK lists models via `GET {base}/models` at startup.
 pub(super) fn path_is_models(p: &str) -> bool {
-    let path = p.split('?').next().unwrap_or(p);
-    let trimmed = path.trim_end_matches('/');
-    if trimmed == "/v1/models" || trimmed == "/models" {
-        return true;
-    }
-    if let Some(rest) = trimmed.strip_prefix('/') {
-        if let Some((_agent, r)) = rest.split_once('/') {
-            let candidate = format!("/{r}");
-            return candidate == "/v1/models" || candidate == "/models";
-        }
-    }
-    false
+    super::path_matches(p, &["/v1/models", "/models"])
 }
 
 /// `GET /models` answer: the gateway's single alias entry (`nestra` — the id
@@ -437,13 +315,7 @@ async fn models_response(state: &GatewayState, agent_id: &str) -> Response<Gatew
         router::steady_state(&inputs, agent_id, None).and_then(|s| s.abilities)
     };
     let body = models_payload(abilities.as_ref());
-    let mut resp = Response::new(GatewayBody::json_full(body));
-    *resp.status_mut() = StatusCode::OK;
-    resp.headers_mut().insert(
-        hyper::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    resp
+    super::json_response(StatusCode::OK, body)
 }
 
 pub(super) fn parse_body_model(body: &[u8]) -> Option<String> {
@@ -548,16 +420,12 @@ pub(super) fn build_upstream_request(
 }
 
 pub(super) fn error_response(status: StatusCode, message: &str) -> Response<GatewayBody> {
-    let body = serde_json::json!({
-        "error": { "message": message, "type": "nestra_gateway_error" }
-    });
-    let mut resp = Response::new(GatewayBody::json_full(body));
-    *resp.status_mut() = status;
-    resp.headers_mut().insert(
-        hyper::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    resp
+    super::json_response(
+        status,
+        serde_json::json!({
+            "error": { "message": message, "type": "nestra_gateway_error" }
+        }),
+    )
 }
 
 #[cfg(test)]

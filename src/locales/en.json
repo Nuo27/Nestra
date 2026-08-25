@@ -17,9 +17,6 @@
     "confirm": "confirm",
     "reset": "reset",
     "delete": "delete",
-    "reveal": "reveal",
-    "open": "open",
-    "back": "back",
     "exportLogs": "export logs",
     "error": "error",
     "moveUp": "move {{name}} up",
@@ -93,16 +90,6 @@
     "http": "http",
     "tok": "tok",
     "policy": "policy target"
-  },
-  "lifecycle": {
-    "title": "task lifecycle",
-    "born": "born",
-    "routed": "routed",
-    "inflight": "in flight",
-    "migrating": "migrating",
-    "generationBroken": "generation broken",
-    "done": "done",
-    "failed": "failed"
   },
   "sync": {
     "syncError": "sync error",
@@ -685,7 +672,6 @@
   },
   "agentRouting": {
     "titleSuffix": "routing",
-    "help": "Policies map (agent, role) → preferred / fallback / allowed models. The gateway resolves each request: explicit → affinity → capability → fail closed.",
     "steadyTitle": "Current route",
     "steadyHint": "What a new request resolves to under the current policies — a dry-run, no traffic sent. Updates when you save a policy.",
     "steadyContext": "{{n}} context",
@@ -700,17 +686,12 @@
   "agentDetail": {
     "helpGateway": "Direct mode writes the real provider into this agent's config. Routed mode sends traffic through the Nestra gateway — provider/model resolved per task, with quota-aware fallback and migration.",
     "helpPlain": "Installed coding agent.",
-    "policyTitle": "Routing policy",
-    "policyHint": "(agent, role) → preferred / fallback / allowed models · match order: exact role → tier:* → *",
     "tasks": "Tasks",
     "tasksHint": "run → task → request",
     "detectedRoles": "Detected roles",
-    "detectedRolesHint": "subagent roles seen on routed requests · edit policies on the routing page",
     "roleChipTip": "{{count}} requests · edit policy for {{role}}",
     "noGatewayTraffic": "no gateway traffic",
     "noGatewayTrafficHint": "Once this agent is routed and a request flows through, each task appears here with its full route lineage: requested model → resolved provider, route reason, prompt-cache metrics, and generation-broken flags.",
-    "reviewTitle": "Review runtime",
-    "reviewHint": "Spawn isolated review sessions on finished work",
     "usage": "Usage & spend",
     "usageHint": "gateway-observed tokens, last 30 days · spend priced live from the model catalog",
     "usageRequests": "requests",
@@ -967,7 +948,6 @@
   },
   "agentReview": {
     "titleSuffix": "Review",
-    "help": "Spawn an isolated Pi review session on completed work. It routes through the gateway as the pi:reviewer role, watches the review live, and returns a verdict without touching the main context.",
     "newTitle": "New review",
     "newHint": "The review runs as a separate Pi session routed to the pi:reviewer policy's provider.",
     "pickSession": "Pick a Pi session…",

@@ -24,7 +24,7 @@ pub mod pi;
 pub mod zcode;
 
 pub use spec::{
-    AgentKind, AgentSpec, Capability, ConfigRef, DetectSpec, DetectorPath, GatewayWire, SessionRef,
+    AgentSpec, Capability, ConfigRef, DetectSpec, DetectorPath, GatewayWire, SessionRef,
 };
 
 use crate::config_writer::ConfigAdapter;
@@ -49,21 +49,6 @@ pub fn agents() -> &'static [&'static AgentSpec] {
 /// Look up one agent by id.
 pub fn agent_spec(id: &str) -> Option<&'static AgentSpec> {
     AGENTS.iter().find(|a| a.id == id).copied()
-}
-
-/// Convenience: the declared capability for an agent id.
-pub fn capability_for(id: &str) -> Option<&'static Capability> {
-    agent_spec(id).map(|a| &a.capability)
-}
-
-/// Convenience: the detection spec for an agent id.
-pub fn detect_spec_for(id: &str) -> Option<&'static DetectSpec> {
-    agent_spec(id).map(|a| &a.detect)
-}
-
-/// Convenience: the config reference (writer key + path) for an agent id.
-pub fn config_ref_for(id: &str) -> Option<&'static ConfigRef> {
-    agent_spec(id).map(|a| &a.config)
 }
 
 /// Wrap an external library's display-able error as an internal `AppError`.

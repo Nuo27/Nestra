@@ -3,7 +3,6 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FolderOpen, Trash2, Unlink } from "lucide-react";
 import {
-  agentList,
   skillsImportOne,
   skillsList,
   skillsUnmanage,
@@ -12,7 +11,7 @@ import {
   skillsUninstall,
   type SkillMeta,
 } from "../ipc";
-import { useActiveAgents } from "../lib/agents";
+import { useActiveAgents, useAgentLabels } from "../lib/agents";
 import { Card } from "../components/controls/Card";
 import { Button } from "../components/controls/Button";
 import { Page } from "../components/layout/Page";
@@ -23,23 +22,13 @@ import { SyncIndicator } from "../components/feedback/SyncIndicator";
 import { qk } from "../lib/queries";
 import { ErrorBanner } from "../components/feedback/ErrorBanner";
 import { EmptyState } from "../components/feedback/EmptyState";
-import { Skeleton } from "../components/ui/skeleton";
+import { ListSkeletonCard } from "../components/feedback/ListSkeletonCard";
 import { confirmDialog } from "../components/controls/ConfirmDialog";
 import { ButtonGroup } from "../components/controls/ButtonGroup";
 import { extractError } from "../ipc/errors";
 import { useUI } from "../stores/ui";
 
 type Filter = "managed" | "importable" | "builtin";
-
-/// Lookup of display name by agent id, built from the agent list the backend
-/// already returns. Replaces the old hardcoded label map that had to be kept
-/// in sync with the backend by hand.
-function useAgentLabels() {
-  const agentQ = useQuery({ queryKey: qk.agents(), queryFn: agentList });
-  const labels = new Map<string, string>();
-  for (const c of agentQ.data ?? []) labels.set(c.id, c.display_name);
-  return (id: string) => labels.get(id) ?? id;
-}
 
 export function SkillsPage() {
   const { t } = useTranslation();
@@ -164,15 +153,7 @@ export function SkillsPage() {
         items={filters.map((f) => ({ id: f.id, label: f.label }))}
       />
 
-      {q.isLoading && (
-        <Card padding="md">
-          <div className="space-y-3">
-            <Skeleton className="h-4 w-1/4" />
-            <Skeleton className="h-8 w-full" />
-            <Skeleton className="h-8 w-full" />
-          </div>
-        </Card>
-      )}
+      {q.isLoading && <ListSkeletonCard />}
 
       {!q.isLoading && visible.length === 0 && (
         <EmptyState

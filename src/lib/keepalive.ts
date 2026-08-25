@@ -4,7 +4,7 @@ import type { KeepAlivePhase } from "../ipc";
 /// ("keepalive.*") — the shared surface for the provider-card chip, the
 /// Quota-page popover trigger, and the popover content; each renders with
 /// `t(meta.labelKey)` so they never drift.
-export interface KeepAlivePhaseMeta {
+interface KeepAlivePhaseMeta {
   /// Translation key for the short display label.
   labelKey: string;
   /// Text-colour class applied to the icon + label.

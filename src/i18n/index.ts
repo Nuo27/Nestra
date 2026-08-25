@@ -30,7 +30,7 @@ void i18n.use(initReactI18next).init({
 /// Keep the document language in sync with the active locale (a11y + correct
 /// `toLocaleTimeString` behavior). Called after init and on changeLanguage.
 /// Guarded for non-browser environments (vitest runs format.ts in Node).
-export function syncHtmlLang(lang: string) {
+function syncHtmlLang(lang: string) {
   if (typeof document !== "undefined") {
     document.documentElement.lang = lang;
   }

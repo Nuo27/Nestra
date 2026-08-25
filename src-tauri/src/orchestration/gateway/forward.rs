@@ -493,6 +493,134 @@ pub async fn run_with_migration(
     }
 }
 
+/// The resolve closure every protocol handler passes to [`run_with_migration`]:
+/// lock the router's DB view and resolve the ctx. One shared builder instead
+/// of three byte-identical closures.
+pub(super) fn make_resolver(
+    state: GatewayState,
+) -> impl Fn(&TaskContext) -> ResolveFuture {
+    move |ctx: &TaskContext| -> ResolveFuture {
+        let st = state.clone();
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            let conn = st.db.lock().await;
+            let inputs = crate::orchestration::router::RouterInputs {
+                conn: &conn,
+                health: &st.health,
+                quota: &st.quota,
+                affinity: &st.affinity,
+            };
+            crate::orchestration::router::resolve(&ctx, &inputs)
+        })
+    }
+}
+
+/// Shared dial/relay preamble for the protocol handlers' `forward_one`s:
+/// reads the endpoint credential and parses the upstream URL (both fail
+/// closed as `Unreachable` — an unparseable base_url must never fall back
+/// to a loopback URL that would receive real credentials), hands the URL +
+/// key to the protocol's `build` closure (auth style and header set differ
+/// per wire), dials with the tuned headers timeout, logs non-success
+/// statuses with the exact URL, then relays + observes via `probe_and_relay`.
+/// Handlers keep only their wire-specific body prep and back-conversion.
+pub(super) async fn dial_upstream(
+    state: &GatewayState,
+    route: &crate::orchestration::identity::ResolvedRoute,
+    request_id: &str,
+    build: impl FnOnce(hyper::Uri, String) -> AppResult<hyper::Request<GatewayBody>>,
+) -> Result<
+    (
+        StatusCode,
+        HeaderMap,
+        super::protocol_anthropic::RelayOutcome,
+    ),
+    ForwardOutcome,
+> {
+    let upstream_key = match (state.credential_reader)(&route.endpoint_id) {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            return Err(ForwardOutcome::Unreachable {
+                timeout: false,
+                message: format!("no API key for endpoint '{}'", route.endpoint_id),
+            });
+        }
+        Err(e) => {
+            return Err(ForwardOutcome::Unreachable {
+                timeout: false,
+                message: format!("credential read error: {e}"),
+            });
+        }
+    };
+    let upstream_url =
+        match crate::protocol_url::parse_upstream_uri(&route.base_url, route.protocol) {
+            Ok(u) => u,
+            Err(e) => {
+                return Err(ForwardOutcome::Unreachable {
+                    timeout: false,
+                    message: e,
+                });
+            }
+        };
+    let upstream_req = match build(upstream_url.clone(), upstream_key) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(ForwardOutcome::Unreachable {
+                timeout: false,
+                message: format!("build request: {e}"),
+            });
+        }
+    };
+    let client = super::protocol_anthropic::shared_upstream_client().clone();
+    let tuning = super::tuning::snapshot(&state.tuning);
+    let upstream_resp = match tokio::time::timeout(
+        std::time::Duration::from_secs(tuning.headers_timeout_secs),
+        client.request(upstream_req),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            return Err(ForwardOutcome::Unreachable {
+                timeout: super::protocol_anthropic::error_is_timeout(&e),
+                message: e.to_string(),
+            });
+        }
+        Err(_) => {
+            return Err(ForwardOutcome::Unreachable {
+                timeout: true,
+                message: format!(
+                    "upstream did not send response headers within {}s",
+                    tuning.headers_timeout_secs
+                ),
+            });
+        }
+    };
+    let status = upstream_resp.status();
+    let resp_headers = upstream_resp.headers().clone();
+    if !status.is_success() {
+        // The 404-style "page not found" failures are almost always a wrong
+        // dialed URL (off-direction protocol row, bad base layout) — log the
+        // EXACT upstream URL so the failure names itself.
+        tracing::warn!(
+            endpoint = %route.endpoint_id,
+            model = %route.model,
+            upstream = %upstream_url,
+            status = status.as_u16(),
+            "gateway: upstream non-success"
+        );
+    }
+    let relay = super::protocol_anthropic::probe_and_relay(
+        state.clone(),
+        request_id,
+        route.protocol,
+        upstream_resp,
+        &route.endpoint_id,
+        &route.model,
+    )
+    .await?;
+    Ok((status, resp_headers, relay))
+}
+
 /// Rotate `request_id` for the next attempt while preserving the task's
 /// continuity handle (`task_id`) and the request's routing-relevant fields.
 /// Carries parent/native identity through: `new_for_request` zeroes them,
@@ -501,7 +629,6 @@ pub async fn run_with_migration(
 fn rotate_ctx(ctx: &TaskContext, agent_id: &str) -> TaskContext {
     let mut next = TaskContext::new_for_request(agent_id, ctx.task_id, ctx.logical_session_id.clone());
     next.parent_task_id = ctx.parent_task_id;
-    next.native_task_ref = ctx.native_task_ref.clone();
     next.requested_model = ctx.requested_model.clone();
     next.requested_provider = ctx.requested_provider.clone();
     next.required_capabilities = ctx.required_capabilities.clone();
@@ -582,7 +709,7 @@ fn gateway_body_text(body: &GatewayBody) -> String {
 /// Read the migration policy for this task's (agent, role). Returns `true`
 /// when migration is allowed (the default; `routing_policy.migrate_on_quota`
 /// can disable it). Best-effort: on error, defaults to allowing migration.
-pub async fn read_migrate_policy(state: &GatewayState, ctx: &TaskContext) -> bool {
+async fn read_migrate_policy(state: &GatewayState, ctx: &TaskContext) -> bool {
     let conn = state.db.lock().await;
     store::routing_policy_for(&conn, &ctx.agent_id, &ctx.policy_role_key(), ctx.budget_tier.as_ref())
         .map(|p| p.migrate_on_quota)
@@ -597,7 +724,7 @@ fn tool_names_json(names: &Option<std::collections::BTreeMap<String, u64>>) -> O
 /// Record the outcome of one attempt: health + quota update + route_request
 /// row finalize (status, usage, tools, generation_broken, ended_at).
 #[allow(clippy::too_many_arguments)]
-pub async fn record_attempt_outcome(
+async fn record_attempt_outcome(
     state: &GatewayState,
     endpoint_id: &str,
     model: &str,
@@ -840,7 +967,7 @@ async fn observability_write(
 /// Record a migration event (the route_migration row). `from_endpoint_id` is
 /// the endpoint that failed; `to_endpoint_id` is the re-resolved fallback
 /// (`None` when nothing was eligible).
-pub async fn record_migration(
+async fn record_migration(
     state: &GatewayState,
     ctx: &TaskContext,
     from_endpoint_id: &str,

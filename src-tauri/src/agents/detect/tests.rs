@@ -42,12 +42,11 @@ fn empty_agent() -> AgentSpec {
 /// Build a minimal AgentSpec with the given detect data. Probe only reads
 /// `spec.detect`; the other fields are filled with harmless defaults.
 fn test_agent(id: &'static str, detect: DetectSpec) -> AgentSpec {
-    use crate::agents::{AgentKind, Capability, ConfigRef, GatewayWire, SessionRef};
+    use crate::agents::{Capability, ConfigRef, GatewayWire, SessionRef};
     AgentSpec {
         id,
         display_name: id,
         kind: id,
-        agent_kind: AgentKind::Cli,
         detect,
         capability: Capability {
             manageable: false,

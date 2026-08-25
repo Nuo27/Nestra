@@ -13,12 +13,6 @@ use crate::config_writer::ConfigAdapter;
 use crate::mcp::providers::Provider as McpProvider;
 use crate::session::SessionImporter;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentKind {
-    Cli,
-    Desktop,
-}
-
 /// The inbound wire protocol an agent speaks when pointed at the Nestra
 /// gateway. Gateway dispatch derives from this — one enum, no per-agent
 /// match arms in the gateway.
@@ -137,7 +131,6 @@ pub struct AgentSpec {
     pub display_name: &'static str,
     /// Stored as the `kind` column in the `cli` DB table.
     pub kind: &'static str,
-    pub agent_kind: AgentKind,
     pub detect: DetectSpec,
     pub capability: Capability,
     pub config: ConfigRef,

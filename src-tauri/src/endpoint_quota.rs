@@ -42,22 +42,6 @@ pub struct QuotaItem {
     pub is_balance: bool,
 }
 
-/// Pick the absolute UTC reset time (ms) of the 5-hour quota window from a
-/// quota response. Returns `None` if no `5h` item is present.
-///
-/// Recognised names:
-/// - Z.ai `"5h-token"`
-/// - MiniMax new shape `"{model}/5h"`
-/// - MiniMax flat shape `"5h-token"` (carries no reset timestamp from the
-///   wire; caller falls back to the next fetch after the POST succeeds).
-#[cfg(test)]
-pub fn pick_five_hour_expiry(items: &[QuotaItem]) -> Option<i64> {
-    items
-        .iter()
-        .find(|i| i.name == "5h-token" || i.name.ends_with("/5h"))
-        .and_then(|i| i.resets_at_ms)
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct EndpointQuota {
     pub ok: bool,

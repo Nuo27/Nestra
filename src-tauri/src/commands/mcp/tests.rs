@@ -11,7 +11,7 @@ fn seed_usage_env(conn: &rusqlite::Connection) {
         )
         .unwrap();
     }
-    let mut insert_row = |started: i64, tools: &str| {
+    let insert_row = |started: i64, tools: &str| {
         conn.execute(
             "INSERT INTO task (id, lifecycle, started_at) VALUES (?1,'done',?2)",
             rusqlite::params![format!("t-{started}"), started],

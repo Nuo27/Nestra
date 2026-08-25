@@ -55,8 +55,6 @@ export interface Session {
 // ---- Session (universal, persisted store) ----
 export const sessionList = (providerId?: string, search?: string, limit = 300) =>
   invoke<Session[]>("session_list", { providerId, search, limit });
-export const sessionSearch = (query: string, limit = 50) =>
-  invoke<Session[]>("session_search", { query, limit });
 export const sessionChildren = (providerId: string, parentId: string) =>
   invoke<Session[]>("session_children", { providerId, parentId });
 export const sessionGet = (providerId: string, id: string) =>
@@ -64,8 +62,6 @@ export const sessionGet = (providerId: string, id: string) =>
 export const sessionRead = (providerId: string, id: string, offset = 0, limit = 0) =>
   invoke<MessageWindow>("session_read", { providerId, id, offset, limit });
 export const sessionRefresh = () => invoke<void>("session_refresh");
-export const sessionExport = (providerId: string, id: string) =>
-  invoke<string>("session_export", { providerId, id });
 // One-click open in a new terminal at the session's project dir, using the
 // session's native resume command (e.g. `claude --resume <id>`).
 export const sessionOpen = (providerId: string, id: string) =>

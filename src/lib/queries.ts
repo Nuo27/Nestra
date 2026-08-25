@@ -38,22 +38,10 @@ export const qk = {
   // Orchestration. Routing policy, quota state, and task summaries are
   // consumed by the merged Agents surface (agent cards + /agents/$id detail).
   routingPolicies: (agentId: string) => ["routing-policy", agentId] as const,
-  logicalSession: (agentId: string, id: string) =>
-    ["logical-session", agentId, id] as const,
-  routeHistory: (taskId: string) => ["route-request", "history", taskId] as const,
-  migrations: (taskId: string) => ["route-migration", taskId] as const,
   detectedRoles: (agentId: string) => ["detected-roles", agentId] as const,
-  modelCatalog: (endpointId: string) =>
-    ["model-catalog", endpointId] as const,
-  // "all rows" views. A DISTINCT top-level prefix from `["model-catalog", id]`:
-  // the old `["model-catalog", "all"]` collided with a user-named endpoint
-  // whose id is literally "all" — the two queries would share cache entries
-  // and cross-talk.
-  modelCatalogAll: () => ["model-catalog-all"] as const,
   // Gateway Service control surface (the process, not routing policy).
   gatewayStatus: () => ["gateway", "status"] as const,
   gatewayActivity: () => ["gateway", "activity"] as const,
-  gatewayToken: () => ["gateway", "token"] as const,
   // Gateway log viewer (JSON twin layer): file list, filtered entries,
   // active verbosity preset.
   logFiles: () => ["diag", "log-files"] as const,
@@ -66,7 +54,7 @@ export const qk = {
 /// Query key prefixes mutated by each mutation family. Used by `invalidate`
 /// as a prefix match so one call clears list + detail cache (e.g. a skills
 /// toggle invalidates the skills list and any open agent config).
-export const INVALIDATION: Record<string, readonly string[]> = {
+const INVALIDATION: Record<string, readonly string[]> = {
   endpoint: ["endpoint", "endpoints", "endpoint-quota"],
   agent: ["agents", "agent-config"],
   macro: ["skills", "mcp", "mcp-import", "mcp-usage"],

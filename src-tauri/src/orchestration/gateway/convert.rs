@@ -165,6 +165,121 @@ pub(super) fn system_text(v: &Value) -> String {
     }
 }
 
+/// Flatten a `tool_result` / chat tool-message `content` field (string, or
+/// an array of text parts) into plain text joined by newlines; anything
+/// else is the empty string.
+pub(super) fn tool_content_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// OpenAI Chat usage object → Anthropic usage map: input = prompt −
+/// cache_read − cache_creation (saturating), cache fields only when
+/// nonzero. Shared by the buffered `openai_to_anthropic` and the SSE
+/// converter's final-frame usage fold.
+pub(super) fn usage_anthropic_from_chat(usage: &Value) -> Map<String, Value> {
+    let prompt = usage.get("prompt_tokens").and_then(Value::as_u64);
+    let completion = usage.get("completion_tokens").and_then(Value::as_u64);
+    let cached = usage
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_write = usage
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cache_write_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mut m = Map::new();
+    if let Some(p) = prompt {
+        m.insert("input_tokens".into(), Value::from(p.saturating_sub(cached + cache_write)));
+    }
+    if let Some(c) = completion {
+        m.insert("output_tokens".into(), Value::from(c));
+    }
+    if cached > 0 {
+        m.insert("cache_read_input_tokens".into(), Value::from(cached));
+    }
+    if cache_write > 0 {
+        m.insert("cache_creation_input_tokens".into(), Value::from(cache_write));
+    }
+    m
+}
+
+/// Anthropic usage object → OpenAI Chat usage (`prompt_tokens` /
+/// `completion_tokens` / `prompt_tokens_details.cached_tokens`). `None`
+/// when the source carries no token counts — callers then omit `usage`.
+pub(super) fn chat_usage_from_anthropic(u: &Value) -> Option<Value> {
+    let mut usage = Map::new();
+    if let Some(i) = u.get("input_tokens").and_then(Value::as_u64) {
+        usage.insert("prompt_tokens".into(), Value::from(i));
+    }
+    if let Some(o) = u.get("output_tokens").and_then(Value::as_u64) {
+        usage.insert("completion_tokens".into(), Value::from(o));
+    }
+    let cached = u.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let cache_write = u.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+    if cached > 0 || cache_write > 0 {
+        let mut details = Map::new();
+        if cached > 0 {
+            details.insert("cached_tokens".into(), Value::from(cached));
+        }
+        usage.insert("prompt_tokens_details".into(), Value::Object(details));
+    }
+    if usage.is_empty() {
+        None
+    } else {
+        Some(Value::Object(usage))
+    }
+}
+
+/// Responses API usage object → Anthropic usage (input excludes cached
+/// tokens, saturating). Always returns a full object; callers that may omit
+/// `usage` gate on the source field themselves.
+pub(super) fn usage_anthropic_from_responses(usage: &Value) -> Value {
+    let input = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let output = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let cached = usage
+        .get("input_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mut u = Map::new();
+    u.insert("input_tokens".into(), Value::from(input.saturating_sub(cached)));
+    u.insert("output_tokens".into(), Value::from(output));
+    if cached > 0 {
+        u.insert("cache_read_input_tokens".into(), Value::from(cached));
+    }
+    Value::Object(u)
+}
+
+/// OpenAI `finish_reason` → Anthropic `stop_reason`.
+pub(super) fn finish_reason_to_stop_reason(r: &str) -> &'static str {
+    match r {
+        "stop" => "end_turn",
+        "length" => "max_tokens",
+        "tool_calls" => "tool_use",
+        "content_filter" => "end_turn",
+        _ => "end_turn",
+    }
+}
+
+/// Anthropic `stop_reason` → OpenAI `finish_reason`.
+pub(super) fn stop_reason_to_finish_reason(r: &str) -> &'static str {
+    match r {
+        "tool_use" => "tool_calls",
+        "max_tokens" => "length",
+        _ => "stop",
+    }
+}
+
 /// Map one Anthropic content block list into OpenAI parts: text blocks
 /// accumulate into `text_parts`, `tool_use` blocks become `tool_calls`
 /// entries, `tool_result` blocks become `role:"tool"` messages.
@@ -205,19 +320,10 @@ fn convert_content_blocks(
                 if let Some(id) = block.get("tool_use_id").and_then(Value::as_str) {
                     msg.insert("tool_call_id".into(), Value::String(id.into()));
                 }
-                let content = match block.get("content") {
-                    Some(Value::String(s)) => Value::String(s.clone()),
-                    Some(Value::Array(parts)) => {
-                        let text = parts
-                            .iter()
-                            .filter_map(|p| p.get("text").and_then(Value::as_str))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        Value::String(text)
-                    }
-                    _ => Value::String(String::new()),
-                };
-                msg.insert("content".into(), content);
+                msg.insert(
+                    "content".into(),
+                    Value::String(tool_content_text(block.get("content"))),
+                );
                 tool_msgs.push(Value::Object(msg));
             }
             _ => {}
@@ -482,43 +588,15 @@ pub fn openai_to_anthropic(body: &[u8]) -> Bytes {
 
     // finish_reason → stop_reason.
     let stop_reason = match finish_reason.as_deref() {
-        Some("stop") => "end_turn",
-        Some("length") => "max_tokens",
-        Some("tool_calls") => "tool_use",
-        Some("content_filter") => "end_turn",
         None if has_tool_use => "tool_use",
+        Some(r) => finish_reason_to_stop_reason(r),
         _ => "end_turn",
     };
     msg.insert("stop_reason".into(), Value::String(stop_reason.into()));
 
     // usage: input = prompt − cache_read − cache_creation (saturating).
     if let Some(usage) = obj.get("usage") {
-        let prompt = usage.get("prompt_tokens").and_then(Value::as_u64);
-        let completion = usage.get("completion_tokens").and_then(Value::as_u64);
-        let cached = usage
-            .get("prompt_tokens_details")
-            .and_then(|d| d.get("cached_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let cache_write = usage
-            .get("prompt_tokens_details")
-            .and_then(|d| d.get("cache_write_tokens"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let mut u = Map::new();
-        if let Some(p) = prompt {
-            u.insert("input_tokens".into(), Value::from(p.saturating_sub(cached + cache_write)));
-        }
-        if let Some(c) = completion {
-            u.insert("output_tokens".into(), Value::from(c));
-        }
-        if cached > 0 {
-            u.insert("cache_read_input_tokens".into(), Value::from(cached));
-        }
-        if cache_write > 0 {
-            u.insert("cache_creation_input_tokens".into(), Value::from(cache_write));
-        }
-        msg.insert("usage".into(), Value::Object(u));
+        msg.insert("usage".into(), Value::Object(usage_anthropic_from_chat(usage)));
     }
 
     Bytes::from(serde_json::to_vec(&msg).unwrap_or_else(|_| body.to_vec()))
@@ -634,16 +712,10 @@ pub fn chat_to_anthropic(body: &[u8]) -> Bytes {
                     let mut tb = Map::new();
                     tb.insert("type".into(), Value::String("tool_result".into()));
                     tb.insert("tool_use_id".into(), m.get("tool_call_id").cloned().unwrap_or(Value::Null));
-                    let text = match m.get("content") {
-                        Some(Value::String(s)) => s.clone(),
-                        Some(Value::Array(parts)) => parts
-                            .iter()
-                            .filter_map(|p| p.get("text").and_then(Value::as_str))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        _ => String::new(),
-                    };
-                    tb.insert("content".into(), Value::String(text));
+                    tb.insert(
+                        "content".into(),
+                        Value::String(tool_content_text(m.get("content"))),
+                    );
                     let mut mm = Map::new();
                     mm.insert("role".into(), Value::String("user".into()));
                     mm.insert("content".into(), Value::Array(vec![Value::Object(tb)]));
@@ -751,11 +823,7 @@ pub fn anthropic_to_chat(body: &[u8]) -> Bytes {
     let mut tool_calls: Vec<Value> = Vec::new();
     let mut stop_reason: Option<String> = None;
     if let Some(reason) = obj.get("stop_reason").and_then(Value::as_str) {
-        stop_reason = Some(match reason {
-            "tool_use" => "tool_calls".to_string(),
-            "max_tokens" => "length".to_string(),
-            _ => "stop".to_string(),
-        });
+        stop_reason = Some(stop_reason_to_finish_reason(reason).to_string());
     }
 
     if let Some(blocks) = obj.get("content").and_then(Value::as_array) {
@@ -805,26 +873,7 @@ pub fn anthropic_to_chat(body: &[u8]) -> Bytes {
         Value::String(stop_reason.unwrap_or_else(|| "stop".into())),
     );
 
-    let mut usage = Map::new();
-    if let Some(u) = obj.get("usage") {
-        let input = u.get("input_tokens").and_then(Value::as_u64);
-        let output = u.get("output_tokens").and_then(Value::as_u64);
-        if let Some(i) = input {
-            usage.insert("prompt_tokens".into(), Value::from(i));
-        }
-        if let Some(o) = output {
-            usage.insert("completion_tokens".into(), Value::from(o));
-        }
-        let cached = u.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0);
-        let cache_write = u.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
-        if cached > 0 || cache_write > 0 {
-            let mut details = Map::new();
-            if cached > 0 {
-                details.insert("cached_tokens".into(), Value::from(cached));
-            }
-            usage.insert("prompt_tokens_details".into(), Value::Object(details));
-        }
-    }
+    let usage = obj.get("usage").and_then(chat_usage_from_anthropic);
 
     let mut out = Map::new();
     if let Some(id) = obj.get("id").cloned() {
@@ -835,8 +884,8 @@ pub fn anthropic_to_chat(body: &[u8]) -> Bytes {
     }
     out.insert("object".into(), Value::String("chat.completion".into()));
     out.insert("choices".into(), Value::Array(vec![Value::Object(choice)]));
-    if !usage.is_empty() {
-        out.insert("usage".into(), Value::Object(usage));
+    if let Some(usage) = usage {
+        out.insert("usage".into(), usage);
     }
 
     Bytes::from(serde_json::to_vec(&out).unwrap_or_else(|_| body.to_vec()))
