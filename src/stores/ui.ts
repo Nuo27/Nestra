@@ -31,6 +31,9 @@ interface UIState {
   quotaIntervalSec: number;
   setQuotaAuto: (v: boolean) => void;
   setQuotaIntervalSec: (v: number) => void;
+  /// Gateway log viewer auto-refresh (survives tab switches + reloads).
+  logAuto: boolean;
+  setLogAuto: (v: boolean) => void;
   /// In-memory (NOT persisted) quota snapshots keyed by endpoint id. Survives
   /// route unmount so switching back to the Quota tab shows the last bars
   /// instantly instead of re-fetching on mount.
@@ -73,6 +76,8 @@ export const useUI = create<UIState>()(
       quotaIntervalSec: 10,
       setQuotaAuto: (v) => set({ quotaAuto: v }),
       setQuotaIntervalSec: (v) => set({ quotaIntervalSec: v }),
+      logAuto: false,
+      setLogAuto: (v) => set({ logAuto: v }),
       quotaCache: {},
       setQuotaCache: (id, data) =>
         set((s) => ({ quotaCache: { ...s.quotaCache, [id]: data } })),
@@ -105,6 +110,7 @@ export const useUI = create<UIState>()(
         sessionsListWidth: s.sessionsListWidth,
         quotaAuto: s.quotaAuto,
         quotaIntervalSec: s.quotaIntervalSec,
+        logAuto: s.logAuto,
         theme: s.theme,
         language: s.language,
         persistQueryCache: s.persistQueryCache,

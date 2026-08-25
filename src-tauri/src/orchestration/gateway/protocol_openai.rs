@@ -140,6 +140,16 @@ pub async fn handle_bytes(
     // State 3: a request declaring tools/functions may have executed a tool
     // upstream — never blind-retry it (the loop surfaces instead).
     let side_effect_risk = migration::body_has_side_effect_risk(&body_bytes);
+    tracing::info!(
+        task = %ctx.task_id,
+        agent = agent_id,
+        wire = "openai",
+        bytes = body_bytes.len(),
+        model = ?ctx.requested_model,
+        role = %ctx.subagent_role.as_policy_key(),
+        side_effect = side_effect_risk,
+        "gw.request inbound"
+    );
 
     let agent = agent_id.to_string();
     let loop_state = state.clone();
@@ -522,6 +532,15 @@ pub(super) fn build_upstream_request(
         builder = builder.header("HTTP-Referer", APP_REFERER);
         builder = builder.header("X-Title", APP_TITLE);
     }
+    // Debug-only wire evidence (see gateway/trace.rs): the URL and the
+    // CONVERTED body actually sent upstream. Never the headers — the
+    // credential lives there.
+    tracing::debug!(
+        url = %url,
+        bytes = body.len(),
+        body = %super::trace::capture(&body),
+        "gw.upstream request"
+    );
     let req = builder
         .body(GatewayBody::Full(Full::new(body)))
         .map_err(|e| AppError::Internal(format!("build upstream request: {e}")))?;

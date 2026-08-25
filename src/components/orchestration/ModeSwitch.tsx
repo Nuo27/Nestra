@@ -8,30 +8,17 @@ import { qk } from "../../lib/queries";
 import { SegmentedControl } from "../controls/SegmentedControl";
 import { Tip } from "../ui/tooltip";
 
-/// Mode switch for the two per-agent config modes:
-///   Direct — Nestra writes the real upstream URL + key into the agent's
-///           config (the agent talks straight to the bound provider).
-///   Routed — Nestra writes a stable gateway alias instead; the gateway
-///           resolves provider/model per task, observes quota, migrates on
-///           failure. Provider switching no longer rewrites the config.
-///
-/// Rendered on the shared `SegmentedControl` (the one sanctioned boxed
-/// single-select, see DESIGN.md §5). Backed by the same `setting_kv` flag
-/// (`orchestration.gateway.<id>`) the agent card and the detail page both
-/// read, so toggling in either place is reflected everywhere instantly.
-/// Hidden for agents without a gateway-capable writer.
-export function ModeSwitch({
-  agentId,
-  supportsGateway,
-}: {
-  agentId: string;
-  supportsGateway: boolean;
-}) {
+/// Per-agent mode state + toggle mutation (the shared `setting_kv` flag
+/// `orchestration.gateway.<id>`). One source of truth for ModeSwitch and
+/// the cockpit's inactive-mode summary card — the flag, the liveness gate
+/// (Routed is blocked while the gateway service is down), and the
+/// invalidation/toast side effects live here so the two controls can never
+/// drift apart.
+export function useAgentModeToggle(agentId: string, supported: boolean) {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useUI((s) => s.pushToast);
 
-  const supported = supportsGateway;
   const enabledQ = useQuery({
     queryKey: ["orchestration", "gateway-flag", agentId],
     queryFn: () => agentGatewayEnabled(agentId),
@@ -60,10 +47,50 @@ export function ModeSwitch({
       toast(t("orchestration.modeFailed", { err: extractError(e) ?? String(e) }), "error"),
   });
 
-  if (!supported) return null;
+  const routed = enabledQ.data ?? false;
+  // `busy` includes isFetching: without it, a stale-window refetch after a
+  // toggle lets the user double-flip while the mutation is still in flight.
+  const busy = enabledQ.isLoading || enabledQ.isFetching || toggleMut.isPending;
+  // Effective mode: ROUTED requires both intent AND a running gateway.
+  const blocked = routed && !gatewayRunning && !gwQ.isLoading;
+
+  return {
+    routed,
+    gatewayRunning,
+    busy,
+    blocked,
+    error: enabledQ.isError,
+    toggle: toggleMut.mutate,
+  };
+}
+
+/// Mode switch for the two per-agent config modes:
+///   Direct — Nestra writes the real upstream URL + key into the agent's
+///           config (the agent talks straight to the bound provider).
+///   Routed — Nestra writes a stable gateway alias instead; the gateway
+///           resolves provider/model per task, observes quota, migrates on
+///           failure. Provider switching no longer rewrites the config.
+///
+/// Rendered on the shared `SegmentedControl` (the one sanctioned boxed
+/// single-select, see DESIGN.md §5). State comes from
+/// [`useAgentModeToggle`] — the same hook the cockpit summary card uses, so
+/// toggling in either place is reflected everywhere instantly. Hidden for
+/// agents without a gateway-capable writer.
+export function ModeSwitch({
+  agentId,
+  supportsGateway,
+}: {
+  agentId: string;
+  supportsGateway: boolean;
+}) {
+  const { t } = useTranslation();
+  const { routed, gatewayRunning, busy, blocked, error, toggle } =
+    useAgentModeToggle(agentId, supportsGateway);
+
+  if (!supportsGateway) return null;
   // A flag-read failure must not silently render "Direct" — the user would
   // toggle into a mode the backend can't honor. Disable the control instead.
-  if (enabledQ.isError) {
+  if (error) {
     return (
       <Tip content={t("orchestration.modeLoadFailed")}>
         <span className="font-mono text-2xs text-warning">
@@ -72,12 +99,6 @@ export function ModeSwitch({
       </Tip>
     );
   }
-  const routed = enabledQ.data ?? false;
-  // `busy` includes isFetching: without it, a stale-window refetch after a
-  // toggle lets the user double-flip while the mutation is still in flight.
-  const busy = enabledQ.isLoading || enabledQ.isFetching || toggleMut.isPending;
-  // Effective mode: ROUTED requires both intent AND a running gateway.
-  const blocked = routed && !gatewayRunning && !gwQ.isLoading;
 
   return (
     <div className="flex flex-col gap-1">
@@ -87,7 +108,7 @@ export function ModeSwitch({
         value={routed ? "routed" : "direct"}
         onChange={(next) => {
           const v = next === "routed";
-          if (v !== routed) toggleMut.mutate(v);
+          if (v !== routed) toggle(v);
         }}
         items={[
           { value: "direct", label: t("orchestration.modeDirect"), disabled: busy },

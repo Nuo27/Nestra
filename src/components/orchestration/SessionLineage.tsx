@@ -51,7 +51,7 @@ function SessionTaskRow({
     enabled: open,
   });
   return (
-    <div className="rounded border border-border bg-inset/60">
+    <div className="border border-border bg-inset">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}

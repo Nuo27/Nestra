@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useUI } from "../../stores/ui";
 import { Palette } from "./Palette";
+import { QuotaAutoDriver } from "./QuotaAutoDriver";
 import { ThemeToggle } from "./ThemeToggle";
 import { Toaster } from "../feedback/Toaster";
 import { TooltipProvider, Tip } from "../ui/tooltip";
@@ -252,6 +253,7 @@ export function RootShell() {
         </div>
 
         {paletteOpen && <Palette />}
+        <QuotaAutoDriver />
         <Toaster />
       </div>
     </TooltipProvider>

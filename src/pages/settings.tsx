@@ -326,19 +326,10 @@ export function SettingsPage() {
           <p>{t("settings.licensesApp")}</p>
           <div>
             <div className="text-fg mb-1">{t("settings.licensesFonts")}</div>
-            <ul className="space-y-1">
-              <li>
-                <span className="text-fg">Geist</span> — Copyright 2024 The Geist
-                Project Authors.
-              </li>
-              <li>
-                <span className="text-fg">JetBrains Mono</span> — Copyright 2020
-                The JetBrains Mono Project Authors.
-              </li>
-              <li>
-                <span className="text-fg">Sarasa Mono SC</span> — Copyright
-                2015–2025 Renzhi Li.
-              </li>
+<ul className="space-y-1">
+              <li>{t("settings.licensesFontGeist")}</li>
+              <li>{t("settings.licensesFontJetBrainsMono")}</li>
+              <li>{t("settings.licensesFontSarasa")}</li>
             </ul>
           </div>
           <p>{t("settings.licensesModelsDev")}</p>

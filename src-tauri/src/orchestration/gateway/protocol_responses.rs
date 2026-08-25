@@ -88,6 +88,16 @@ pub async fn handle_bytes(
             ProviderKind::Responses,
         );
     let side_effect_risk = migration::body_has_side_effect_risk(&body_bytes);
+    tracing::info!(
+        task = %ctx.task_id,
+        agent = agent_id,
+        wire = "responses",
+        bytes = body_bytes.len(),
+        model = ?ctx.requested_model,
+        role = %ctx.subagent_role.as_policy_key(),
+        side_effect = side_effect_risk,
+        "gw.request inbound"
+    );
 
     let agent = agent_id.to_string();
     let loop_state = state.clone();

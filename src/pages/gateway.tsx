@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
+import { ScrollText } from "lucide-react";
 import {
   gatewayAutopickPort,
   gatewayGetStatus,
@@ -124,7 +125,7 @@ export function GatewayPage() {
   const state: GatewayRuntimeState = status?.state ?? "stopped";
 
   return (
-    <Page>
+    <Page width="wide">
       <PageHeader
         title={t("gateway.title")}
         info={t("gateway.help")}
@@ -332,7 +333,11 @@ function RuntimeCard({
       }
     >
       <div className="flex flex-wrap items-center gap-3">
-        <Badge tone={tone} variant="soft" className="font-mono text-2xs">
+        <Badge
+          tone={tone}
+          variant="soft"
+          className={`font-mono text-2xs ${state === "starting" ? "animate-pulse" : ""}`}
+        >
           {state === "running" ? "● " : state === "error" ? "! " : "○ "}
           {label}
         </Badge>
@@ -390,13 +395,26 @@ function ConnectedAgents({
   );
 }
 
+/// Recent routed requests — the compact projection of the log surface. The
+/// card header's icon button opens the full log viewer (`/gateway/logs`),
+/// where the same traffic is visible with per-request correlation.
 function ActivityCard() {
   const { t } = useTranslation();
   const statusQ = useQuery({ queryKey: qk.gatewayStatus(), queryFn: gatewayGetStatus });
   const activityQ = useQuery({ queryKey: qk.gatewayActivity(), queryFn: () => gatewayRecentActivity(8) });
   const stats = statusQ.data?.stats;
   return (
-    <Card title={t("gateway.activityCard")} description={t("gateway.activityCardDesc")}>
+    <Card
+      title={t("gateway.activityCard")}
+      description={t("gateway.activityCardDesc")}
+      action={
+        <Link to="/gateway/logs">
+          <Button size="sm" variant="ghost" aria-label={t("gateway.viewLogs")} title={t("gateway.viewLogs")}>
+            <ScrollText data-icon size={14} />
+          </Button>
+        </Link>
+      }
+    >
       <div className="grid grid-cols-3 gap-2 text-2xs text-subtle">
         <Field label={t("gateway.totalRequests")} value={String(stats?.total_requests ?? 0)} />
         <Field label={t("gateway.lastRequest")} value={stats?.last_request_at ? fmtTime(stats.last_request_at) : "—"} />
@@ -408,6 +426,7 @@ function ActivityCard() {
         ) : (activityQ.data?.length ?? 0) === 0 ? (
           <div className="prose text-xs text-subtle">{t("gateway.noActivity")}</div>
         ) : (
+        <div className="animate-in fade-in duration-fast">
           <ul className="space-y-1 font-mono text-2xs text-subtle">
             {activityQ.data!.map((r) => (
               <li key={r.request_id} className="flex items-center gap-2">
@@ -420,6 +439,7 @@ function ActivityCard() {
               </li>
             ))}
           </ul>
+        </div>
         )}
       </div>
     </Card>

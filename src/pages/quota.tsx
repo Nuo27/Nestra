@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Settings2 } from "lucide-react";
 import {
@@ -21,7 +21,7 @@ import { useUI } from "../stores/ui";
 import { qk } from "../lib/queries";
 import { useQuotaRefresh } from "../lib/quotaRefresh";
 import { useNow } from "../lib/useNow";
-import { BUILTIN_LABEL, planLabel, shouldCatchUpRefresh } from "../lib/quota";
+import { BUILTIN_LABEL, planLabel } from "../lib/quota";
 
 export function QuotaPage({ id }: { id: string }) {
   const { t } = useTranslation();
@@ -77,11 +77,11 @@ function QuotaCard({ endpoint }: { endpoint: EndpointInfo }) {
     gcTime: 30 * 60_000,
     // Auto-refresh is NOT driven by a TanStack interval: a JS interval is
     // throttled/frozen when the window is hidden, so it can't be the refresh
-    // authority. The single refresh mechanism is the absolute deadline below
-    // (`nextRefreshAt`) checked against the UI-only clock — which re-syncs on
-    // window focus/visibility regain. No refetchInterval, no
-    // refetchIntervalInBackground, no refetchOnWindowFocus: one authority,
-    // no duplicate fetches from overlapping mechanisms.
+    // authority. The single refresh mechanism is the app-level
+    // QuotaAutoDriver (RootShell), which fires catch-up fetches against an
+    // absolute deadline (`dataUpdatedAt + interval`) wherever the endpoint
+    // is visible. No refetchInterval, no refetchIntervalInBackground, no
+    // refetchOnWindowFocus: one authority, no duplicate fetches.
     refetchOnMount: false,
   });
   const data = q.data;
@@ -125,22 +125,10 @@ function QuotaCard({ endpoint }: { endpoint: EndpointInfo }) {
   // not-yet-fired tick or a paused interval must not stick the label on.
   const sending = auto && shown && q.isFetching;
 
-  // Single refresh authority: when the deadline has passed and no fetch is in
-  // flight, fire exactly one catch-up fetch (see `shouldCatchUpRefresh` for
-  // the throttle semantics — no hammering on failed fetches, retry on the
-  // countdown cadence, and a success advances the deadline to silence it).
-  const lastAttemptAt = useRef(0);
-  // Re-arming auto-refresh must be allowed to catch up immediately (a prior
-  // throttled attempt must not block a fresh arm). Reset on every auto flip.
-  useEffect(() => {
-    if (auto) lastAttemptAt.current = 0;
-  }, [auto]);
-  useEffect(() => {
-    if (shouldCatchUpRefresh({ auto, isFetching: q.isFetching, nextRefreshAt, now, lastAttemptAt: lastAttemptAt.current, intervalSec })) {
-      lastAttemptAt.current = now;
-      qc.invalidateQueries({ queryKey: qk.endpointQuota(endpoint.id) });
-    }
-  }, [now, nextRefreshAt, intervalSec, auto, q.isFetching, qc, endpoint.id]);
+  // Auto-refresh is owned by the app-level QuotaAutoDriver (RootShell) —
+  // this page is purely presentational: the countdown below renders from
+  // the shared cache's `dataUpdatedAt`, which the driver advances wherever
+  // the endpoint is visible (here or on a provider card).
 
   const [settingsOpen, setSettingsOpen] = useState(false);
 

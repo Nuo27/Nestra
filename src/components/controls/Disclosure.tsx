@@ -60,11 +60,27 @@ export function Disclosure({
         {/* div, not span: header children can be block-level (div/section). */}
         <div className="min-w-0 flex-1">{header}</div>
       </button>
-      {isOpen && (
-        <div id={panelId} role="region" aria-label="disclosure content">
+      {/*
+       * CSS grid `0fr ↔ 1fr` row-template animation is the only CSS-only
+       * height transition that doesn't need JS measurement (DESIGN.md §11).
+       * The inner panel is always mounted so we get the exit animation;
+       * overflow-hidden on the wrapper clips it. `aria-hidden` toggles for
+       * assistive tech without affecting the transition.
+       */}
+      <div
+        className="grid transition-[grid-template-rows] duration-150 ease-out"
+        style={{ gridTemplateRows: isOpen ? "1fr" : "0fr" }}
+      >
+        <div
+          id={panelId}
+          role="region"
+          aria-label="disclosure content"
+          aria-hidden={!isOpen}
+          className="min-h-0 overflow-hidden"
+        >
           {children}
         </div>
-      )}
+      </div>
     </div>
   )
 }

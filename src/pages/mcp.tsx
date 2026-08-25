@@ -104,8 +104,12 @@ export function McpPage() {
   const setStateMut = useMutation({
     mutationFn: (v: { id: string; agent: string; state: AgentState }) =>
       mcpSetState(v.id, v.agent, v.state),
+    // Invalidate on settle, not success: the backend persists the DB row
+    // before syncing agent configs, so even a failed sync (e.g. a config
+    // file that isn't valid JSON) must refresh the list — otherwise the
+    // segment sticks on its old state and reads as "can't toggle".
+    onSettled: () => invalidate(),
     onSuccess: (_d, vars) => {
-      invalidate();
       const agent = labelForAgent(vars.agent);
       toast(
         vars.state === "enabled"

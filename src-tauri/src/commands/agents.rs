@@ -96,13 +96,14 @@ fn agent_to_info(row: AgentRow) -> AgentInfo {
         AgentSource::Auto
     };
     // Capability + manageability + adapter-derived fields come from the AGENTS
-    // registry (single source of truth). Unknown ids (rows no longer in
-    // AGENTS) get neutral defaults — purely defensive: `list_agent_infos`
-    // filters non-registry rows out before this runs, and `detect_all_agents`
-    // never re-probes ids without a detector.
+    // registry (single source of truth). `effective_capability` applies each
+    // spec's runtime gate (pi's MCP adapter) to the static declaration.
+    // Unknown ids (rows no longer in AGENTS) get neutral defaults — purely
+    // defensive: `list_agent_infos` filters non-registry rows out before this
+    // runs, and `detect_all_agents` never re-probes ids without a detector.
     let spec = crate::agents::agent_spec(&row.id);
     let manageable = spec.map(|s| s.manageable()).unwrap_or(false);
-    let capability = spec.map(|s| s.capability).unwrap_or(crate::agents::Capability {
+    let capability = spec.map(|s| s.effective_capability()).unwrap_or(crate::agents::Capability {
         manageable: false,
         supports_provider_configuration: false,
         supports_multiple_providers: false,

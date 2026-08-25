@@ -11,7 +11,7 @@ export function AgentKindBadge({ id }: { id: string }) {
       : null;
   if (!label) return null;
   return (
-    <span className="rounded-sm border border-border bg-inset px-1 text-2xs leading-4 text-subtle">
+    <span className="border border-border bg-inset px-1 text-2xs leading-4 text-subtle">
       {label}
     </span>
   );

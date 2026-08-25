@@ -1,22 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
 import { ShieldCheck, Play, Square, RefreshCw } from "lucide-react";
 
-import { Page } from "../components/layout/Page";
-import { BackLink, PageHeader, SectionLabel } from "../components/layout/PageHeader";
+import { SectionLabel } from "../components/layout/PageHeader";
 import { Card } from "../components/controls/Card";
 import { Button } from "../components/controls/Button";
 import { ButtonGroup } from "../components/controls/ButtonGroup";
+import { AgentPageFrame } from "../components/agents/AgentPageFrame";
 import { RoutedGate } from "../components/orchestration/RoutedGate";
-import { ModeSwitch } from "../components/orchestration/ModeSwitch";
 import { ErrorBanner } from "../components/feedback/ErrorBanner";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Skeleton } from "../components/ui/skeleton";
 import { Tip } from "../components/ui/tooltip";
 import {
-  agentList,
   reviewAbort,
   reviewCreate,
   reviewGet,
@@ -35,41 +34,25 @@ import { useUI } from "../stores/ui";
 /// verdict. Gated by RoutedGate (the review routes through the gateway alias).
 export function AgentReviewPage({ id }: { id: string }) {
   const { t } = useTranslation();
-  const navigate = useNavigate();
   const search = useSearch({ from: "/agents/$id/review" }) as { session?: string };
-  const agentsQ = useQuery({ queryKey: qk.agents(), queryFn: agentList });
-  const agent = (agentsQ.data ?? []).find((a) => a.id === id);
-
-  if (agentsQ.isLoading) return <Skeleton className="m-4 h-10 w-64" />;
-  if (!agent) {
-    return (
-      <Page>
-        <PageHeader title={t("agents.notFound")} back={<BackLink to="/agents">{t("nav.agents")}</BackLink>} />
-      </Page>
-    );
-  }
 
   return (
-    <Page width="wide">
-      <PageHeader
-        title={`${agent.display_name} · ${t("agentReview.titleSuffix")}`}
-        info={t("agentReview.help")}
-        back={
-          <BackLink onClick={() => navigate({ to: "/agents/$id", params: { id: agent.id } })}>
-            {t("nav.agents")}
-          </BackLink>
-        }
-        action={<ModeSwitch agentId={agent.id} supportsGateway={agent.capability.supports_gateway} />}
-      />
-      <RoutedGate
-        agentId={agent.id}
-        supportsGateway={agent.capability.supports_gateway}
-        title={t("agentRouting.gateTitle")}
-        hint={t("agentRouting.gateHint")}
-      >
-        <ReviewBody preselectSession={search.session} />
-      </RoutedGate>
-    </Page>
+    <AgentPageFrame
+      agentId={id}
+      backTo="detail"
+      titleSuffix={t("agentReview.titleSuffix")}
+    >
+      {(agent) => (
+        <RoutedGate
+          agentId={agent.id}
+          supportsGateway={agent.capability.supports_gateway}
+          title={t("agentRouting.gateTitle")}
+          hint={t("agentRouting.gateHint")}
+        >
+          <ReviewBody preselectSession={search.session} />
+        </RoutedGate>
+      )}
+    </AgentPageFrame>
   );
 }
 
@@ -154,6 +137,7 @@ function ReviewBody({ preselectSession }: { preselectSession?: string }) {
         .sort((a, b) => b.updated_at - a.updated_at),
     [sessionsQ.data],
   );
+  const [picked, setPicked] = useState<string>(preselectSession ?? "");
   const busy = startMutation.isPending;
 
   return (
@@ -162,29 +146,29 @@ function ReviewBody({ preselectSession }: { preselectSession?: string }) {
         {/* New review */}
         <Card padding="md">
           <SectionLabel className="mb-2">{t("agentReview.newTitle")}</SectionLabel>
-          <select
-            key={preselectSession ?? "none"}
-            id="review-session"
-            defaultValue={preselectSession ?? ""}
+          <Select
+            value={picked}
+            onValueChange={setPicked}
             disabled={busy}
-            className="w-full rounded-sm border border-border bg-inset px-2 py-1 text-sm text-fg"
           >
-            <option value="">{t("agentReview.pickSession")}</option>
-            {sessions.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.title} · {formatRelative(s.updated_at)}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger size="md" className="w-full">
+              <SelectValue placeholder={t("agentReview.pickSession")} />
+            </SelectTrigger>
+            <SelectContent>
+              {sessions.map((s) => (
+                <SelectItem key={s.id} value={s.id}>
+                  {s.title} · {formatRelative(s.updated_at)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <ButtonGroup className="mt-3" justify="start">
             <Button
               variant="primary"
               size="sm"
               loading={busy}
               onClick={() => {
-                const el = document.getElementById("review-session") as HTMLSelectElement | null;
-                const sid = el?.value ?? "";
-                if (sid) startMutation.mutate(sid);
+                if (picked) startMutation.mutate(picked);
               }}
             >
               <Play data-icon size={12} />
@@ -222,7 +206,7 @@ function ReviewBody({ preselectSession }: { preselectSession?: string }) {
               )}
             </div>
             {review.verdict_summary && (
-              <div className="mt-2 rounded-sm border border-border bg-inset px-2 py-1.5 text-sm text-fg">
+              <div className="mt-2 border border-border bg-inset px-2 py-1.5 text-sm text-fg">
                 <span className="mr-1.5 font-medium">
                   {review.verdict_status ? review.verdict_status.toUpperCase() : "—"}
                 </span>
@@ -230,7 +214,7 @@ function ReviewBody({ preselectSession }: { preselectSession?: string }) {
               </div>
             )}
             {(events.length > 0 || (review.live_events?.length ?? 0) > 0) && (
-              <pre className="mt-2 max-h-64 overflow-auto rounded-sm border border-border bg-inset p-2 font-mono text-2xs leading-relaxed text-subtle">
+              <pre className="mt-2 max-h-64 overflow-auto border border-border bg-inset p-2 font-mono text-2xs leading-relaxed text-subtle">
                 {(events.length > 0 ? events : (review.live_events ?? []))
                   .map((e) => JSON.stringify(e))
                   .join("\n")}
@@ -283,7 +267,7 @@ function ReviewRow({ r, active, onSelect }: { r: ReviewInfo; active: boolean; on
       <button
         type="button"
         onClick={onSelect}
-        className={`flex w-full items-center gap-2 px-1 py-2 text-left transition-colors duration-fast hover:bg-inset/50 ${
+        className={`flex w-full items-center gap-2 px-1 py-2 text-left transition-colors duration-fast hover:bg-raised ${
           active ? "bg-inset" : ""
         }`}
       >

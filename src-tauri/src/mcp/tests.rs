@@ -1,5 +1,5 @@
 use super::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn temp_home() -> (PathBuf, tempfile::TempDir) {
     let dir = tempfile::Builder::new()
@@ -7,6 +7,18 @@ fn temp_home() -> (PathBuf, tempfile::TempDir) {
         .tempdir()
         .expect("tempdir");
     (dir.path().to_path_buf(), dir)
+}
+
+/// Mark `pi-mcp-adapter` as installed inside a fake home (the npm-dir
+/// fallback of `adapter_installed_at`), so pi's `mcp_available` runtime
+/// gate passes. Tests that exercise pi's provider must arrange the
+/// precondition the gate checks — without it pi is silently gated out of
+/// the provider registry and its file never syncs.
+fn install_pi_adapter(home: &Path) {
+    std::fs::create_dir_all(
+        home.join(".pi").join("agent").join("npm").join("pi-mcp-adapter"),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -79,6 +91,7 @@ fn cross_cli_dedup_merges_into_one_row() {
     let _lock = crate::HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (home, _home_g) = temp_home();
     std::env::set_var("NESTRA_HOME_DIR", &home);
+    install_pi_adapter(&home);
 
     // claude: codegraph as stdio
     let claude = home.join(".claude.json");
@@ -127,6 +140,7 @@ fn kind_conflict_splits_into_two_rows() {
     let _lock = crate::HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (home, _home_g) = temp_home();
     std::env::set_var("NESTRA_HOME_DIR", &home);
+    install_pi_adapter(&home);
 
     let claude = home.join(".claude.json");
     std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
@@ -164,6 +178,7 @@ fn import_scan_aggregates_cross_cli() {
     let _lock = crate::HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (home, _home_g) = temp_home();
     std::env::set_var("NESTRA_HOME_DIR", &home);
+    install_pi_adapter(&home);
 
     let claude = home.join(".claude.json");
     std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
@@ -234,6 +249,7 @@ fn per_cli_env_override_merges_on_sync() {
     let _lock = crate::HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (home, _home_g) = temp_home();
     std::env::set_var("NESTRA_HOME_DIR", &home);
+    install_pi_adapter(&home);
 
     let claude = home.join(".claude.json");
     std::fs::create_dir_all(claude.parent().unwrap()).unwrap();

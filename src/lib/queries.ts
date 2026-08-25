@@ -54,6 +54,13 @@ export const qk = {
   gatewayStatus: () => ["gateway", "status"] as const,
   gatewayActivity: () => ["gateway", "activity"] as const,
   gatewayToken: () => ["gateway", "token"] as const,
+  // Gateway log viewer (JSON twin layer): file list, filtered entries,
+  // active verbosity preset.
+  logFiles: () => ["diag", "log-files"] as const,
+  logs: (file: string | undefined, level: string, search: string, limit: number) =>
+    ["diag", "logs", file ?? "", level, search, limit] as const,
+  logLevel: () => ["diag", "log-level"] as const,
+  logFullBodies: () => ["diag", "log-full-bodies"] as const,
 } as const;
 
 /// Query key prefixes mutated by each mutation family. Used by `invalidate`

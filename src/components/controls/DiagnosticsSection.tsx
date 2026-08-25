@@ -211,7 +211,7 @@ function UpdateBody({
           <summary className="cursor-pointer text-xs text-muted underline-offset-2 hover:underline">
             {t("settings.updatesNotes")}
           </summary>
-          <div className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded border border-border bg-surface px-3 py-2 text-xs text-muted">
+          <div className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap border border-border bg-surface px-3 py-2 text-xs text-muted">
             {update.notes}
           </div>
         </details>

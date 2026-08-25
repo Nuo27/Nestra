@@ -3,7 +3,9 @@
 //! - `config`   — `ConfigAdapter` writing the three `~/.pi/agent/` files
 //!   (`models.json`, `auth.json`, `settings.json`)
 //! - `sessions` — `~/.pi/agent/sessions/*.jsonl` session importer
-//! - `mcp`      — `~/.pi/agent/mcp.json` `mcpServers` MCP provider
+//! - `mcp`      — `~/.pi/agent/mcp.json` `mcpServers` MCP provider, gated
+//!   on the community `pi-mcp-adapter` package being installed (pi has no
+//!   native MCP — see `mcp::adapter_installed`)
 
 pub mod config;
 pub mod mcp;
@@ -51,4 +53,8 @@ pub static SPEC: AgentSpec = AgentSpec {
     adapter: config::new,
     importer: Some(sessions::new),
     mcp_provider: Some(mcp::new),
+    // Pi has no native MCP — support comes from the community
+    // `pi-mcp-adapter` package. Without it Nestra must neither advertise
+    // MCP capability for pi nor write `mcp.json` (nothing would read it).
+    mcp_available: Some(mcp::adapter_installed),
 };

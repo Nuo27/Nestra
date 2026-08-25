@@ -532,7 +532,10 @@
     "licensesTitle": "Open-source licenses",
     "licensesDesc": "Nestra is built on open-source software.",
     "licensesApp": "Nestra is licensed under the MIT License.",
-    "licensesFonts": "Fonts — SIL Open Font License 1.1",
+    "licensesFonts": "Fonts · SIL Open Font License 1.1",
+    "licensesFontGeist": "Geist · Copyright 2024 The Geist Project Authors.",
+    "licensesFontJetBrainsMono": "JetBrains Mono · Copyright 2020 The JetBrains Mono Project Authors.",
+    "licensesFontSarasa": "Sarasa Mono SC · Copyright 2015–2025 Renzhi Li.",
     "licensesModelsDev": "Model ability data sourced from models.dev",
     "licensesDeps": "Built with Tauri, React, and other open-source software under their respective licenses."
   },
@@ -577,7 +580,8 @@
     "breakerHalfOpen": "Probing",
     "breakerHalfOpenTip": "Recovery wait elapsed — probe requests are flowing; consecutive successes close the circuit.",
     "resetHealth": "Reset health",
-    "healthResetToast": "Provider health reset — all endpoints eligible again"
+    "healthResetToast": "Provider health reset — all endpoints eligible again",
+    "usage30d": "30d usage"
   },
   "agents": {
     "title": "Agents",
@@ -690,7 +694,8 @@
     "policyTitle": "Routing policy",
     "policyHint": "(agent, role) → preferred / fallback / allowed models · match order: exact role → tier:* → *",
     "gateTitle": "routing policy is a Routed-mode surface",
-    "gateHint": "This agent is in Direct mode — its config is written as a plain provider binding. Switch to Routed to configure (agent, role) → provider chain policies."
+    "gateHint": "This agent is in Direct mode — its config is written as a plain provider binding. Switch to Routed to configure (agent, role) → provider chain policies.",
+    "directNote": "This agent is in Direct mode right now — policies take effect the moment you switch to Routed. Editing here is safe."
   },
   "agentDetail": {
     "helpGateway": "Direct mode writes the real provider into this agent's config. Routed mode sends traffic through the Nestra gateway — provider/model resolved per task, with quota-aware fallback and migration.",
@@ -712,7 +717,19 @@
     "usageIn": "in",
     "usageOut": "out",
     "usageSpend": "spend",
-    "usageSpendUnknown": "some models unpriced"
+    "usageSpendUnknown": "some models unpriced",
+    "directTitle": "Direct binding",
+    "directHint": "Nestra writes the real provider into the agent's config; it talks straight to the bound endpoint.",
+    "routingCard": "Routing policy",
+    "routingCardHint": "Role policies decide where the gateway sends each request.",
+    "policySummary": "{{roles}} roles · catch-all {{targets}} targets",
+    "policyEmpty": "no route targets — routing fails closed",
+    "editPolicy": "edit policy",
+    "subDirect": "direct · {{provider}}",
+    "subUnbound": "direct · unbound",
+    "subRouted": "routed · {{provider}} · {{model}}",
+    "subRoutedEmpty": "routed · no targets",
+    "usageEmptyHint": "Usage appears once requests flow through the gateway."
   },
   "routingPolicy": {
     "notSaved": "Policy not saved",
@@ -908,7 +925,33 @@
     "offConfirmTitle": "Turn off the Gateway?",
     "offConfirmBody": "These routed agents will be reverted to Direct mode: {{agents}}",
     "offConfirmLabel": "Turn off",
-    "hide": "Hide"
+    "hide": "Hide",
+    "viewLogs": "View logs"
+  },
+  "gatewayLogs": {
+    "title": "Gateway Logs",
+    "help": "Live view of the gateway log. Every line carries the request correlation ids (task / attempt), so pasting a task id into the search shows that request's full lifecycle: inbound → route → each attempt (status, latency) → decision → done. Debug adds truncated request/response bodies (never headers, never credentials).",
+    "back": "Gateway",
+    "auto": "Auto refresh",
+    "levelFilter": "Filter by severity",
+    "levelAll": "All",
+    "levelError": "Error",
+    "levelWarn": "Warn",
+    "levelInfo": "Info",
+    "searchHint": "Search — task id, request id, model…",
+    "file": "Log file",
+    "capture": "Capture level",
+    "presetInfo": "Quiet default: lifecycle milestones only.",
+    "presetDebug": "Adds truncated (2 KiB) request/response bodies — enough to diagnose protocol and upstream errors. Bodies contain your code and conversations; never headers or credentials.",
+    "presetTrace": "Everything, including dependency internals. Large logs.",
+    "levelApplied": "Capture level set to {{level}}",
+    "levelFailed": "Failed to set capture level: {{err}}",
+    "errorTitle": "Could not read logs",
+    "empty": "No matching log entries",
+    "emptyHint": "Route a request through the gateway, or relax the filters.",
+    "loadMore": "Load more",
+    "fullBodies": "Full bodies",
+    "fullBodiesHint": "Log COMPLETE request/response bodies in the debug wire evidence instead of 2 KiB truncated snippets. Large logs; still never headers or credentials."
   },
   "cache": {
     "noCache": "no cache",

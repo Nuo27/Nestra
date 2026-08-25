@@ -12,7 +12,7 @@ export function Skeleton({
   return (
     <div
       aria-hidden="true"
-      className={`relative overflow-hidden rounded-sm bg-raised pointer-events-none select-none ${className ?? ""}`}
+      className={`relative overflow-hidden bg-raised pointer-events-none select-none ${className ?? ""}`}
     >
       <div className="absolute inset-0 -translate-x-full animate-[shimmer_1.6s_var(--ease-standard)_infinite] bg-gradient-to-r from-transparent via-white/[0.04] to-transparent" />
       {children}

@@ -273,20 +273,28 @@ fn tree_get_mut<'a>(
 
 /// Every MCP-capable agent's provider. Derived from the `AGENTS` agent
 /// registry via each spec's `mcp_provider` constructor — an agent module
-/// registers itself, no central list to keep in sync.
+/// registers itself, no central list to keep in sync. Specs with an
+/// `mcp_available` runtime gate (pi's community adapter) are excluded
+/// while the gate returns false.
 pub fn all() -> Vec<Box<dyn Provider>> {
     crate::agents::agents()
         .iter()
-        .filter(|a| a.capability.supports_mcp)
+        .filter(|a| mcp_ready(a))
         .filter_map(|a| a.mcp_provider.map(|f| f()))
         .collect()
 }
 
-/// The provider for one agent id, when that agent supports MCP.
+/// The provider for one agent id, when that agent supports MCP and its
+/// runtime gate (if any) passes.
 pub fn for_agent(id: &str) -> Option<Box<dyn Provider>> {
     crate::agents::agent_spec(id)
-        .filter(|a| a.capability.supports_mcp)
+        .filter(|a| mcp_ready(a))
         .and_then(|a| a.mcp_provider.map(|f| f()))
+}
+
+/// `supports_mcp` AND the `mcp_available` runtime gate.
+fn mcp_ready(a: &crate::agents::AgentSpec) -> bool {
+    a.capability.supports_mcp && a.mcp_available.map_or(true, |f| f())
 }
 
 pub fn agent_exists(id: &str) -> bool {

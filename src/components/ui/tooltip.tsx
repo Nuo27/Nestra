@@ -13,7 +13,7 @@ const TooltipContent = React.forwardRef<
     <TooltipPrimitive.Content
       ref={ref}
       sideOffset={sideOffset}
-      className={`z-[70] max-w-[18rem] rounded-md border border-border bg-overlay px-2.5 py-1.5 text-xs leading-relaxed text-fg-muted shadow-lg animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 duration-fast${className ? ` ${className}` : ""}`}
+      className={`z-[70] max-w-[18rem] border border-border bg-overlay px-2.5 py-1.5 text-xs leading-relaxed text-fg-muted animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 duration-fast${className ? ` ${className}` : ""}`}
       {...props}
     />
   </TooltipPrimitive.Portal>

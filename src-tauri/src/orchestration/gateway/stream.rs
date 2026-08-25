@@ -104,6 +104,9 @@ where
         .await
         .map_err(|e| crate::error::AppError::Upstream(format!("read request body: {e}")))?
         .to_bytes();
+    // Debug-only wire evidence (see gateway/trace.rs): the raw inbound body
+    // BEFORE any model rewrite or cross-wire conversion.
+    tracing::debug!(bytes = bytes.len(), body = %super::trace::capture(&bytes), "gw.request body");
     Ok(bytes)
 }
 

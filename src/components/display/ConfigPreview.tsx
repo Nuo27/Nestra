@@ -56,7 +56,7 @@ export function ConfigPreview({ endpoint }: { endpoint: EndpointInfo }) {
       {active && (
         <div>
           <div className="text-xs text-subtle mb-1 font-mono">{active.path}</div>
-          <pre className="bg-inset border border-border rounded-md p-3 text-xs overflow-auto max-h-80 scroll">
+          <pre className="bg-inset border border-border p-3 text-xs overflow-auto max-h-80 scroll">
             {active.body}
           </pre>
         </div>

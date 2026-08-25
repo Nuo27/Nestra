@@ -87,7 +87,7 @@ export function Palette() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] bg-black/60 backdrop-blur-[2px] animate-in fade-in-0 duration-fast"
+      className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] surface-scrim animate-in fade-in-0 duration-fast"
       onClick={closePalette}
     >
       <div

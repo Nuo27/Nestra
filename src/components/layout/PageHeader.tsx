@@ -30,7 +30,7 @@ export function PageHeader({
     <div
       className={
         (sticky
-          ? "sticky top-0 z-10 -mx-4 px-4 py-2.5 mb-3 border-b border-border bg-canvas/85 backdrop-blur-md "
+          ? "sticky top-0 z-10 -mx-4 px-4 py-2.5 mb-3 border-b border-border bg-canvas"
           : "") + "flex items-start justify-between gap-3"
       }
     >

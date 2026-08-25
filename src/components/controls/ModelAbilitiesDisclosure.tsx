@@ -67,7 +67,7 @@ function ModelAbilitiesDisclosure({
   const api = defaultAbility?.api;
   const apiLabel = api ? (
     <span
-      className="ml-1 shrink-0 rounded-sm bg-border/70 px-1 py-px text-2xs text-muted"
+      className="ml-1 shrink-0 bg-border px-1 py-px text-2xs text-muted"
       title={
         api === "response-api"
           ? t("providerEdit.apiResponsesTip")

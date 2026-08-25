@@ -262,7 +262,7 @@ function TaskChip({ t }: { t: TaskSummary }) {
   const status = t.latest_status;
   const tone = statusToneClass(status);
   return (
-    <span className="inline-flex items-center gap-1.5 rounded border border-border bg-inset px-2 py-0.5 font-mono text-2xs text-muted">
+    <span className="inline-flex items-center gap-1.5 border border-border bg-inset px-2 py-0.5 font-mono text-2xs text-muted">
       <span className="text-subtle">{t.task_id.slice(0, 6)}</span>
       <span className={tone}>{status ?? "—"}</span>
       <span className="text-subtle">{tr("orchestration.reqCountCompact", { n: t.request_count })}</span>

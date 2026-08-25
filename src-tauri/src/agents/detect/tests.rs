@@ -70,6 +70,7 @@ fn test_agent(id: &'static str, detect: DetectSpec) -> AgentSpec {
         adapter: || unreachable!("test spec adapter"),
         importer: None,
         mcp_provider: None,
+        mcp_available: None,
     }
 }
 

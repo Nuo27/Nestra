@@ -32,6 +32,7 @@ pub mod protocol_responses;
 pub mod stream;
 pub mod stream_convert;
 pub mod stream_responses;
+pub mod trace;
 pub mod tuning;
 
 #[cfg(test)]

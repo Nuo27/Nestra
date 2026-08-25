@@ -58,7 +58,7 @@ export function ErrorBanner({
   let shell: string
   if (variant === "strip") shell = `border-b border-border ${s.bg} px-3 py-1`
   else if (variant === "bare") shell = s.text
-  else shell = `rounded-md border ${s.border} ${s.bg} px-3 py-2`
+  else shell = `border ${s.border} ${s.bg} px-3 py-2`
   return (
     <div
       role={severity === "error" ? "alert" : "status"}

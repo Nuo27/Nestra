@@ -22,7 +22,7 @@ export class ErrorBoundary extends Component<
     if (this.state.error === null) return this.props.children
     const err = this.state.error
     return (
-      <div className="mx-auto my-10 max-w-xl border border-danger/40 bg-danger/5 p-4">
+      <div className="mx-auto my-10 max-w-xl border border-danger-border bg-danger-soft p-4">
         <div className="text-sm font-semibold text-danger">render error</div>
         <pre className="mt-2 overflow-auto whitespace-pre-wrap font-mono text-xs text-muted">
           {err.message || String(err)}

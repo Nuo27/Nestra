@@ -166,6 +166,16 @@ pub async fn handle_bytes(
     // State 3: a request declaring tools/functions may have executed a tool
     // upstream — never blind-retry it (the loop surfaces instead).
     let side_effect_risk = migration::body_has_side_effect_risk(&body_bytes);
+    tracing::info!(
+        task = %ctx.task_id,
+        agent = agent_id,
+        wire = "anthropic",
+        bytes = body_bytes.len(),
+        model = ?ctx.requested_model,
+        role = %ctx.subagent_role.as_policy_key(),
+        side_effect = side_effect_risk,
+        "gw.request inbound"
+    );
 
     // Wire the protocol-specific parts into the shared retry/migrate loop.
     let agent = agent_id.to_string();
@@ -510,6 +520,16 @@ pub(super) fn build_upstream_request(
             builder = builder.header("anthropic-version", "2023-06-01");
         }
     }
+    // Debug-only wire evidence (see gateway/trace.rs): the URL and the
+    // CONVERTED body actually sent upstream (post model rewrite / bridge).
+    // Never the headers — the credential lives there.
+    tracing::debug!(
+        url = %url,
+        bridging,
+        bytes = body.len(),
+        body = %super::trace::capture(&body),
+        "gw.upstream request"
+    );
     let req = builder
         .body(GatewayBody::Full(
             http_body_util::Full::new(body),
@@ -656,6 +676,15 @@ where
             upstream_error = %snippet,
             "gateway: upstream error response"
         );
+    } else {
+        // Debug-only wire evidence (see gateway/trace.rs): a successful
+        // buffered body — enough to see shape/model/error payloads.
+        tracing::debug!(
+            status = status.as_u16(),
+            bytes = buf.len(),
+            body = %super::trace::capture(&buf),
+            "gw.upstream body"
+        );
     }
     let usage = if status.is_success() && body_error.is_none() {
         let mut u = ObservedUsage::default();
@@ -731,10 +760,25 @@ pub(super) async fn probe_and_relay(
                 reason = %reason,
                 "gateway: upstream in-band stream error — failing attempt (retry/migrate)"
             );
+            // Carry the reason in the surfaced body, not just the log — a
+            // bare empty 503 leaves the agent unable to tell an upstream
+            // outage (opencode-go's free-model in-band errors) from a
+            // gateway bug.
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                hyper::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
             Err(ForwardOutcome::Responded {
                 status: StatusCode::SERVICE_UNAVAILABLE,
-                headers: HeaderMap::new(),
-                body: GatewayBody::Full(Full::new(Bytes::new())),
+                headers,
+                body: error_body(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &format!(
+                        "nestra gateway: upstream in-band stream error from {}/{}: {}",
+                        log_endpoint, log_model, reason
+                    ),
+                ),
                 usage: None,
                 tool_calls: None,
                 tool_names: None,
@@ -796,6 +840,10 @@ struct ObservingBody {
     /// hanging the agent forever. `None` when disabled (0).
     silence: Option<Pin<Box<tokio::time::Sleep>>>,
     silence_dur: std::time::Duration,
+    /// Stream start (for the `gw.stream done` milestone) — relay-phase
+    /// events run outside the gw_request span (the loop already returned),
+    /// so they carry their own correlation fields.
+    started: std::time::Instant,
 }
 
 /// Cap on the unterminated-line carry buffer (bytes). Generous on purpose:
@@ -827,6 +875,7 @@ impl ObservingBody {
             pending_terminal: false,
             silence,
             silence_dur: silence_timeout,
+            started: std::time::Instant::now(),
         }
     }
 
@@ -852,6 +901,7 @@ impl ObservingBody {
         }
         let state = self.state.clone();
         let request_id = std::mem::take(&mut self.request_id);
+        let duration_ms = self.started.elapsed().as_millis() as u64;
         let obs = self.obs.clone();
         tokio::spawn(async move {
             // Snapshot under a brief lock, then do the DB write without it.
@@ -863,6 +913,13 @@ impl ObservingBody {
                 ),
                 Err(_) => return, // poisoned — nothing sane to write
             };
+            tracing::info!(
+                request = %request_id,
+                usage_in = usage.input.unwrap_or(0),
+                usage_out = usage.output.unwrap_or(0),
+                duration_ms,
+                "gw.stream done"
+            );
             let conn = state.db.lock().await;
             if let Err(e) = crate::orchestration::store::backfill_route_request_usage(
                 &conn,
@@ -901,6 +958,10 @@ impl Drop for ObservingBody {
         self.finish();
         let state = self.state.clone();
         let request_id = std::mem::take(&mut self.request_id);
+        tracing::warn!(
+            request = %request_id,
+            "gw.abort: agent disconnected mid-stream — finalizing as 499"
+        );
         tokio::spawn(async move {
             super::forward::finalize_client_aborted(
                 &state,

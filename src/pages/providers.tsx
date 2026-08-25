@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
@@ -13,6 +13,7 @@ import {
   providerHealthReset,
   providerHealthSnapshot,
 } from "../ipc";
+import { usageSummary } from "../ipc/orchestration";
 import { extractError } from "../ipc/errors";
 import { useUI } from "../stores/ui";
 import { qk } from "../lib/queries";
@@ -58,6 +59,29 @@ export function ProvidersPage() {
   const endpoints = q.data ?? [];
   const [creating, setCreating] = useState(false);
   const toast = useUI((s) => s.pushToast);
+
+  // 30-day usage per endpoint — ONE query for the whole page (the backend's
+  // agent-less `orch_usage_summary` returns every agent's rows; fold by
+  // endpoint here). Feeds each card's quiet usage line.
+  const usageQ = useQuery({
+    queryKey: ["orchestration", "usage-by-endpoint", 30],
+    queryFn: () => usageSummary(undefined, 30),
+    refetchInterval: 30_000,
+  });
+  const usageByEndpoint = useMemo(() => {
+    const m = new Map<string, { requests: number; input: number; output: number; cost: number; unknown: boolean }>();
+    for (const r of usageQ.data ?? []) {
+      const key = r.endpoint_id || "";
+      const cur = m.get(key) ?? { requests: 0, input: 0, output: 0, cost: 0, unknown: false };
+      cur.requests += r.requests;
+      cur.input += r.usage_input;
+      cur.output += r.usage_output;
+      cur.cost += r.cost_usd ?? 0;
+      cur.unknown = cur.unknown || r.cost_usd == null;
+      m.set(key, cur);
+    }
+    return m;
+  }, [usageQ.data]);
 
   const createMut = useMutation({
     mutationFn: async (input: { displayName: string; id: string }) =>
@@ -199,11 +223,13 @@ export function ProvidersPage() {
       {/* Masonry: round-robin into flex columns — left-to-right reading
           order with gap-free vertical packing (cards of different heights
           stack tightly, no empty space below shorter cards). */}
-      <MasonryGrid>
-        {endpoints.map((e) => (
-          <EndpointRow key={e.id} endpoint={e} />
-        ))}
-      </MasonryGrid>
+      <div className="animate-in fade-in duration-fast">
+        <MasonryGrid>
+          {endpoints.map((e) => (
+            <EndpointRow key={e.id} endpoint={e} usage={usageByEndpoint.get(e.id)} />
+          ))}
+        </MasonryGrid>
+      </div>
 
       {creating && (
         <CreateProviderDialog

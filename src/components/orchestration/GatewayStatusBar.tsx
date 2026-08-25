@@ -22,7 +22,7 @@ export function GatewayStatusBar() {
     // A read failure must not render as an eternal "○ starting" that polls
     // forever — show the failure and stop the poll loop.
     return (
-      <div className="flex items-center gap-2 rounded border border-danger-border bg-danger-soft px-3 py-2">
+      <div className="flex items-center gap-2 border border-danger-border bg-danger-soft px-3 py-2">
         <span className="font-mono text-2xs text-danger">
           {t("orchestration.gatewayStatusFailed")}
         </span>
@@ -32,7 +32,7 @@ export function GatewayStatusBar() {
   const status = q.data;
 
   return (
-    <div className="flex items-center justify-between gap-3 rounded border border-border bg-inset px-3 py-2">
+    <div className="flex items-center justify-between gap-3 border border-border bg-inset px-3 py-2">
       <div className="flex min-w-0 items-center gap-2">
         <span className="shrink-0 font-mono text-2xs text-subtle">{t("orchestration.gateway")}</span>
         {status?.up ? (

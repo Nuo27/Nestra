@@ -16,7 +16,7 @@ import { SessionDetail } from "../components/display/SessionDetail";
 import { useSessionSelection } from "../lib/sessionSelection";
 import { qk } from "../lib/queries";
 import { bucketByDate } from "../lib/sessionsBucket";
-import { AGENT_TO_PROVIDER } from "../lib/sessionsMeta";
+import { providerMeta } from "../lib/sessionsMeta";
 
 // Narrowest the session list may be. Wide enough to hold the toolbar row in
 // full (agents filter + selection cluster: count, all/none, reveal, delete,
@@ -72,19 +72,12 @@ export function SessionsPage() {
   const sessionsListWidth = useUI((s) => s.sessionsListWidth);
   const setSessionsListWidth = useUI((s) => s.setSessionsListWidth);
 
-  // Dropdown is driven by connected agents (status ok), mapped to the
-  // session-provider id they log under. Only providers with a resumable agent
-  // appear — no all-providers list.
+  // Registry display names for the filter labels (shared qk.agents() cache).
   const agentQ = useQuery({ queryKey: qk.agents(), queryFn: agentList });
-  const connectedProviders = useMemo(() => {
-    const set: Map<string, string> = new Map(); // providerId -> label
-    for (const c of agentQ.data ?? []) {
-      if (c.status === "ok") {
-        const providerId = AGENT_TO_PROVIDER[c.id];
-        if (providerId) set.set(providerId, c.display_name);
-      }
-    }
-    return set;
+  const labelsById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of agentQ.data ?? []) m.set(c.id, c.display_name);
+    return m;
   }, [agentQ.data]);
 
   const listQuery = useQuery({
@@ -94,6 +87,20 @@ export function SessionsPage() {
   });
 
   const sessions = listQuery.data ?? [];
+  // Filter options derive from the sessions themselves — every provider
+  // present in the data gets a chip, whatever the registry grows into.
+  // Deliberately NOT gated on agent detection: sessions are reconciled for
+  // every registry importer regardless, so an undetected agent's history
+  // stays filterable. A new agent needs no frontend entry to appear.
+  const providerOptions = useMemo(() => {
+    const set = new Map<string, string>(); // providerId -> label
+    for (const s of sessions) {
+      if (!set.has(s.provider)) {
+        set.set(s.provider, labelsById.get(s.provider) ?? providerMeta(s.provider).label);
+      }
+    }
+    return set;
+  }, [sessions, labelsById]);
   const buckets = useMemo(() => bucketByDate(sessions), [sessions]);
   const selection = useSessionSelection(sessions);
 
@@ -142,7 +149,7 @@ export function SessionsPage() {
           onQueryChange={setQuery}
           provider={provider}
           onProviderChange={setProvider}
-          connectedProviders={connectedProviders}
+          providerOptions={providerOptions}
           selection={selection}
           total={sessions.length}
         />

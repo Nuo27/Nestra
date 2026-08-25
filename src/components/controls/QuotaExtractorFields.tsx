@@ -10,6 +10,7 @@ import { qk } from "../../lib/queries";
 import { fmtMoney } from "../../lib/format";
 import { FieldRow } from "./Field";
 import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
 import { Button } from "./Button";
 
 /// Custom-extractor field editor. Rendered only when the query plan source
@@ -108,12 +109,13 @@ export function QuotaExtractorFields({
         />
       </FieldRow>
       <FieldRow label={t("quota.extractorHeaders")}>
-        <textarea
+<Textarea
           value={headersText}
           onChange={(e) => setHeadersText(e.target.value)}
           placeholder={t("quota.extractorHeadersPlaceholder", { apiKey: "{{apiKey}}" })}
+          size="sm"
           rows={2}
-          className="w-96 resize-y rounded-sm border border-border bg-inset px-2 py-1 font-mono text-xs text-fg placeholder:text-subtle focus-visible:outline-none focus-visible:shadow-focus"
+          className="w-96 font-mono"
         />
       </FieldRow>
       <FieldRow label={t("quota.extractorUnit")}>

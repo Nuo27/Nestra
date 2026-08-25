@@ -35,7 +35,9 @@ aes-gcm = "0.10"
 rand = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# Daily-rotated log files (text + JSON twin layers) with bounded retention.
+tracing-appender = "0.2"
 ureq = { version = "2", features = ["json"] }
 dirs = "6"
 thiserror = "2"

@@ -30,7 +30,7 @@ export function SessionsListToolbar({
   onQueryChange,
   provider,
   onProviderChange,
-  connectedProviders,
+  providerOptions,
   selection,
   total,
 }: {
@@ -40,7 +40,7 @@ export function SessionsListToolbar({
   onQueryChange: (v: string) => void;
   provider: string;
   onProviderChange: (v: string) => void;
-  connectedProviders: Map<string, string>;
+  providerOptions: Map<string, string>;
   selection: SessionSelection;
   total: number;
 }) {
@@ -92,8 +92,8 @@ export function SessionsListToolbar({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="__all__">{t("sessions.allAgents")}</SelectItem>
-            {connectedProviders.size > 0 ? (
-              [...connectedProviders].map(([providerId, label]) => (
+            {providerOptions.size > 0 ? (
+              [...providerOptions].map(([providerId, label]) => (
                 <SelectItem key={providerId} value={providerId}>
                   {label}
                 </SelectItem>

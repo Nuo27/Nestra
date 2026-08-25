@@ -62,4 +62,5 @@ pub static SPEC: AgentSpec = AgentSpec {
     adapter: config::new,
     importer: Some(sessions::new),
     mcp_provider: Some(mcp::new),
+    mcp_available: None,
 };

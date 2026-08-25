@@ -500,7 +500,14 @@ pub fn set_state(
 /// config).
 pub fn sync_agent(conn: &Connection, agent: &str) -> AppResult<()> {
     let Some(p) = providers::for_agent(agent) else {
-        return Err(AppError::NotFound(format!("unknown agent: {agent}")));
+        // Unknown id OR a registry runtime gate that's closed (pi without
+        // the pi-mcp-adapter package). Skip rather than error: sync loops
+        // over DB-bound agents, and a stale binding on a gated agent must
+        // not fail another agent's toggle. Same semantics as
+        // `remove_server`. Direct `mcp_sync_agent` calls only ever target
+        // agents the UI listed as MCP-capable, so the gate is closed for
+        // those too — nothing to write.
+        return Ok(());
     };
     let path = p.config_path(&home_dir()?);
     if !path.exists() {

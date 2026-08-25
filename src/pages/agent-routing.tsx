@@ -1,81 +1,46 @@
-import { useNavigate } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Page } from "../components/layout/Page";
-import { PageHeader, BackLink } from "../components/layout/PageHeader";
-import { Card } from "../components/controls/Card";
-import { Skeleton } from "../components/ui/skeleton";
-import { SectionHeader } from "../components/layout/SectionHeader";
-import { RoutingPolicyEditor } from "../components/orchestration/RoutingPolicyEditor";
-import { RoutedGate } from "../components/orchestration/RoutedGate";
-import { SteadyRouteCard } from "../components/orchestration/SteadyRouteCard";
-import { ModeSwitch } from "../components/orchestration/ModeSwitch";
 import { Workflow } from "lucide-react";
-import { agentList } from "../ipc";
-import { qk } from "../lib/queries";
-import { ErrorBanner } from "../components/feedback/ErrorBanner";
+import { AgentPageFrame } from "../components/agents/AgentPageFrame";
+import { Card } from "../components/controls/Card";
+import { SectionHeader } from "../components/layout/SectionHeader";
+import { Note } from "../components/feedback/Note";
+import { useAgentModeToggle } from "../components/orchestration/ModeSwitch";
+import { RoutingPolicyEditor } from "../components/orchestration/RoutingPolicyEditor";
 
-/// /agents/$id/routing — the (agent, role) → endpoint-chain policy editor on
-/// its own page. Routed-mode surface: while the agent is Direct a hint +
-/// ModeSwitch gate the page (see RoutedGate).
+/// /agents/$id/routing — the focused (agent, role) → endpoint-chain policy
+/// editor. Policy data is mode-independent, so the page stays fully
+/// editable while the agent is Direct — a Note explains when it takes
+/// effect (the old hard gate hid a view the user had every right to see).
+/// The route overview lives on the detail page's cockpit.
 export function AgentRoutingPage({ id }: { id: string }) {
   const { t } = useTranslation();
-  const navigate = useNavigate();
-  const agentsQ = useQuery({ queryKey: qk.agents(), queryFn: agentList });
-  const agent = (agentsQ.data ?? []).find((a) => a.id === id);
-
-  if (agentsQ.isLoading) return <Skeleton className="h-10 w-64" />;
-  if (agentsQ.isError) {
-    return (
-      <Page>
-        <PageHeader title={t("agents.title")} back={<BackLink to="/agents">{t("nav.agents")}</BackLink>} />
-        <ErrorBanner onRetry={() => agentsQ.refetch()}>{t("agents.loadFailed")}</ErrorBanner>
-      </Page>
-    );
-  }
-  if (!agent) {
-    return (
-      <Page>
-        <PageHeader title={t("agents.notFound")} back={<BackLink to="/agents">{t("nav.agents")}</BackLink>} />
-      </Page>
-    );
-  }
-
   return (
-    <Page width="wide">
-      <PageHeader
-        title={`${agent.display_name} · ${t("agentRouting.titleSuffix")}`}
-        info={t("agentRouting.help")}
-        back={
-          <BackLink
-            onClick={() => navigate({ to: "/agents/$id", params: { id: agent.id } })}
-          >
-            {t("nav.agents")}
-          </BackLink>
-        }
-        action={<ModeSwitch agentId={agent.id} supportsGateway={agent.capability.supports_gateway} />}
-      />
+    <AgentPageFrame
+      agentId={id}
+      backTo="detail"
+      titleSuffix={t("agentRouting.titleSuffix")}
+    >
+      {(agent) => <RoutingBody agentId={agent.id} supportsGateway={agent.capability.supports_gateway} />}
+    </AgentPageFrame>
+  );
+}
 
-      <RoutedGate
-        agentId={agent.id}
-        supportsGateway={agent.capability.supports_gateway}
-        title={t("agentRouting.gateTitle")}
-        hint={t("agentRouting.gateHint")}
-      >
-        <div className="space-y-3">
-          <SteadyRouteCard agentId={agent.id} />
-          <Card padding="none">
-            <SectionHeader
-              icon={<Workflow data-icon size={14} />}
-              title={t("agentRouting.policyTitle")}
-              hint={t("agentRouting.policyHint")}
-            />
-            <div className="p-3">
-              <RoutingPolicyEditor agentId={agent.id} />
-            </div>
-          </Card>
+function RoutingBody({ agentId, supportsGateway }: { agentId: string; supportsGateway: boolean }) {
+  const { t } = useTranslation();
+  const { routed } = useAgentModeToggle(agentId, supportsGateway);
+  return (
+    <div className="space-y-3">
+      {!routed && <Note>{t("agentRouting.directNote")}</Note>}
+      <Card padding="none">
+        <SectionHeader
+          icon={<Workflow data-icon size={14} />}
+          title={t("agentRouting.policyTitle")}
+          hint={t("agentRouting.policyHint")}
+        />
+        <div className="p-3">
+          <RoutingPolicyEditor agentId={agentId} />
         </div>
-      </RoutedGate>
-    </Page>
+      </Card>
+    </div>
   );
 }

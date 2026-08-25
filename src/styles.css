@@ -322,6 +322,12 @@ a:focus-visible,
   border-radius: var(--radius-sm);
   color: var(--fg);
 }
+/* The only sanctioned translucent surface — modal/dialog/palette backdrop.
+   Color is built from `canvas` via color-mix so dark/light themes stay in
+   sync and TSX never writes raw opacity tokens for a backdrop. */
+.surface-scrim {
+  background: color-mix(in oklab, var(--bg-canvas) 78%, transparent);
+}
 
 /* ── Bracket-as-state ───────────────────────────────────────────────────
  * A single `.brackets-state` helper. The `[ ]` glyphs permanently occupy a
@@ -476,12 +482,14 @@ a:focus-visible,
 .checkbox-wrapper-8 .tgl + .tgl-btn::before {
   box-sizing: border-box;
   transform: skew(10deg);
-  display: inline-block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   transition: left var(--dur-fast, 120ms) var(--ease-out);
   width: 100%;
-  text-align: center;
+  height: 100%;
+  top: 0;
   position: absolute;
-  line-height: 1.5em;
   font-weight: bold;
   font-size: 0.65rem;
   color: var(--fg-on-accent);

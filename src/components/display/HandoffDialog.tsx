@@ -7,6 +7,7 @@ import { extractError } from "../../ipc/errors";
 import { invalidate } from "../../lib/queries";
 import { useUI } from "../../stores/ui";
 import { Button } from "../controls/Button";
+import { Textarea } from "../ui/textarea";
 import {
   Dialog,
   DialogBody,
@@ -84,11 +85,13 @@ export function HandoffDialog({
               ))}
             </div>
           ) : (
-            <textarea
+            <Textarea
               value={markdown}
               onChange={(e) => setMarkdown(e.target.value)}
               spellCheck={false}
-              className="min-h-[45vh] w-full resize-y rounded-sm border border-border bg-inset px-2 py-1 font-mono text-xs text-fg focus-visible:outline-none focus-visible:shadow-focus"
+              size="sm"
+              rows={16}
+              className="min-h-[45vh] font-mono"
             />
           )}
         </DialogBody>

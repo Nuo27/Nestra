@@ -95,6 +95,24 @@ fn every_manageable_writer_resolves() {
 /// runtime, not compile time.
 #[test]
 fn constructor_hooks_match_capabilities() {
+    // pi's MCP capability has a runtime gate (the community pi-mcp-adapter
+    // package). Vary the fake home so the registry derivation test sees the
+    // gate open — with every declared MCP provider resolvable.
+    let _lock = crate::HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let dir = tempfile::Builder::new()
+        .prefix("nestra-agents-test-")
+        .tempdir()
+        .expect("tempdir");
+    std::fs::create_dir_all(
+        dir.path()
+            .join(".pi")
+            .join("agent")
+            .join("npm")
+            .join("pi-mcp-adapter"),
+    )
+    .unwrap();
+    std::env::set_var("NESTRA_HOME_DIR", dir.path());
+
     for a in agents() {
         assert_eq!(
             a.importer.is_some(),

@@ -525,7 +525,10 @@
     "licensesTitle": "开源许可证",
     "licensesDesc": "Nestra 基于开源软件构建。",
     "licensesApp": "Nestra 采用 MIT 许可证。",
-    "licensesFonts": "字体 — SIL Open Font License 1.1",
+    "licensesFonts": "字体 · SIL Open Font License 1.1",
+    "licensesFontGeist": "Geist · Copyright 2024 The Geist Project Authors.",
+    "licensesFontJetBrainsMono": "JetBrains Mono · Copyright 2020 The JetBrains Mono Project Authors.",
+    "licensesFontSarasa": "Sarasa Mono SC · Copyright 2015–2025 Renzhi Li.",
     "licensesModelsDev": "模型能力数据来源于 models.dev",
     "licensesDeps": "使用 Tauri、React 等开源软件构建，均遵循各自许可证。"
   },
@@ -570,7 +573,8 @@
     "breakerHalfOpen": "试探中",
     "breakerHalfOpenTip": "恢复等待已结束 — 正在放行试探请求；连续成功后将闭合熔断。",
     "resetHealth": "重置健康",
-    "healthResetToast": "供应商健康已重置 — 所有端点恢复可用"
+    "healthResetToast": "供应商健康已重置 — 所有端点恢复可用",
+    "usage30d": "30 天用量"
   },
   "agents": {
     "title": "智能体",
@@ -683,7 +687,8 @@
     "policyTitle": "路由策略",
     "policyHint": "(智能体, 角色) → 首选 / 回退 / 允许模型 · 匹配顺序：精确角色 → 档位 tier:* → 通配 *",
     "gateTitle": "路由策略是 Routed 模式的功能",
-    "gateHint": "此智能体处于 Direct 模式 — 其配置作为普通提供商绑定写入。切换到 Routed 以配置 (智能体, 角色) → 提供商链策略。"
+    "gateHint": "此智能体处于 Direct 模式 — 其配置作为普通提供商绑定写入。切换到 Routed 以配置 (智能体, 角色) → 提供商链策略。",
+    "directNote": "该 agent 当前处于 Direct 模式——切换到 Routed 后策略立即生效。在这里编辑是安全的。"
   },
   "agentDetail": {
     "helpGateway": "Direct 模式将真实提供商写入此智能体的配置。Routed 模式通过 Nestra 网关发送流量 — 按任务解析提供商/模型，支持配额感知回退和迁移。",
@@ -705,7 +710,19 @@
     "usageIn": "输入",
     "usageOut": "输出",
     "usageSpend": "花费",
-    "usageSpendUnknown": "部分模型无价格"
+    "usageSpendUnknown": "部分模型无价格",
+    "directTitle": "Direct 绑定",
+    "directHint": "Nestra 把真实供应商写进 agent 配置；它直连所绑定的端点。",
+    "routingCard": "路由策略",
+    "routingCardHint": "各角色的策略决定网关把请求发到哪里。",
+    "policySummary": "{{roles}} 个角色 · 兜底 {{targets}} 个目标",
+    "policyEmpty": "无路由目标 —— 路由将兜底拒绝",
+    "editPolicy": "编辑策略",
+    "subDirect": "direct · {{provider}}",
+    "subUnbound": "direct · 未绑定",
+    "subRouted": "routed · {{provider}} · {{model}}",
+    "subRoutedEmpty": "routed · 无目标",
+    "usageEmptyHint": "请求经过网关后这里会出现用量。"
   },
   "routingPolicy": {
     "notSaved": "策略未保存",
@@ -901,7 +918,33 @@
     "offConfirmTitle": "关闭网关？",
     "offConfirmBody": "这些已路由的 agent 将恢复为直连模式：{{agents}}",
     "offConfirmLabel": "关闭",
-    "hide": "隐藏"
+    "hide": "隐藏",
+    "viewLogs": "查看日志"
+  },
+  "gatewayLogs": {
+    "title": "网关日志",
+    "help": "网关日志实时视图。每行都带请求关联 id（task / attempt）——把 task id 粘进搜索框即可看到该请求的完整生命周期：入站 → 路由 → 每次尝试（状态、延迟）→ 决策 → 完成。Debug 级额外记录截断的请求/响应报文（绝不记录头部和凭据）。",
+    "back": "网关",
+    "auto": "自动刷新",
+    "levelFilter": "按级别过滤",
+    "levelAll": "全部",
+    "levelError": "错误",
+    "levelWarn": "警告",
+    "levelInfo": "信息",
+    "searchHint": "搜索 —— task id、request id、模型…",
+    "file": "日志文件",
+    "capture": "捕获级别",
+    "presetInfo": "安静默认：仅生命周期里程碑。",
+    "presetDebug": "追加截断（2 KiB）的请求/响应报文——足以诊断协议与上游错误。报文包含你的代码和对话；绝不记录头部或凭据。",
+    "presetTrace": "全部内容，含依赖内部日志。日志量大。",
+    "levelApplied": "捕获级别已设为 {{level}}",
+    "levelFailed": "设置捕获级别失败：{{err}}",
+    "errorTitle": "无法读取日志",
+    "empty": "没有匹配的日志条目",
+    "emptyHint": "让请求经过网关，或放宽过滤条件。",
+    "loadMore": "加载更多",
+    "fullBodies": "完整报文",
+    "fullBodiesHint": "Debug 报文证据记录完整的请求/响应内容，而非 2 KiB 截断片段。日志量会变大；依然绝不记录头部或凭据。"
   },
   "cache": {
     "noCache": "无缓存",

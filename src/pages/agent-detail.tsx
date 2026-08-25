@@ -1,38 +1,35 @@
 import { useTranslation } from "react-i18next";
-import { useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { Workflow, ListTree, ArrowRight, Users, ShieldCheck, Coins } from "lucide-react";
-import { AgentKindBadge } from "../components/agents/AgentKindBadge";
-import { Page } from "../components/layout/Page";
-import { PageHeader, BackLink } from "../components/layout/PageHeader";
+import { Workflow, ListTree, Plug, ShieldCheck, Coins } from "lucide-react";
+import { AgentPageFrame } from "../components/agents/AgentPageFrame";
+import { Button } from "../components/controls/Button";
 import { Card } from "../components/controls/Card";
-import { Disclosure } from "../components/controls/Disclosure";
+import { SectionHeader } from "../components/layout/SectionHeader";
+import { Stat } from "../components/display/Stat";
 import { Skeleton } from "../components/ui/skeleton";
 import { Badge } from "../components/ui/badge";
-import { ErrorBanner } from "../components/feedback/ErrorBanner";
 import { EmptyOrchestration } from "../components/orchestration/EmptyOrchestration";
-import { ModeSwitch } from "../components/orchestration/ModeSwitch";
+import { useAgentModeToggle } from "../components/orchestration/ModeSwitch";
 import { RouteLineage } from "../components/orchestration/RouteLineage";
 import { RoleKey } from "../components/orchestration/RoleKey";
-import {
-  endpointList,
-  agentList,
-  type AgentInfo,
-  type EndpointInfo,
-} from "../ipc";
+import { SteadyRouteCard } from "../components/orchestration/SteadyRouteCard";
 import { ProviderConfigPanel } from "../components/agents/ProviderConfigPanel";
+import type { AgentInfo, EndpointInfo } from "../ipc";
+import { endpointList } from "../ipc";
 import {
   routeHistory,
   migrations,
   tasks,
-  agentGatewayEnabled,
   detectedRoles,
+  routingPolicyList,
   usageSummary,
   type TaskSummary,
   type RouteMigrationRow,
 } from "../ipc/orchestration";
 import { qk } from "../lib/queries";
+
 /// HTTP-status → badge tone. Extracted from a nested ternary
 /// (no-nested-ternary rule).
 function statusToneOf(status: number | null): "neutral" | "success" | "danger" {
@@ -40,324 +37,166 @@ function statusToneOf(status: number | null): "neutral" | "success" | "danger" {
   return status < 400 ? "success" : "danger";
 }
 
-/// Agent detail — the merged Direct/Routed surface.
-/// Direct: the classic provider-binding editor. Routed: entry card to the
-/// routing policy sub-page, plus this agent's live tasks. The mode
-/// switch is shared with the /agents card (same `setting_kv` flag), so
-/// toggling here is reflected there instantly.
+/// Agent detail — the dual-mode cockpit. The ACTIVE mode renders as the
+/// primary column (Direct binding editor / route overview + policy entry);
+/// the inactive mode stays visible as a compact summary card with a
+/// one-click switch, so the page never goes half-empty and switching is
+/// never blind. Below (Routed only): the live task list and the 30-day
+/// usage breakdown. Header/guards live in the shared AgentPageFrame.
 export function AgentDetailPage({ id }: { id: string }) {
-  const { t } = useTranslation();
-  const agentsQ = useQuery({ queryKey: qk.agents(), queryFn: agentList });
+  return (
+    <AgentPageFrame agentId={id} backTo="agents">
+      {(agent) => <AgentCockpit agent={agent} />}
+    </AgentPageFrame>
+  );
+}
+
+function AgentCockpit({ agent }: { agent: AgentInfo }) {
+  const supported = agent.capability.supports_gateway;
+  const { routed } = useAgentModeToggle(agent.id, supported);
   const endpointsQ = useQuery({ queryKey: qk.endpoints(), queryFn: endpointList });
-  const agent = (agentsQ.data ?? []).find((a) => a.id === id);
   const endpoints = endpointsQ.data ?? [];
 
-  if (agentsQ.isLoading) return <Skeleton className="h-10 w-64" />;
-  if (agentsQ.isError) {
-    // A query failure must not masquerade as "agent not found" — show the
-    // error with a retry instead of a misleading empty state.
-    return (
-      <Page>
-        <PageHeader title={t("agents.title")} back={<BackLink to="/agents">{t("nav.agents")}</BackLink>} />
-        <ErrorBanner onRetry={() => agentsQ.refetch()}>{t("agents.loadFailed")}</ErrorBanner>
-      </Page>
-    );
-  }
-  if (!agent) {
-    return (
-      <Page>
-        <PageHeader title={t("agents.notFound")} back={<BackLink to="/agents">{t("nav.agents")}</BackLink>} />
-      </Page>
-    );
+  if (!supported) {
+    // No gateway writer: Direct is the only mode.
+    return <DirectCard agent={agent} endpoints={endpoints} />;
   }
 
   return (
-    <Page width="wide">
-      <PageHeader
-        title={
-          <span className="flex items-center gap-2">
-            {agent.display_name}
-            <AgentKindBadge id={agent.id} />
-          </span>
-        }
-        info={agent.capability.supports_gateway ? t("agentDetail.helpGateway") : t("agentDetail.helpPlain")}
-        back={<BackLink to="/agents">{t("nav.agents")}</BackLink>}
-        action={<ModeSwitch agentId={agent.id} supportsGateway={agent.capability.supports_gateway} />}
-      />
-
-      <AgentDetailBody agent={agent} endpoints={endpoints} />
-    </Page>
-  );
-}
-
-function AgentDetailBody({
-  agent,
-  endpoints,
-}: {
-  agent: AgentInfo;
-  endpoints: EndpointInfo[];
-}) {
-  const { t } = useTranslation();
-  const routedQ = useQuery({
-    queryKey: ["orchestration", "gateway-flag", agent.id],
-    queryFn: () => agentGatewayEnabled(agent.id),
-    enabled: agent.capability.supports_gateway,
-  });
-  const routed = routedQ.data ?? false;
-
-  return routed ? (
-    <div className="space-y-3">
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <EntryCard
-          to="/agents/$id/routing"
-          agentId={agent.id}
-          icon={<Workflow data-icon size={14} />}
-          title={t("agentDetail.policyTitle")}
-          hint={t("agentDetail.policyHint")}
-        />
-        {agent.id === "pi-cli" && (
-          <EntryCard
-            to="/agents/$id/review"
-            agentId={agent.id}
-            icon={<ShieldCheck data-icon size={14} />}
-            title={t("agentDetail.reviewTitle")}
-            hint={t("agentDetail.reviewHint")}
-          />
+    <div className="space-y-4">
+      {/* Keyed wrapper re-mounts on mode flip so the keyed subtree fades
+          back in via `animate-in` (DESIGN.md §11). The prior subtree
+          unmounts instantly — no exit animation, to avoid ghosting during
+          the fade-in of the new one. */}
+      <div key={routed ? "routed" : "direct"} className="space-y-4 animate-in fade-in slide-in-from-bottom-1 duration-fast">
+        {routed ? (
+          <>
+            <SteadyRouteCard agentId={agent.id} />
+            <RoutingEntryCard agent={agent} />
+            <UsageCard agentId={agent.id} />
+            <TasksCard agentId={agent.id} />
+          </>
+        ) : (
+          <DirectCard agent={agent} endpoints={endpoints} />
         )}
       </div>
-
-      <DetectedRolesCard agentId={agent.id} />
-
-      <CollapsibleSection
-        icon={<ListTree data-icon size={14} />}
-        title={t("agentDetail.tasks")}
-        hint={t("agentDetail.tasksHint")}
-      >
-        <AgentTasks agentId={agent.id} />
-      </CollapsibleSection>
-
-      <UsageCard agentId={agent.id} />
     </div>
-  ) : (
-    <ProviderConfigPanel agent={agent} endpoints={endpoints} />
   );
 }
 
-/// Collapsible card section: SectionHeader-style header that toggles its
-/// body. Defaults to closed so the detail page stays compact.
-function CollapsibleSection({
-  icon,
-  title,
-  hint,
-  children,
-}: {
-  icon: ReactNode;
-  title: string;
-  hint: string;
-  children: ReactNode;
-}) {
+/// The Direct-mode primary card: the provider binding editor in a proper
+/// section (it used to render bare with no chapter identity of its own).
+function DirectCard({ agent, endpoints }: { agent: AgentInfo; endpoints: EndpointInfo[] }) {
+  const { t } = useTranslation();
   return (
     <Card padding="none">
-      <Disclosure
-        defaultOpen={false}
-        buttonClassName="px-3 py-2"
-        header={
-          <span className="flex min-w-0 flex-1 items-center gap-2">
-            <span className="shrink-0 text-accent">{icon}</span>
-            <span className="min-w-0 flex-1">
-              <span className="block text-sm font-medium text-fg">{title}</span>
-              <span className="prose mt-0.5 block text-2xs text-subtle">{hint}</span>
-            </span>
-          </span>
-        }
-      >
-        <div className="border-t border-border p-3">{children}</div>
-      </Disclosure>
+      <SectionHeader
+        icon={<Plug data-icon size={14} />}
+        title={t("agentDetail.directTitle")}
+        hint={t("agentDetail.directHint")}
+      />
+      <div className="p-3">
+        <ProviderConfigPanel agent={agent} endpoints={endpoints} />
+      </div>
     </Card>
   );
 }
 
-/// Subagent roles this agent has actually used (from `route_request`),
-/// newest first. Chips link to the routing page for per-role policy editing.
-/// Collapsed by default; hidden entirely when nothing was detected.
-function DetectedRolesCard({ agentId }: { agentId: string }) {
+/// Routed-mode policy hub: role-policy count + detected subagent roles + the
+/// entries into the policy editor (and, for pi-cli, the review runtime).
+function RoutingEntryCard({ agent }: { agent: AgentInfo }) {
   const { t } = useTranslation();
-  const q = useQuery({
-    queryKey: qk.detectedRoles(agentId),
-    queryFn: () => detectedRoles(agentId),
+  const policiesQ = useQuery({
+    queryKey: qk.routingPolicies(agent.id),
+    queryFn: () => routingPolicyList(agent.id),
   });
-  const roles = q.data ?? [];
-  if (roles.length === 0) return null;
-  return (
-    <CollapsibleSection
-      icon={<Users data-icon size={14} />}
-      title={t("agentDetail.detectedRoles")}
-      hint={t("agentDetail.detectedRolesHint")}
-    >
-      <div className="flex flex-wrap items-center gap-1.5">
-        {roles.map((r) => (
-          <Link
-            key={r.role}
-            to="/agents/$id/routing"
-            params={{ id: agentId }}
-            className="inline-flex items-center gap-1.5 rounded border border-border bg-inset px-1.5 py-0.5 font-mono text-2xs text-fg transition-colors duration-fast hover:border-accent/50 hover:bg-raised"
-            title={t("agentDetail.roleChipTip", { count: r.request_count, role: r.role })}
-          >
-            <RoleKey roleKey={r.role} />
-            <span className="text-subtle tabular">×{r.request_count}</span>
-          </Link>
-        ))}
-      </div>
-    </CollapsibleSection>
-  );
-}
-
-/// Gateway-observed usage for this agent, last 30 days: totals + per-model
-/// breakdown. The backend unions folded lifetime history with the live
-/// window; spend is priced at read time (`cost_usd: null` rows carry tokens
-/// but no dollars — flagged, never silently free). Hidden when no traffic.
-function UsageCard({ agentId }: { agentId: string }) {
-  const { t } = useTranslation();
-  const q = useQuery({
-    queryKey: ["orchestration", "usage", agentId],
-    queryFn: () => usageSummary(agentId, 30),
-    refetchInterval: 15000,
+  const rolesQ = useQuery({
+    queryKey: qk.detectedRoles(agent.id),
+    queryFn: () => detectedRoles(agent.id),
   });
-  const rows = q.data ?? [];
-  if (!q.isLoading && rows.length === 0) return null;
-
-  const totals = rows.reduce(
-    (a, r) => ({
-      requests: a.requests + r.requests,
-      input: a.input + r.usage_input,
-      output: a.output + r.usage_output,
-      cacheRead: a.cacheRead + r.cache_read,
-      cacheWrite: a.cacheWrite + r.cache_creation,
-      cost: a.cost + (r.cost_usd ?? 0),
-      unknown: a.unknown || r.cost_usd == null,
-    }),
-    { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, unknown: false },
-  );
-  const byModel = new Map<string, typeof totals & { model: string; endpoint: string }>();
-  for (const r of rows) {
-    const key = `${r.endpoint_id || "—"} / ${r.model_id || "—"}`;
-    const cur =
-      byModel.get(key) ??
-      { ...totals, requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, unknown: false, model: r.model_id || "—", endpoint: r.endpoint_id || "—" };
-    cur.requests += r.requests;
-    cur.input += r.usage_input;
-    cur.output += r.usage_output;
-    cur.cacheRead += r.cache_read;
-    cur.cacheWrite += r.cache_creation;
-    cur.cost += r.cost_usd ?? 0;
-    cur.unknown = cur.unknown || r.cost_usd == null;
-    byModel.set(key, cur);
-  }
-  const fmt = (n: number) => n.toLocaleString();
-  const fmtUsd = (n: number) => (n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`);
+  const roles = rolesQ.data ?? [];
+  const star = (policiesQ.data ?? []).find((p) => p.role === "*");
+  const starCount = star?.route_targets.length ?? 0;
 
   return (
-    <CollapsibleSection
-      icon={<Coins data-icon size={14} />}
-      title={t("agentDetail.usage")}
-      hint={t("agentDetail.usageHint")}
-    >
-      {q.isLoading ? (
-        <Skeleton className="h-8 w-full" />
-      ) : (
-        <div className="space-y-2">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-2xs text-muted tabular">
-            <span>
-              <span className="text-fg">{fmt(totals.requests)}</span>{" "}
-              {t("agentDetail.usageRequests")}
-            </span>
-            <span>
-              <span className="text-fg">{fmt(totals.input)}</span> {t("agentDetail.usageIn")}
-            </span>
-            <span>
-              <span className="text-fg">{fmt(totals.output)}</span> {t("agentDetail.usageOut")}
-            </span>
-            <span>
-              <span className="text-fg">{fmt(totals.cacheRead)}</span> {t("cache.read")}
-            </span>
-            <span className="ml-auto">
-              {t("agentDetail.usageSpend")}{" "}
-              <span className="text-fg">{fmtUsd(totals.cost)}</span>
-              {totals.unknown && (
-                <span className="ml-1 text-warning" title={t("agentDetail.usageSpendUnknown")}>
-                  ~+
-                </span>
-              )}
-            </span>
-          </div>
-          <ul className="space-y-1">
-            {[...byModel.entries()].map(([key, m]) => (
-              <li
-                key={key}
-                className="flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-2xs text-muted tabular"
-              >
-                <span className="min-w-0 flex-1 truncate">
-                  <span className="text-fg">{m.model}</span>
-                  <span className="text-subtle"> @ {m.endpoint}</span>
-                </span>
-                <span>
-                  {fmt(m.requests)} {t("agentDetail.usageRequests")}
-                </span>
-                <span>
-                  {t("agentDetail.usageIn")} {fmt(m.input)}
-                </span>
-                <span>
-                  {t("agentDetail.usageOut")} {fmt(m.output)}
-                </span>
-                <span>
-                  {t("agentDetail.usageSpend")}{" "}
-                  {m.cost > 0 || !m.unknown ? fmtUsd(m.cost) : "—"}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </CollapsibleSection>
-  );
-}
-
-/// Full-card link to a Routed-mode sub-page.
-function EntryCard({
-  icon,
-  title,
-  hint,
-  to,
-  agentId,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  hint: string;
-  to: "/agents/$id/routing" | "/agents/$id/review";
-  agentId: string;
-}) {
-  return (
-    <Link
-      to={to}
-      params={{ id: agentId }}
-      className="group flex items-center gap-3 rounded border border-border bg-inset/40 px-3 py-2 transition-[border-color,background-color] duration-fast hover:border-accent/50 hover:bg-inset"
-    >
-      <span className="text-accent">{icon}</span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-medium text-fg">{title}</span>
-        <span className="mt-0.5 block truncate text-2xs text-subtle">{hint}</span>
-      </span>
-      <ArrowRight
-        data-icon
-        size={14}
-        className="shrink-0 text-subtle transition-transform duration-fast group-hover:translate-x-0.5"
+    <Card padding="none">
+      <SectionHeader
+        icon={<Workflow data-icon size={14} />}
+        title={t("agentDetail.routingCard")}
+        hint={t("agentDetail.routingCardHint")}
       />
-    </Link>
+      <div className="flex flex-col divide-y divide-border">
+        <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+          <span className="font-mono text-2xs text-muted tabular">
+            {starCount > 0
+              ? t("agentDetail.policySummary", {
+                  roles: (policiesQ.data ?? []).length,
+                  targets: starCount,
+                })
+              : t("agentDetail.policyEmpty")}
+          </span>
+          <span className="ms-auto" />
+          {agent.id === "pi-cli" && (
+            <Link
+              to="/agents/$id/review"
+              params={{ id: agent.id }}
+              search={{ session: undefined }}
+            >
+              <Button size="sm" variant="ghost">
+                <ShieldCheck data-icon size={14} />
+              </Button>
+            </Link>
+          )}
+          <Link to="/agents/$id/routing" params={{ id: agent.id }}>
+            <Button size="sm" variant="secondary">
+              {t("agentDetail.editPolicy")}
+            </Button>
+          </Link>
+        </div>
+        {roles.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 px-3 py-2">
+            <span className="font-mono text-2xs text-subtle">
+              {t("agentDetail.detectedRoles")}
+            </span>
+            {roles.map((r) => (
+              <Link
+                key={r.role}
+                to="/agents/$id/routing"
+                params={{ id: agent.id }}
+                className="inline-flex items-center gap-1.5 border border-border bg-inset px-1.5 py-0.5 font-mono text-2xs text-fg transition-colors duration-fast hover:border-accent-border hover:bg-raised"
+                title={t("agentDetail.roleChipTip", { count: r.request_count, role: r.role })}
+              >
+                <RoleKey roleKey={r.role} />
+                <span className="text-subtle tabular">×{r.request_count}</span>
+              </Link>
+            ))}
+          </div>
+        )}
+      </div>
+    </Card>
   );
 }
 
-/// This agent's live tasks (aggregated from route_request), each expandable
-/// to its full route lineage + migration events.
+/// This agent's live gateway tasks. A persistent card (not a self-hiding
+/// collapsible): no traffic shows the honest empty state instead of a
+/// vanishing section. The list scrolls internally past ~7 rows so a long
+/// task history doesn't stretch the page.
+function TasksCard({ agentId }: { agentId: string }) {
+  const { t } = useTranslation();
+  return (
+    <Card padding="none">
+      <SectionHeader
+        icon={<ListTree data-icon size={14} />}
+        title={t("agentDetail.tasks")}
+        hint={t("agentDetail.tasksHint")}
+      />
+      <div className="max-h-72 overflow-y-auto scroll p-3">
+        <AgentTasks agentId={agentId} />
+      </div>
+    </Card>
+  );
+}
+
 function AgentTasks({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const q = useQuery({
@@ -402,7 +241,7 @@ function TaskRow({ summary }: { summary: TaskSummary }) {
   const statusTone = statusToneOf(status);
 
   return (
-    <div className="rounded border border-border bg-inset/60">
+    <div className="border border-border bg-inset">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -437,27 +276,33 @@ function TaskRow({ summary }: { summary: TaskSummary }) {
           </Badge>
         )}
       </button>
-      {open && (
-        <div className="border-t border-border px-3 py-2">
-          {historyQ.isLoading ? (
-            <Skeleton className="h-8 w-full" />
-          ) : (
-            <RouteLineage records={historyQ.data ?? []} />
-          )}
-          {(migrationsQ.data ?? []).length > 0 && (
-            <div className="mt-2 border-t border-border pt-2">
-              <div className="mb-1 font-mono text-2xs text-subtle">
-                {t("orchestration.migrations", { count: migrationsQ.data?.length })}
+      <div
+        className="grid transition-[grid-template-rows] duration-150 ease-out"
+        style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
+        aria-hidden={!open}
+      >
+        <div className="min-h-0 overflow-hidden">
+          <div className="border-t border-border px-3 py-2">
+            {historyQ.isLoading ? (
+              <Skeleton className="h-8 w-full" />
+            ) : (
+              <RouteLineage records={historyQ.data ?? []} />
+            )}
+            {(migrationsQ.data ?? []).length > 0 && (
+              <div className="mt-2 border-t border-border pt-2">
+                <div className="mb-1 font-mono text-2xs text-subtle">
+                  {t("orchestration.migrations", { count: migrationsQ.data?.length })}
+                </div>
+                <ul className="space-y-1">
+                  {(migrationsQ.data ?? []).map((m) => (
+                    <MigrationRow key={m.id} m={m} />
+                  ))}
+                </ul>
               </div>
-              <ul className="space-y-1">
-                {(migrationsQ.data ?? []).map((m) => (
-                  <MigrationRow key={m.id} m={m} />
-                ))}
-              </ul>
-            </div>
-          )}
+            )}
+          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -475,3 +320,138 @@ function MigrationRow({ m }: { m: RouteMigrationRow }) {
     </li>
   );
 }
+
+/// Gateway-observed usage for this agent, last 30 days. Totals as a stat
+/// tile row, then the per-model breakdown. The backend unions folded
+/// lifetime history with the live window; spend is priced at read time
+/// (`cost_usd: null` rows carry tokens but no dollars — flagged, never
+/// silently free). Persistent card; no traffic shows the empty state.
+function UsageCard({ agentId }: { agentId: string }) {
+  const { t } = useTranslation();
+  const q = useQuery({
+    queryKey: ["orchestration", "usage", agentId],
+    queryFn: () => usageSummary(agentId, 30),
+    refetchInterval: 15000,
+  });
+  const rows = q.data ?? [];
+
+  const { totals, byModel } = useMemo(() => {
+    const zero = {
+      requests: 0,
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0,
+      unknown: false,
+    };
+    const totals = rows.reduce(
+      (a, r) => ({
+        requests: a.requests + r.requests,
+        input: a.input + r.usage_input,
+        output: a.output + r.usage_output,
+        cacheRead: a.cacheRead + r.cache_read,
+        cacheWrite: a.cacheWrite + r.cache_creation,
+        cost: a.cost + (r.cost_usd ?? 0),
+        unknown: a.unknown || r.cost_usd == null,
+      }),
+      zero,
+    );
+    const byModel = new Map<
+      string,
+      typeof totals & { model: string; endpoint: string }
+    >();
+    for (const r of rows) {
+      const key = `${r.endpoint_id || "—"} / ${r.model_id || "—"}`;
+      const cur =
+        byModel.get(key) ??
+        {
+          ...zero,
+          model: r.model_id || "—",
+          endpoint: r.endpoint_id || "—",
+        };
+      cur.requests += r.requests;
+      cur.input += r.usage_input;
+      cur.output += r.usage_output;
+      cur.cacheRead += r.cache_read;
+      cur.cacheWrite += r.cache_creation;
+      cur.cost += r.cost_usd ?? 0;
+      cur.unknown = cur.unknown || r.cost_usd == null;
+      byModel.set(key, cur);
+    }
+    return { totals, byModel: [...byModel.values()] };
+  }, [rows]);
+
+  const fmt = (n: number) => n.toLocaleString();
+  const fmtUsd = (n: number) =>
+    n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`;
+
+  return (
+    <Card padding="none">
+      <SectionHeader
+        icon={<Coins data-icon size={14} />}
+        title={t("agentDetail.usage")}
+        hint={t("agentDetail.usageHint")}
+      />
+      <div className="p-3">
+        {q.isLoading ? (
+          <Skeleton className="h-8 w-full" />
+        ) : rows.length === 0 ? (
+          <EmptyOrchestration
+            title={t("agentDetail.noGatewayTraffic")}
+            hint={t("agentDetail.usageEmptyHint")}
+          />
+        ) : (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+              <Stat label={t("agentDetail.usageRequests")} value={fmt(totals.requests)} />
+              <Stat label={t("agentDetail.usageIn")} value={fmt(totals.input)} />
+              <Stat label={t("agentDetail.usageOut")} value={fmt(totals.output)} />
+              <Stat label={t("cache.read")} value={fmt(totals.cacheRead)} />
+              <Stat
+                label={t("agentDetail.usageSpend")}
+                value={
+                  <>
+                    {fmtUsd(totals.cost)}
+                    {totals.unknown && (
+                      <span className="ml-1 text-warning" title={t("agentDetail.usageSpendUnknown")}>
+                        ~+
+                      </span>
+                    )}
+                  </>
+                }
+              />
+            </div>
+            <ul className="space-y-1 border-t border-border pt-2">
+              {byModel.map((m) => (
+                <li
+                  key={`${m.endpoint}/${m.model}`}
+                  className="flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-2xs text-muted tabular"
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    <span className="text-fg">{m.model}</span>
+                    <span className="text-subtle"> @ {m.endpoint}</span>
+                  </span>
+                  <span>
+                    {fmt(m.requests)} {t("agentDetail.usageRequests")}
+                  </span>
+                  <span>
+                    {t("agentDetail.usageIn")} {fmt(m.input)}
+                  </span>
+                  <span>
+                    {t("agentDetail.usageOut")} {fmt(m.output)}
+                  </span>
+                  <span>
+                    {t("agentDetail.usageSpend")}{" "}
+                    {m.cost > 0 || !m.unknown ? fmtUsd(m.cost) : "—"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+

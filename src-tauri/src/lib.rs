@@ -80,8 +80,8 @@ pub struct AppState {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     logging::init();
-    // Crash reports append to <log_dir>/crash.log; the previous session's
-    // log is retained as nestra.log.1 — see both modules.
+    // Crash reports append to <log_dir>/crash.log; the rolling appenders
+    // keep daily nestra.<date>.log / .json generations — see both modules.
     panic_hook::install();
 
     let data_dir = db::data_dir().expect("failed to resolve data dir");
@@ -117,6 +117,10 @@ pub fn run() {
     if let Ok(mut t) = gateway_tuning.write() {
         *t = orchestration::gateway::tuning::GatewayTuning::load(&conn);
     }
+    // Restore the persisted log settings now that the DB is open
+    // (logging::init ran before it): verbosity preset + full-body capture.
+    // NESTRA_LOG, when set, wins for the preset.
+    logging::apply_persisted_settings(&conn);
 
     // Loopback auth token: get-or-generate up front (encrypted keychain). The
     // gateway is fail-closed without it; generating at launch means it is ready
@@ -384,6 +388,12 @@ pub fn run() {
             commands::diagnostics::diag_export_logs,
             commands::diagnostics::diag_health,
             commands::diagnostics::diag_open_data_dir,
+            commands::diagnostics::diag_log_files,
+            commands::diagnostics::diag_read_logs,
+            commands::diagnostics::diag_log_level_get,
+            commands::diagnostics::diag_log_level_set,
+            commands::diagnostics::diag_log_full_bodies_get,
+            commands::diagnostics::diag_log_full_bodies_set,
             // Updates — GitHub Release version check (manual trigger)
             commands::updates::updates_check,
             // Autostart (launch at login)

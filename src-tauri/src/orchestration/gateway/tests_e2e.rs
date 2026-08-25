@@ -726,6 +726,72 @@ async fn in_band_stream_error_walks_route_targets() {
     assert_eq!(reason, "retries_exhausted");
 }
 
+/// The surfaced form of the opencode-go free-model in-band error on a
+/// SINGLE-target policy: the probe's synthetic 503 must reach the agent
+/// with a JSON body carrying the reason — not a bare empty 503 the agent
+/// can't distinguish from a gateway bug.
+#[tokio::test]
+async fn surfaced_in_band_error_503_carries_reason_body() {
+    let bad_payload = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
+        data: {\"choices\":[{\"index\":0,\"finish_reason\":\"network_error\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n\
+        data: [DONE]\n\n";
+    let (bad_addr, bad_upstream) = mock_upstream_n(bad_payload.to_string(), 1).await;
+
+    let conn = {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::schema::build_v1(&conn).unwrap();
+        for a in crate::agents::agents() {
+            conn.execute(
+                "INSERT OR IGNORE INTO agent (id, kind, display_name, status, last_detected_at, enabled)
+                 VALUES (?1, ?2, ?3, 'ok', 0, 1)",
+                rusqlite::params![a.id, a.kind, a.display_name],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO provider_endpoint (id, kind, display_name, has_api_key, status, models_json)
+             VALUES ('ep-bad','custom','test',1,'valid',?1)",
+            rusqlite::params![r#"{"available":["m-bad"],"default":"m-bad"}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO endpoint_protocol (endpoint_id, protocol, base_url) VALUES ('ep-bad','openai-comp',?1)",
+            rusqlite::params![format!("http://{bad_addr}")],
+        )
+        .unwrap();
+        seed_star_policy_rows(&conn, "opencode-desktop", &[("ep-bad", "m-bad")]);
+        crate::orchestration::capability_registry::rebuild(&conn).unwrap();
+        conn
+    };
+    let state = state_for(conn);
+
+    let body = br#"{"model":"nestra","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = super::protocol_openai::handle_bytes(
+        headers(),
+        Bytes::from_static(body),
+        state.clone(),
+        "opencode-desktop",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        resp.headers().get(hyper::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "the synthetic 503 must declare its JSON body"
+    );
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["error"]["type"], "nestra_gateway_error");
+    let msg = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("finish_reason=network_error"),
+        "the probe reason must surface to the agent: {msg}"
+    );
+
+    // Single-target fast-fail: exactly one attempt, no retry ladder.
+    assert_eq!(bad_upstream.await.unwrap().len(), 1);
+}
+
 /// Seed a `*` policy with explicit ordered targets (test-local form of
 /// `seed_star_policy` that takes pairs directly).
 pub(super) fn seed_star_policy_rows(conn: &rusqlite::Connection, agent: &str, targets: &[(&str, &str)]) {
@@ -1294,4 +1360,197 @@ async fn upstream_requests_carry_content_length_not_chunked() {
         })
         .expect("content-length parses");
     assert_eq!(rest.len(), clen, "content-length must equal the body size");
+}
+
+// ---- Logging correlation contract (see gateway/trace.rs) ----
+
+/// One captured event: the message, its structured fields, and the span
+/// chain (innermost first) it fired inside.
+struct CapturedEvent {
+    message: String,
+    fields: Vec<(String, String)>,
+    spans: Vec<String>,
+}
+
+#[derive(Default)]
+struct CaptureEvents {
+    events: std::sync::Mutex<Vec<CapturedEvent>>,
+}
+
+/// Test-only layer that records every event dispatched on its thread.
+struct CaptureLayer {
+    capture: std::sync::Arc<CaptureEvents>,
+}
+
+impl<C> tracing_subscriber::Layer<C> for CaptureLayer
+where
+    C: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, C>,
+    ) {
+        let mut collector = FieldCollector(Vec::new());
+        event.record(&mut collector);
+        let spans = ctx
+            .event_scope(event)
+            .map(|scope| scope.map(|s| s.name().to_string()).collect())
+            .unwrap_or_default();
+        let message = collector
+            .0
+            .iter()
+            .find(|(k, _)| k == "message")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        self.capture.events.lock().unwrap().push(CapturedEvent {
+            message,
+            fields: collector.0,
+            spans,
+        });
+    }
+}
+
+struct FieldCollector(Vec<(String, String)>);
+
+impl tracing::field::Visit for FieldCollector {
+    fn record_debug(
+        &mut self,
+        field: &tracing::field::Field,
+        value: &dyn std::fmt::Debug,
+    ) {
+        self.0.push((field.name().to_string(), format!("{value:?}")));
+    }
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.push((field.name().to_string(), value.to_string()));
+    }
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.0.push((field.name().to_string(), value.to_string()));
+    }
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.0.push((field.name().to_string(), value.to_string()));
+    }
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.0.push((field.name().to_string(), value.to_string()));
+    }
+}
+
+/// The logging correlation contract: one successful request must emit the
+/// lifecycle vocabulary (`gw.request inbound` → `gw.route` →
+/// `gw.attempt outcome` → `gw.done`), and the loop-phase events must fire
+/// inside the `gw_attempt` → `gw_request` span chain — the whole point of
+/// the system is that any log line is attributable to a request.
+#[tokio::test]
+async fn lifecycle_events_carry_request_correlation() {
+    let ok_payload = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n\
+        {\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3}}";
+    let (addr, upstream) = mock_upstream_n(ok_payload.to_string(), 1).await;
+
+    let conn = {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::schema::build_v1(&conn).unwrap();
+        for a in crate::agents::agents() {
+            conn.execute(
+                "INSERT OR IGNORE INTO agent (id, kind, display_name, status, last_detected_at, enabled)
+                 VALUES (?1, ?2, ?3, 'ok', 0, 1)",
+                rusqlite::params![a.id, a.kind, a.display_name],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO provider_endpoint (id, kind, display_name, has_api_key, status, models_json)
+             VALUES ('ep-ok','custom','test',1,'valid',?1)",
+            rusqlite::params![r#"{"available":["m-ok"],"default":"m-ok"}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO endpoint_protocol (endpoint_id, protocol, base_url) VALUES ('ep-ok','openai-comp',?1)",
+            rusqlite::params![format!("http://{addr}")],
+        )
+        .unwrap();
+        seed_star_policy_rows(&conn, "opencode-desktop", &[("ep-ok", "m-ok")]);
+        crate::orchestration::capability_registry::rebuild(&conn).unwrap();
+        conn
+    };
+    let state = state_for(conn);
+
+    let capture = std::sync::Arc::new(CaptureEvents::default());
+    let subscriber = {
+        use tracing_subscriber::prelude::*;
+        tracing_subscriber::registry().with(CaptureLayer {
+            capture: capture.clone(),
+        })
+    };
+    // Current-thread runtime + thread-local default: the WHOLE request path
+    // (and any spawned observability task) dispatches into the capture.
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let body = br#"{"model":"nestra","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = super::protocol_openai::handle_bytes(
+        headers(),
+        Bytes::from_static(body),
+        state.clone(),
+        "opencode-desktop",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), hyper::StatusCode::OK);
+    drop(_guard);
+    assert_eq!(upstream.await.unwrap().len(), 1);
+
+    let events = capture.events.lock().unwrap();
+    let find = |name: &str| {
+        events
+            .iter()
+            .find(|e| e.message == name)
+            .unwrap_or_else(|| panic!("missing milestone {name}; got {:?}", events.iter().map(|e| e.message.clone()).collect::<Vec<_>>()))
+    };
+    let field = |e: &CapturedEvent, k: &str| {
+        e.fields
+            .iter()
+            .find(|(k2, _)| k2 == k)
+            .map(|(_, v)| v.clone())
+    };
+
+    let inbound = find("gw.request inbound");
+    assert!(
+        field(inbound, "task").is_some_and(|t| !t.is_empty()),
+        "inbound carries the task id"
+    );
+    assert_eq!(field(inbound, "wire").as_deref(), Some("openai"));
+
+    let route = find("gw.route");
+    assert_eq!(field(route, "endpoint").as_deref(), Some("ep-ok"));
+    assert_eq!(field(route, "model").as_deref(), Some("m-ok"));
+
+    let outcome = find("gw.attempt outcome");
+    assert_eq!(field(outcome, "status").as_deref(), Some("200"));
+    assert_eq!(
+        outcome.spans,
+        vec!["gw_request".to_string()],
+        "the success outcome fires after the attempt future completed — it sits at the request level (its `attempt` field carries the ordinal)"
+    );
+    assert!(field(outcome, "duration_ms").is_some(), "success attempts log latency");
+
+    let done = find("gw.done");
+    assert_eq!(field(done, "status").as_deref(), Some("200"));
+    assert_eq!(
+        done.spans,
+        vec!["gw_request".to_string()],
+        "loop events nest in the request span"
+    );
+
+    // The attempt-level nesting is proven by an event fired INSIDE the
+    // forward future: the debug wire-evidence event must carry the
+    // gw_attempt → gw_request chain (the whole point — any line during an
+    // attempt is attributable to it).
+    let wire = events
+        .iter()
+        .find(|e| e.message == "gw.upstream request")
+        .expect("debug wire evidence event");
+    assert_eq!(
+        wire.spans,
+        vec!["gw_attempt".to_string(), "gw_request".to_string()],
+        "attempt-phase events nest in the attempt→request span chain"
+    );
 }

@@ -42,7 +42,7 @@ export function AgentsPage() {
         action={
           <div className="flex items-center gap-3">
             <SyncIndicator query={q} />
-            <Button onClick={() => detect.mutate()} disabled={detect.isPending} loading={detect.isPending}>
+            <Button size="sm" onClick={() => detect.mutate()} disabled={detect.isPending} loading={detect.isPending}>
               {detect.isPending ? t("agents.detecting") : t("agents.redetect")}
             </Button>
           </div>
@@ -71,7 +71,7 @@ export function AgentsPage() {
         />
       )}
 
-      <div className="space-y-2">
+      <div className="space-y-2 animate-in fade-in duration-fast">
         {connected.map((c) => (
           <AgentCard key={c.id} agent={c} endpoints={endpoints} />
         ))}

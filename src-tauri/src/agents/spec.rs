@@ -157,9 +157,25 @@ pub struct AgentSpec {
     pub importer: Option<fn() -> Box<dyn SessionImporter>>,
     /// MCP config provider constructor; `Some` iff `capability.supports_mcp`.
     pub mcp_provider: Option<fn() -> Box<dyn McpProvider>>,
+    /// Runtime gate on `capability.supports_mcp`: `None` = always available;
+    /// `Some(f)` = MCP support depends on an install-time condition checked
+    /// per call (pi-cli: the community `pi-mcp-adapter` package must be
+    /// installed — pi has no native MCP). The reported capability, the
+    /// provider registry, and MCP sync all consult it.
+    pub mcp_available: Option<fn() -> bool>,
 }
 
 impl AgentSpec {
+    /// The capability the UI sees: the static declaration with the
+    /// [`Self::mcp_available`] runtime gate applied to `supports_mcp`.
+    pub fn effective_capability(&self) -> Capability {
+        let mut c = self.capability;
+        if let Some(f) = self.mcp_available {
+            c.supports_mcp = c.supports_mcp && f();
+        }
+        c
+    }
+
     /// `true` when Nestra has a config adapter and can write this agent's config.
     pub fn manageable(&self) -> bool {
         !self.config.writer.is_empty()

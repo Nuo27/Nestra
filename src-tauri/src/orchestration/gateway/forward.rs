@@ -120,6 +120,7 @@ impl ForwardOutcome {
 /// quota-exhausted endpoints, so a post-failure re-resolve naturally picks a
 /// different endpoint). `forward` performs one protocol-specific attempt.
 /// `error_response` builds the protocol's agent-facing JSON error envelope.
+#[tracing::instrument(name = "gw_request", skip_all, fields(task = %ctx.task_id, agent = %agent_id, model = ?ctx.requested_model))]
 pub async fn run_with_migration(
     state: &GatewayState,
     mut ctx: TaskContext,
@@ -177,12 +178,25 @@ pub async fn run_with_migration(
             } else {
                 "nestra gateway: no eligible route (no healthy, quota-ok endpoint for this task)"
             };
+            tracing::warn!(
+                eligible = false,
+                after_failure = failed_endpoint.is_some(),
+                task = %ctx.task_id,
+                "gw.route: fail-closed (no healthy, quota-ok endpoint)"
+            );
             // Terminal lifecycle: a resolve failure with no eligible route is
             // a task failure — leaving the task in 'born' would leak a
             // non-terminal row forever.
             mark_task_terminal(state, &ctx.task_id, TaskLifecycle::Failed).await;
             return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, msg));
         }
+        tracing::info!(
+            endpoint = %route.endpoint_id,
+            model = %route.model,
+            protocol = ?route.protocol,
+            reason = %route.reason.as_str(),
+            "gw.route"
+        );
 
         // Persist the credential-free projection of this attempt. First
         // ensure the run + task rows exist (route_request has FKs to them;
@@ -210,7 +224,21 @@ pub async fn run_with_migration(
         // completes, because every completed outcome is recorded normally.
         let mut abort_guard =
             AttemptGuard::new(state.clone(), request_id.clone(), ctx.task_id);
-        let mut outcome = forward(&ctx, &route).await;
+        // Every nested event of this attempt (dial, relay, probe) inherits
+        // the gw_request/gw_attempt correlation prefix — see gateway/trace.rs.
+        let attempt_started = std::time::Instant::now();
+        let mut outcome = tracing::Instrument::instrument(
+            forward(&ctx, &route),
+            tracing::info_span!(
+                "gw_attempt",
+                request = %request_id,
+                endpoint = %route.endpoint_id,
+                model = %route.model,
+                reason = %route.reason.as_str(),
+                attempt = attempts + 1,
+            ),
+        )
+        .await;
         abort_guard.disarm();
         attempts += 1;
 
@@ -251,6 +279,20 @@ pub async fn run_with_migration(
                     TaskLifecycle::Done
                 };
                 mark_task_terminal(state, &ctx.task_id, terminal).await;
+                tracing::info!(
+                    status = status.as_u16(),
+                    class = "ok",
+                    attempt = attempts,
+                    duration_ms = attempt_started.elapsed().as_millis() as u64,
+                    generation_broken,
+                    "gw.attempt outcome"
+                );
+                tracing::info!(
+                    status = status.as_u16(),
+                    total_ms = chrono::Utc::now().timestamp_millis() - started_at,
+                    generation_broken,
+                    "gw.done"
+                );
                 // Replace the borrowed body with a placeholder so we can move
                 // the real one out (the outcome is about to be dropped anyway).
                 let taken = std::mem::replace(
@@ -294,6 +336,17 @@ pub async fn run_with_migration(
                 (FailureClass::classify(502, "", *timeout), false, None)
             }
         };
+        let outcome_status = match &outcome {
+            ForwardOutcome::Responded { status, .. } => status.as_u16(),
+            ForwardOutcome::Unreachable { .. } => 502,
+        };
+        tracing::info!(
+            status = outcome_status,
+            class = class.as_str(),
+            duration_ms = attempt_started.elapsed().as_millis() as u64,
+            generation_started = gen_started,
+            "gw.attempt outcome"
+        );
 
         let decision = migration::decide(
             class,
@@ -352,6 +405,17 @@ pub async fn run_with_migration(
         } else {
             decision
         };
+
+        match &decision {
+            MigrationDecision::RetrySame { backoff, .. } => tracing::info!(
+                decision = %format!("retry-same in {}ms", backoff.as_millis()),
+                "gw.decide"
+            ),
+            MigrationDecision::Migrate { reason, .. } => {
+                tracing::info!(decision = %format!("migrate: {reason:?}"), "gw.decide")
+            }
+            MigrationDecision::Surface => tracing::info!(decision = "surface", "gw.decide"),
+        }
 
         match decision {
             MigrationDecision::RetrySame {
@@ -717,6 +781,13 @@ impl Drop for AttemptGuard {
         let Some(state) = self.state.take() else { return };
         let request_id = std::mem::take(&mut self.request_id);
         let task_id = self.task_id;
+        // Runs outside any span (the handler future was dropped) — carry the
+        // correlation ids explicitly.
+        tracing::warn!(
+            request = %request_id,
+            task = %task_id,
+            "gw.abort: agent disconnected mid-attempt — finalizing as 499"
+        );
         tokio::spawn(async move {
             finalize_client_aborted(&state, &request_id, &task_id).await;
         });

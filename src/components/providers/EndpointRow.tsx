@@ -27,12 +27,29 @@ import { Badge } from "../ui/badge";
 
 type BadgeSpec = { tone: "success" | "warning" | "danger" | "neutral"; labelKey: string };
 
-/// Waterfall-style provider card. Header shows identity + status; the quota
-/// section lets the user pick which quota window is tracked (the keep-alive
-/// worker's `target_quota_name`) and previews it quietly; the footer carries
-/// the action buttons. Card height varies with the quota rows, which is what
+/// Per-endpoint 30-day usage totals folded on the Providers page (one query
+/// for all cards). `unknown` = some rows carry tokens but no catalog price.
+export interface EndpointUsage {
+  requests: number;
+  input: number;
+  output: number;
+  cost: number;
+  unknown: boolean;
+}
+
+/// Waterfall-style provider card. Header shows identity + status; a quiet
+/// 30-day usage line sits under it; the quota section lets the user pick
+/// which quota window is tracked (the keep-alive worker's
+/// `target_quota_name`) and previews it quietly; the footer carries the
+/// action buttons. Card height varies with the quota rows, which is what
 /// makes the masonry layout work.
-export function EndpointRow({ endpoint }: { endpoint: EndpointInfo }) {
+export function EndpointRow({
+  endpoint,
+  usage,
+}: {
+  endpoint: EndpointInfo;
+  usage?: EndpointUsage;
+}) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const configured = endpoint.has_api_key;
@@ -108,10 +125,50 @@ export function EndpointRow({ endpoint }: { endpoint: EndpointInfo }) {
         <BreakerBadge endpointId={endpoint.id} />
       </div>
 
+      {/* 30-day usage — one quiet mono line; endpoints with no traffic
+          render nothing (the card stays clean). */}
+      {usage && usage.requests > 0 && <UsageLine usage={usage} />}
+
       {/* Quota preview — renders its own full-width divider + bar, or nothing
           while the query is unverified. */}
       <QuotaSection endpoint={endpoint} />
     </Card>
+  );
+}
+
+/// Quiet 30-day usage line: requests · in · out · spend. Spend rows without
+/// a catalog price carry the `~+` marker (unknown ≠ free), same semantics as
+/// the agent usage card.
+function UsageLine({ usage }: { usage: EndpointUsage }) {
+  const { t } = useTranslation();
+  const fmt = (n: number) => n.toLocaleString();
+  const fmtUsd = (n: number) =>
+    n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`;
+  return (
+    <div className="-mx-3 mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 border-t border-border px-3 pt-1.5 font-mono text-2xs text-muted tabular">
+      <span className="text-subtle">{t("providers.usage30d")}</span>
+      <span>
+        <span className="text-fg">{fmt(usage.requests)}</span>{" "}
+        {t("agentDetail.usageRequests")}
+      </span>
+      <span>
+        {t("agentDetail.usageIn")} <span className="text-fg">{fmt(usage.input)}</span>
+      </span>
+      <span>
+        {t("agentDetail.usageOut")} <span className="text-fg">{fmt(usage.output)}</span>
+      </span>
+      <span className="ml-auto">
+        {t("agentDetail.usageSpend")}{" "}
+        <span className="text-fg">
+          {usage.cost > 0 || !usage.unknown ? fmtUsd(usage.cost) : "—"}
+        </span>
+        {usage.unknown && (
+          <span className="ml-1 text-warning" title={t("agentDetail.usageSpendUnknown")}>
+            ~+
+          </span>
+        )}
+      </span>
+    </div>
   );
 }
 
@@ -211,8 +268,8 @@ function QuotaSection({ endpoint }: { endpoint: EndpointInfo }) {
     queryKey: qk.endpointQuota(endpoint.id),
     queryFn: () => endpointFetchQuota(endpoint.id),
     staleTime: 60_000,
-    // Passive preview — the quota page owns the Auto interval.
-    refetchInterval: false,
+    // Passive preview — the app-level QuotaAutoDriver (RootShell) owns the
+    // auto interval and advances this shared cache while the card is visible.
     // No refetchOnWindowFocus: TanStack's focus manager doesn't fire reliably
     // in WebView2 when the window is restored from tray. The reliable resume
     // trigger lives in `useResumeInvalidate` below (visibilitychange).

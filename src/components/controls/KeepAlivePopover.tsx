@@ -92,7 +92,7 @@ export function KeepAlivePopover({ endpointId }: { endpointId: string }) {
       </Button>
 
       {open && (
-        <div className="absolute right-0 top-full z-50 mt-2 w-[22rem] max-w-[calc(100vw-2rem)] rounded-md border border-border bg-overlay p-3 text-xs shadow-lg">
+        <div className="absolute right-0 top-full z-50 mt-2 w-[22rem] max-w-[calc(100vw-2rem)] border border-border bg-overlay p-3 text-xs">
           <div className="mb-2 flex items-center justify-between gap-2">
             <span className={`inline-flex items-center gap-1.5 font-medium ${meta.color}`}>
               <HeartPulse data-icon size={12} className={meta.pulse ? "animate-pulse" : ""} />
@@ -173,7 +173,7 @@ export function KeepAliveEditor({ endpointId }: { endpointId: string }) {
 
   return (
     <div className="space-y-2">
-      <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border bg-inset p-2 font-mono">
+      <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all border border-border bg-inset p-2 font-mono">
         {preview.isLoading
           ? t("keepalive.loading")
           : preview.error

@@ -28,6 +28,7 @@ import { SkillsPage } from "./pages/skills";
 import { McpPage } from "./pages/mcp";
 import { SettingsPage } from "./pages/settings";
 import { GatewayPage } from "./pages/gateway";
+import { GatewayLogsPage } from "./pages/gateway-logs";
 
 const rootRoute = createRootRoute({
   component: RootShell,
@@ -58,17 +59,18 @@ const quotaRoute = createRoute({
   component: () => <QuotaPage id={useParams({ from: "/quota/$id" }).id} />,
 });
 const agentsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/agents", component: AgentsPage });
-// Agent detail — the merged orchestration surface: Direct (provider binding)
-// vs Routed (routing policy + tasks + quota) per agent, with a shared
-// mode switch. Orchestration lives per-agent, not on a global route.
+// Agent detail — the dual-mode cockpit: the ACTIVE mode is the primary
+// column (Direct binding editor / route overview + policy entry) and the
+// inactive mode stays visible as a summary card with a one-click switch.
+// Tasks + usage below (Routed). Shared chrome lives in AgentPageFrame.
 const agentDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/agents/$id",
   component: () => <AgentDetailPage id={useParams({ from: "/agents/$id" }).id} />,
 });
-// Routed-mode sub-page: the routing policy editor lives on its own route,
-// linked from the detail page's Routed branch. Gated by RoutedGate while the
-// agent is Direct.
+// Routing sub-page: the focused policy editor. Policy data is
+// mode-independent — always editable; a Note explains the pending effect
+// while the agent is Direct.
 const agentRoutingRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/agents/$id/routing",
@@ -97,6 +99,13 @@ const skillsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/skill
 const mcpRoute = createRoute({ getParentRoute: () => rootRoute, path: "/mcp", component: McpPage });
 const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: SettingsPage });
 const gatewayRoute = createRoute({ getParentRoute: () => rootRoute, path: "/gateway", component: GatewayPage });
+// Gateway log viewer sub-page (entered from the Gateway page header) — reads
+// the JSON twin layer; same shape as the per-agent sub-pages.
+const gatewayLogsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/gateway/logs",
+  component: GatewayLogsPage,
+});
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
@@ -112,6 +121,7 @@ const routeTree = rootRoute.addChildren([
   mcpRoute,
   settingsRoute,
   gatewayRoute,
+  gatewayLogsRoute,
 ]);
 
 const router = createRouter({ routeTree });
