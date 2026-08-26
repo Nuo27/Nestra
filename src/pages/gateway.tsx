@@ -131,7 +131,7 @@ export function GatewayPage() {
         info={t("gateway.help")}
         action={
           <div className="flex items-center gap-2">
-            <span className="font-mono text-2xs text-subtle">{enabled ? t("gateway.on") : t("gateway.off")}</span>
+            <span className="font-mono text-2xs text-muted">{enabled ? t("gateway.on") : t("gateway.off")}</span>
             <Switch
               checked={enabled}
               disabled={setEnabledMut.isPending}
@@ -180,7 +180,7 @@ export function GatewayPage() {
                 127.0.0.1:{status?.configured_port ?? 18777}
               </span>
             </div>
-            <div className="prose text-xs text-subtle mt-0.5">{t("gateway.portHint")}</div>
+            <div className="prose text-xs text-muted mt-0.5">{t("gateway.portHint")}</div>
           </div>
           <div className="flex items-center gap-2 ml-auto shrink-0">
             <Input
@@ -227,7 +227,7 @@ export function GatewayPage() {
             <div className="font-mono text-sm text-fg">
               {revealed ?? (status?.has_token ? "••••••••••••••••••••••••" : t("gateway.noToken"))}
             </div>
-            <div className="prose text-xs text-subtle mt-0.5">{t("gateway.tokenHint")}</div>
+            <div className="prose text-xs text-muted mt-0.5">{t("gateway.tokenHint")}</div>
           </div>
           <div className="flex items-center gap-2 ml-auto shrink-0">
             <Button

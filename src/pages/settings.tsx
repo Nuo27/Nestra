@@ -174,7 +174,7 @@ export function SettingsPage() {
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="min-w-0">
             <div className="text-sm text-fg">{t("settings.autostart")}</div>
-            <div className="prose text-xs text-subtle mt-0.5">
+            <div className="prose text-xs text-muted mt-0.5">
               {t("settings.autostartDesc")}
             </div>
           </div>
@@ -195,7 +195,7 @@ export function SettingsPage() {
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="min-w-0">
             <div className="text-sm text-fg">{t("settings.theme")}</div>
-            <div className="prose text-xs text-subtle mt-0.5">
+            <div className="prose text-xs text-muted mt-0.5">
               {t("settings.themeDesc")}
             </div>
           </div>
@@ -213,7 +213,7 @@ export function SettingsPage() {
         <div className="flex flex-wrap items-center justify-between gap-4 border-t border-border pt-3">
           <div className="min-w-0">
             <div className="text-sm text-fg">{t("settings.language")}</div>
-            <div className="prose text-xs text-subtle mt-0.5">
+            <div className="prose text-xs text-muted mt-0.5">
               {t("settings.languageDesc")}
             </div>
           </div>
@@ -239,7 +239,7 @@ export function SettingsPage() {
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div className="min-w-0">
               <div className="text-sm text-fg">{t("settings.cadence")}</div>
-              <div className="prose text-xs text-subtle mt-0.5">
+              <div className="prose text-xs text-muted mt-0.5">
                 {t("settings.cadenceDesc")}
               </div>
             </div>
@@ -266,7 +266,7 @@ export function SettingsPage() {
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div className="min-w-0">
               <div className="text-sm text-fg">{t("settings.retention")}</div>
-              <div className="prose text-xs text-subtle mt-0.5">
+              <div className="prose text-xs text-muted mt-0.5">
                 {t("settings.retentionDesc")}
               </div>
             </div>
@@ -288,7 +288,7 @@ export function SettingsPage() {
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="min-w-0">
             <div className="text-sm text-fg">{t("settings.keepData")}</div>
-            <div className="prose text-xs text-subtle mt-0.5">
+            <div className="prose text-xs text-muted mt-0.5">
               {t("settings.keepDataDesc")}
             </div>
           </div>
@@ -312,7 +312,7 @@ export function SettingsPage() {
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="min-w-0">
             <div className="text-sm text-fg">{t("settings.clearCaches")}</div>
-            <div className="prose text-xs text-subtle mt-0.5">
+            <div className="prose text-xs text-muted mt-0.5">
               {t("settings.clearCachesDesc")}
             </div>
           </div>

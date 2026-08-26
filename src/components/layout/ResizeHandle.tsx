@@ -50,7 +50,9 @@ export function ResizeHandle({
     <div
       role="separator"
       aria-orientation="vertical"
-      className="absolute right-0 top-0 z-10 h-full w-1 cursor-col-resize transition-colors duration-fast hover:bg-accent-border"
+      // `w-1.5` (6px): a 4px strip was effectively invisible and hard to hit —
+      // the hover accent only reveals itself once the cursor is already on it.
+      className="absolute right-0 top-0 z-10 h-full w-1.5 cursor-col-resize transition-colors duration-fast hover:bg-accent-border"
       onMouseDown={start}
       title="Drag to resize"
     />

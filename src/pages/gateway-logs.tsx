@@ -108,7 +108,7 @@ export function GatewayLogsPage() {
         }
         action={
           <div className="flex items-center gap-3">
-            <span className="text-2xs text-subtle">{t("gatewayLogs.auto")}</span>
+            <span className="text-2xs text-muted">{t("gatewayLogs.auto")}</span>
             <Switch checked={auto} onCheckedChange={setAuto} aria-label={t("gatewayLogs.auto")} />
             <Button
               size="sm"
@@ -157,7 +157,7 @@ export function GatewayLogsPage() {
           </Select>
           <div className="ms-auto flex flex-wrap items-center gap-2">
             <span
-              className="text-2xs text-subtle"
+              className="text-2xs text-muted"
               title={t("gatewayLogs.fullBodiesHint")}
             >
               {t("gatewayLogs.fullBodies")}
@@ -168,7 +168,7 @@ export function GatewayLogsPage() {
               onCheckedChange={(v) => setFullBodiesMut.mutate(v)}
               aria-label={t("gatewayLogs.fullBodies")}
             />
-            <span className="text-2xs text-subtle">{t("gatewayLogs.capture")}</span>
+            <span className="text-2xs text-muted">{t("gatewayLogs.capture")}</span>
             <SegmentedControl<LogLevelPreset>
               ariaLabel={t("gatewayLogs.capture")}
               size="sm"
@@ -193,11 +193,21 @@ export function GatewayLogsPage() {
       </Card>
 
       {logsQ.isError ? (
-        <ErrorBanner variant="box">
-          <strong>{t("gatewayLogs.errorTitle")}</strong>
-          {" · "}
-          {extractError(logsQ.error) ?? String(logsQ.error)}
-        </ErrorBanner>
+        // Banner carries the failure detail; the EmptyState below fills what
+        // would otherwise be a blank log region (same shape as the no-rows
+        // branch, so an error view doesn't collapse into dead space).
+        <>
+          <ErrorBanner variant="box">
+            <strong>{t("gatewayLogs.errorTitle")}</strong>
+            {" · "}
+            {extractError(logsQ.error) ?? String(logsQ.error)}
+          </ErrorBanner>
+          <EmptyState
+            icon={<ScrollText />}
+            title={t("gatewayLogs.empty")}
+            hint={t("gatewayLogs.emptyHint")}
+          />
+        </>
       ) : logsQ.isLoading ? (
         <div className="space-y-1.5">
           <Skeleton className="h-5 w-full" />

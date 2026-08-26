@@ -146,7 +146,10 @@
   --bg-inset: #e6e5e1;
 
   /* borders */
-  --border: #e0dfd9;
+  /* #d6d4cc: #e0dfd9 (the palette's hairline) sat below 1.15:1 on the paper
+     surfaces — card edges and the dashed EmptyState outline all but vanished.
+     One step deeper keeps the hairline feel while staying visible. */
+  --border: #d6d4cc;
   --border-strong: #c9c7bf;
 
   /* text — warm dark ink (token light fg0/fg2/fg3) */

@@ -30,7 +30,11 @@ export function PageHeader({
     <div
       className={[
         sticky ? "sticky top-0 z-10 -mx-4 px-4 py-2.5 mb-3 border-b border-border bg-canvas" : "",
-        "flex items-start justify-between gap-3",
+        // No subtitle: the header is one line tall, so center the action
+        // cluster on the title's optical middle (items-start leaves sm/md
+        // buttons 2-4px high of the text-xl cap). With a subtitle the left
+        // block is two lines — top alignment keeps the action on the title row.
+        `flex ${subtitle ? "items-start" : "items-center"} justify-between gap-3`,
       ]
         .filter(Boolean)
         .join(" ")}

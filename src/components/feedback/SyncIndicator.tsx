@@ -50,7 +50,10 @@ export function SyncIndicator({
 
   if (isError) {
     return (
-      <span className={`inline-flex items-center text-2xs text-danger select-none ${className}`}>
+      <span className={`inline-flex items-center gap-1 text-2xs text-danger select-none ${className}`}>
+        {/* `!` glyph — the design's danger marker; bare text alone read as a
+            leftover fragment rather than a status. */}
+        <span aria-hidden="true">!</span>
         {t("sync.syncError")}
       </span>
     );

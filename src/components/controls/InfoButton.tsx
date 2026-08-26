@@ -24,7 +24,9 @@ export function InfoButton({
       <button
         type="button"
         aria-label={label}
-        className="inline-flex shrink-0 items-center text-subtle transition-colors duration-fast hover:text-fg focus-visible:outline-none focus-visible:shadow-focus"
+        // `muted`, not `subtle`: this is an interactive affordance, and
+        // subtle (~2.6:1 on card surfaces) reads as invisible decoration.
+        className="inline-flex shrink-0 items-center text-muted transition-colors duration-fast hover:text-fg focus-visible:outline-none focus-visible:shadow-focus"
       >
         <Info data-icon size={14} />
       </button>
