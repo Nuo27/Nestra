@@ -19,24 +19,30 @@ export function groupRenderItems(messages: SessionMessage[]): RenderItem[] {
   const flush = () => {
     if (buf.length === 0) return;
     const byId = new Map<string, SessionMessage[]>();
-    const unpaired: SessionMessage[] = [];
     for (const m of buf) {
       const id = m.tool_call_id;
       if (id) {
         const arr = byId.get(id) ?? [];
         arr.push(m);
         byId.set(id, arr);
-      } else {
-        unpaired.push(m);
       }
     }
-    for (const m of unpaired) out.push({ kind: "tool_unpaired", m });
+    // Emit in SOURCE order: a pair renders at its `use` row's original
+    // position (its result is folded in), everything else renders unpaired
+    // where it stood. Emitting unpaired rows first would reorder a run and
+    // contradict the file-top order invariant.
+    const pairedResults = new Set<SessionMessage>();
     for (const arr of byId.values()) {
-      if (arr.length === 2) {
+      if (arr.length === 2) pairedResults.add(arr[1]);
+    }
+    for (const m of buf) {
+      if (pairedResults.has(m)) continue; // already emitted inside its pair
+      const arr = m.tool_call_id ? byId.get(m.tool_call_id) : undefined;
+      if (arr && arr.length === 2 && m === arr[0]) {
         // First is use, second is result — the parser emits use before result.
         out.push({ kind: "tool_pair", use: arr[0], result: arr[1] });
       } else {
-        for (const m of arr) out.push({ kind: "tool_unpaired", m });
+        out.push({ kind: "tool_unpaired", m });
       }
     }
     buf = [];

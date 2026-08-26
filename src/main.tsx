@@ -12,7 +12,10 @@ import "./styles.css";
 try {
   const saved = JSON.parse(localStorage.getItem("nestra-ui") ?? "{}")?.state;
   initTheme(saved?.theme === "dark" || saved?.theme === "light" ? saved.theme : "system");
-  if (typeof saved?.language === "string" && saved.language) {
+  // Whitelist before touching <html lang>: anything else in localStorage
+  // (corruption, manual edits) would pollute the accessibility attribute and
+  // desync it from the locale i18n actually settled on.
+  if (saved?.language === "en" || saved?.language === "zh") {
     document.documentElement.lang = saved.language;
   }
 } catch {

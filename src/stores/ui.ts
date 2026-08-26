@@ -39,8 +39,8 @@ interface UIState {
   /// instantly instead of re-fetching on mount.
   quotaCache: Record<string, EndpointQuota>;
   setQuotaCache: (id: string, data: EndpointQuota) => void;
-  /// Transient toast stack. Each toast auto-dismisses after `ttlMs` (handled
-  /// by the Toaster on mount); dismissToast is called manually on click.
+  /// Transient toast stack. Each toast auto-dismisses after `ttlMs` (armed
+  /// by pushToast itself); dismissToast is called manually on click.
   toasts: Toast[];
   pushToast: (message: string, tone?: ToastTone, ttlMs?: number) => void;
   dismissToast: (id: number) => void;
@@ -97,8 +97,14 @@ export const useUI = create<UIState>()(
       setTheme: (t) => set({ theme: t }),
       language: "en",
       setLanguage: (l) => {
+        const prev = useUI.getState().language;
         set({ language: l });
-        void i18n.changeLanguage(l);
+        // An invalid code leaves i18next on its fallback while the store
+        // claims the new value — roll back so the two never diverge.
+        i18n.changeLanguage(l).catch(() => {
+          set({ language: prev });
+          void i18n.changeLanguage(prev);
+        });
       },
       persistQueryCache: false,
       setPersistQueryCache: (v) => set({ persistQueryCache: v }),

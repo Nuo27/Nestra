@@ -186,6 +186,7 @@ function persistOptionsFor(enabled: boolean): PersistQueryClientProviderProps["p
       shouldDehydrateQuery: (q) => {
         const k = q.queryKey[0];
         return (
+          q.state.status === "success" &&
           typeof k === "string" &&
           k !== "session-messages" &&
           k !== "session-children"

@@ -70,73 +70,86 @@ export function useSessionSelection(sessions: Session[]) {
   };
   const clearSelection = () => setSelected(new Set());
 
+  // Bulk actions are non-reentrant: a second click while a batch is in
+  // flight would double-confirm (the ConfirmHost overwrites the pending
+  // promise) and duplicate the background work.
+  const [busy, setBusy] = useState(false);
+
   // Bulk: reveal — best-effort, partial failure is fine (each session opens
   // its own file manager window).
   const bulkReveal = async () => {
+    if (busy) return;
+    setBusy(true);
     setBulkErr(null);
     const picks = sessions.filter((s) => liveSelected.has(keyOf(s)));
-    await Promise.allSettled(
-      picks.map((s) => sessionReveal(s.provider, s.id)),
-    ).then((results) => {
+    try {
+      const results = await Promise.allSettled(
+        picks.map((s) => sessionReveal(s.provider, s.id)),
+      );
       const failed = results.filter((r) => r.status === "rejected").length;
       if (failed > 0) {
         setBulkErr(t("sessions.bulkRevealFailed", { count: picks.length, failed }));
       }
-    });
+    } finally {
+      setBusy(false);
+    }
   };
 
-  // Bulk: delete — single confirm for the whole batch, then sequential
+  // Bulk: delete — single confirm for the whole batch, then parallel
   // deletes in the background. The rows vanish from the list the moment the
   // user confirms; the disk deletion is fire-and-forget with a failure
   // summary (a failed batch rolls the rows back via the refetch below).
   const bulkDelete = async () => {
-    setBulkErr(null);
-    const picks = sessions.filter((s) => liveSelected.has(keyOf(s)));
-    if (picks.length === 0) return;
-    const ok = await confirmDialog({
-      title: t("sessions.deleteConfirmTitle", { count: picks.length }),
-      body: t("sessions.deleteConfirmBody", { count: picks.length }),
-      confirmLabel: t("common.delete"),
-    });
-    if (!ok) return;
-    // Optimistic: pull every picked row out of all sessions list caches and
-    // clear their detail caches immediately, before any backend call.
-    const keySet = new Set(picks.map(keyOf));
-    qc.setQueriesData<Session[]>({ queryKey: ["sessions"] }, (old) =>
-      Array.isArray(old) ? old.filter((s) => !keySet.has(keyOf(s))) : old,
-    );
-    for (const s of picks) {
-      qc.removeQueries({ queryKey: ["session", s.provider, s.id] });
-    }
-    setSelected(new Set());
-    // If the open detail pane was one of the deleted sessions, drop it so
-    // the pane unmounts instead of showing stale cache.
-    if (selectedId && selectedProvider &&
-        picks.some((s) => s.id === selectedId && s.provider === selectedProvider)) {
-      navigate({ to: "/sessions", search: { id: undefined, provider: undefined } });
-    }
-    // Background deletion.
-    let failed = 0;
-    for (const s of picks) {
-      try {
-        await sessionDelete(s.provider, s.id);
-      } catch {
-        failed++;
+    if (busy) return;
+    setBusy(true);
+    try {
+      setBulkErr(null);
+      const picks = sessions.filter((s) => liveSelected.has(keyOf(s)));
+      if (picks.length === 0) return;
+      const ok = await confirmDialog({
+        title: t("sessions.deleteConfirmTitle", { count: picks.length }),
+        body: t("sessions.deleteConfirmBody", { count: picks.length }),
+        confirmLabel: t("common.delete"),
+      });
+      if (!ok) return;
+      // Optimistic: pull every picked row out of all sessions list caches and
+      // clear their detail caches immediately, before any backend call.
+      const keySet = new Set(picks.map(keyOf));
+      qc.setQueriesData<Session[]>({ queryKey: ["sessions"] }, (old) =>
+        Array.isArray(old) ? old.filter((s) => !keySet.has(keyOf(s))) : old,
+      );
+      for (const s of picks) {
+        qc.removeQueries({ queryKey: ["session", s.provider, s.id] });
       }
+      setSelected(new Set());
+      // If the open detail pane was one of the deleted sessions, drop it so
+      // the pane unmounts instead of showing stale cache.
+      if (selectedId && selectedProvider &&
+          picks.some((s) => s.id === selectedId && s.provider === selectedProvider)) {
+        navigate({ to: "/sessions", search: { id: undefined, provider: undefined } });
+      }
+      // Background deletion — parallel, each delete is independent.
+      const results = await Promise.allSettled(
+        picks.map((s) => sessionDelete(s.provider, s.id)),
+      );
+      const failed = results.filter((r) => r.status === "rejected").length;
+      if (failed > 0) {
+        setBulkErr(t("sessions.bulkDeleteFailed", { count: picks.length, failed }));
+        toast(t("sessions.bulkDeleteFailed", { count: picks.length, failed }), "error");
+      } else {
+        toast(t("sessions.deletedToast", { count: picks.length }), "success");
+      }
+      // Final sync with disk (also rolls back any failed rows).
+      invalidate(qc, "session");
+    } finally {
+      setBusy(false);
     }
-    if (failed > 0) {
-      setBulkErr(t("sessions.bulkDeleteFailed", { count: picks.length, failed }));
-      toast(t("sessions.bulkDeleteFailed", { count: picks.length, failed }), "error");
-    } else {
-      toast(t("sessions.deletedToast", { count: picks.length }), "success");
-    }
-    // Final sync with disk (also rolls back any failed rows).
-    invalidate(qc, "session");
   };
 
   return {
     liveSelected,
     bulkErr,
+    busy,
     clearBulkErr: () => setBulkErr(null),
     keyOf,
     toggleOne,

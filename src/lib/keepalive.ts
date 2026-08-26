@@ -36,10 +36,14 @@ const PHASE_META: Record<KeepAlivePhase, KeepAlivePhaseMeta> = {
 const DEFAULT_META: KeepAlivePhaseMeta = PHASE_META.disabled;
 
 /// Resolve the display meta for a phase, with a safe fallback. Accepts
-/// `undefined` (no status fetched yet) → treated as `disabled`.
+/// `undefined` (no status fetched yet) → treated as `disabled`. The hasOwn
+/// guard keeps inherited Object.prototype members ("constructor", …) from
+/// bypassing the fallback when an unknown phase string arrives.
 export function keepaliveMeta(
   phase: KeepAlivePhase | string | undefined,
 ): KeepAlivePhaseMeta {
   if (!phase) return DEFAULT_META;
-  return PHASE_META[phase as KeepAlivePhase] ?? DEFAULT_META;
+  return Object.hasOwn(PHASE_META, phase)
+    ? PHASE_META[phase as KeepAlivePhase]
+    : DEFAULT_META;
 }

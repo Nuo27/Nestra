@@ -54,29 +54,34 @@ export const qk = {
 /// Query key prefixes mutated by each mutation family. Used by `invalidate`
 /// as a prefix match so one call clears list + detail cache (e.g. a skills
 /// toggle invalidates the skills list and any open agent config).
-const INVALIDATION: Record<string, readonly string[]> = {
+/// `satisfies` keeps the literal-union keys so a misspelled family is a
+/// compile error, not a silent runtime `undefined`.
+const INVALIDATION = {
   endpoint: ["endpoint", "endpoints", "endpoint-quota"],
   agent: ["agents", "agent-config"],
   macro: ["skills", "mcp", "mcp-import", "mcp-usage"],
-  session: ["sessions", "session", "session-messages", "session-children"],
+  session: [
+    "sessions",
+    "session",
+    "session-messages",
+    "session-children",
+    "session-pressure",
+  ],
   handoff: ["handoffs"],
   review: ["reviews", "review"],
   quota: ["quota-refresh", "endpoint-quota", "opencode-creds", "keepalive-preview", "keepalive-status"],
   settings: ["settings"],
   diag: ["diag"],
   // Orchestration tables — invalidate together since a policy edit can
-  // change downstream route history / catalog views.
-  orchestration: [
-    "routing-policy",
-    "logical-session",
-    "route-request",
-    "route-migration",
-    "model-catalog",
-    "detected-roles",
-  ],
+  // change downstream route history / catalog views. The top-level
+  // "orchestration" prefix covers the nested page keys
+  // (["orchestration","tasks"|"task-history"|"task-migrations"|
+  //   "session-tasks"|"usage"|"usage-by-endpoint"|"gateway-flag"|
+  //   "resolve-preview"]).
+  orchestration: ["routing-policy", "detected-roles", "orchestration"],
   // Gateway Service: the page's status/activity/token queries.
   gateway: ["gateway"],
-};
+} as const satisfies Record<string, readonly string[]>;
 
 /// Invalidate everything a Gateway Service mutation can touch — the page's own
 /// status/activity/token queries PLUS the cross-surface caches that depend on
