@@ -205,6 +205,16 @@ function AgentTasks({ agentId }: { agentId: string }) {
     refetchInterval: 5000,
   });
   if (q.isLoading) return <Skeleton className="h-8 w-full" />;
+  // A failed poll must not render as "no gateway traffic" — that reads as a
+  // routing verdict when it's an IPC failure.
+  if (q.isError) {
+    return (
+      <EmptyOrchestration
+        title={t("common.loadFailed")}
+        hint={t("agentDetail.tasksLoadFailedHint")}
+      />
+    );
+  }
   const rows = (q.data ?? []).filter((t) => t.agent_id === agentId);
   if (rows.length === 0) {
     return (
@@ -329,7 +339,9 @@ function MigrationRow({ m }: { m: RouteMigrationRow }) {
 function UsageCard({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const q = useQuery({
-    queryKey: ["orchestration", "usage", agentId],
+    // The 30-day window is part of the key: a different window elsewhere
+    // would otherwise share this cache entry while holding other data.
+    queryKey: ["orchestration", "usage", agentId, 30],
     queryFn: () => usageSummary(agentId, 30),
     refetchInterval: 15000,
   });
@@ -396,6 +408,12 @@ function UsageCard({ agentId }: { agentId: string }) {
       <div className="p-3">
         {q.isLoading ? (
           <Skeleton className="h-8 w-full" />
+        ) : q.isError ? (
+          // A failed poll must not render as the "no traffic" empty state.
+          <EmptyOrchestration
+            title={t("common.loadFailed")}
+            hint={t("agentDetail.usageLoadFailedHint")}
+          />
         ) : rows.length === 0 ? (
           <EmptyOrchestration
             title={t("agentDetail.noGatewayTraffic")}

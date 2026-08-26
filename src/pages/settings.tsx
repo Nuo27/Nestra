@@ -89,24 +89,30 @@ export function SettingsPage() {
 
   const settings: Settings = { ...DEFAULTS, ...((q.data as Partial<Settings>) ?? {}) };
 
-  function update<K extends keyof Settings>(key: K, value: Settings[K]) {
-    // Never write while the load failed: a whole-row write would overwrite
-    // the backend's real config (e.g. log_retention_days) with DEFAULTS.
-    if (q.isError) return;
+  async function update<K extends keyof Settings>(key: K, value: Settings[K]) {
+    // Never write until the current settings have loaded: a whole-row write
+    // built on an empty cache would overwrite the backend's real config
+    // (e.g. log_retention_days) with DEFAULTS.
+    if (!q.isSuccess) return;
     // Merge from the LATEST cache state, not this render's closure: rapid
     // consecutive edits each see the previous write instead of overwriting
     // it with a stale snapshot.
     const latest = qc.getQueryData<Partial<Settings>>(qk.settings()) ?? {};
+    const prev = latest;
     const next = { ...DEFAULTS, ...latest, [key]: value };
     // Optimistic: reflect the pick in the query cache immediately so the
-    // segment highlights the instant it's clicked; persist in the background.
+    // segment highlights the instant it's clicked; roll back if the write
+    // fails so the cache never claims an unsaved value.
     qc.setQueryData<Partial<Settings>>(qk.settings(), next);
-    settingSet("app", next)
-      .then(() => {
-        qc.invalidateQueries({ queryKey: qk.settings() });
-        toast(t("settings.savedToast"), "success");
-      })
-      .catch(() => toast(t("settings.notSavedToast"), "error"));
+    try {
+      await settingSet("app", next);
+      qc.invalidateQueries({ queryKey: qk.settings() });
+      toast(t("settings.savedToast"), "success");
+    } catch {
+      qc.setQueryData<Partial<Settings>>(qk.settings(), prev);
+      qc.invalidateQueries({ queryKey: qk.settings() });
+      toast(t("settings.notSavedToast"), "error");
+    }
   }
 
   const setPersist = (v: boolean) => {
@@ -132,6 +138,10 @@ export function SettingsPage() {
     });
     if (!ok) return;
     try {
+      // The only step that can FAIL goes first — aborting leaves everything
+      // else untouched instead of a half-cleaned state.
+      // Backend models.dev catalog cache (setting_kv entry).
+      await settingDelete("models_dev_cache");
       // In-memory React Query cache + persisted copy.
       qc.clear();
       try {
@@ -141,8 +151,6 @@ export function SettingsPage() {
       }
       // In-memory quota snapshots (zustand, not persisted).
       useUI.setState({ quotaCache: {} });
-      // Backend models.dev catalog cache (setting_kv entry).
-      await settingDelete("models_dev_cache");
       toast(t("settings.clearedToast"), "success");
     } catch {
       toast(t("settings.clearFailedToast"), "error");

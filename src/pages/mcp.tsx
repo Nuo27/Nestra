@@ -88,6 +88,16 @@ export function McpPage() {
     qc.invalidateQueries({ queryKey: qk.agents() });
   };
 
+  // Drop a server's click-to-test result: it describes a config state that a
+  // toggle/delete/restore just invalidated — a stale "ok" must not survive.
+  const clearProbe = (id: string) =>
+    setProbes((cur) => {
+      if (!(id in cur)) return cur;
+      const next = { ...cur };
+      delete next[id];
+      return next;
+    });
+
   const setStateMut = useMutation({
     mutationFn: (v: { id: string; agent: string; state: AgentState }) =>
       mcpSetState(v.id, v.agent, v.state),
@@ -95,7 +105,10 @@ export function McpPage() {
     // before syncing agent configs, so even a failed sync (e.g. a config
     // file that isn't valid JSON) must refresh the list — otherwise the
     // segment sticks on its old state and reads as "can't toggle".
-    onSettled: () => invalidate(),
+    onSettled: (_d, _e, vars) => {
+      invalidate();
+      clearProbe(vars.id);
+    },
     onSuccess: (_d, vars) => {
       const agent = labelForAgent(vars.agent);
       toast(
@@ -111,6 +124,7 @@ export function McpPage() {
   });
   const deleteMut = useMutation({
     mutationFn: (id: string) => mcpDelete(id),
+    onSettled: (_d, _e, id) => clearProbe(id),
     onSuccess: () => {
       invalidate();
       toast(t("mcp.deleted"), "success");
@@ -124,6 +138,7 @@ export function McpPage() {
     // inverse of import — distinct from delete (which also strips the config
     // entries). The confirm dialog (on the button) tells the user this.
     mutationFn: (id: string) => mcpUnmanage(id),
+    onSettled: (_d, _e, id) => clearProbe(id),
     onSuccess: (_d, id) => {
       invalidate();
       // Refresh the import scan so the newly-unmanaged server shows under
@@ -150,9 +165,12 @@ export function McpPage() {
       return last;
     },
     onSuccess: () => {
-      invalidate();
       toast(t("mcp.imported"), "success");
     },
+    // Invalidate on settle: the loop persists one agent at a time, so a
+    // mid-sequence failure still leaves earlier imports in the DB — the list
+    // must reflect them or the user retries and duplicates.
+    onSettled: () => invalidate(),
     onError: (e) => toast(t("mcp.importFailed", { err: extractError(e) }), "error"),
   });
   const syncAllMut = useMutation({
@@ -215,8 +233,11 @@ export function McpPage() {
             <Button
               variant="ghost"
               size="sm"
-              disabled={probeMut.isPending || servers.length === 0}
-              loading={probeMut.isPending}
+              // `probing` tracks EVERY in-flight probe; the single mutation's
+              // isPending only reflects the last mutate call and would unblock
+              // the button while earlier probes are still running.
+              disabled={probing.size > 0 || servers.length === 0}
+              loading={probing.size > 0}
               onClick={() => servers.forEach((s) => probeMut.mutate(s.id))}
               title={t("mcp.testAllTitle")}
             >

@@ -685,6 +685,7 @@
     "roleChipTip": "{{count}} 次请求 · 编辑 {{role}} 的策略",
     "noGatewayTraffic": "无网关流量",
     "noGatewayTrafficHint": "一旦此智能体被路由且请求流过，每个任务都会出现在这里，包含完整的路由谱系：请求的模型 → 解析的提供商、路由原因、提示缓存指标和代次中断标志。",
+    "tasksLoadFailedHint": "任务列表加载失败——这是读取故障，不代表路由结论。",
     "usage": "用量与花费",
     "usageHint": "网关观测 token，近 30 天 · 花费按模型目录价实时计算",
     "usageRequests": "请求",
@@ -703,7 +704,8 @@
     "subUnbound": "direct · 未绑定",
     "subRouted": "routed · {{provider}} · {{model}}",
     "subRoutedEmpty": "routed · 无目标",
-    "usageEmptyHint": "请求经过网关后这里会出现用量。"
+    "usageEmptyHint": "请求经过网关后这里会出现用量。",
+    "usageLoadFailedHint": "用量加载失败——这是读取故障，不代表用量为零。"
   },
   "routingPolicy": {
     "notSaved": "策略未保存",
@@ -750,6 +752,7 @@
     "validationError": "{{err}} — 请修复该字段并再次点击保存。",
     "saved": "提供商已保存",
     "deleted": "提供商已删除",
+    "deleteFailed": "删除失败：{{err}}",
     "dangerZone": "危险区",
     "dangerHint": "移除提供商并从操作系统密钥链中删除其 API 密钥。",
     "deleteLine": "删除“{{name}}”",

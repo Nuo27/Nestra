@@ -29,6 +29,8 @@ import { useUI } from "../stores/ui";
 import {
   emptyToForm,
   isDirty,
+  serializeAdvancedEnv,
+  stableJson,
   ValidationError,
   type FormState,
 } from "../lib/providerForm";
@@ -70,26 +72,22 @@ export function ProviderEditPage({ id }: { id: string }) {
           opus: form.models_opus,
           available: form.models_available,
         },
-        advanced_env: form.advanced_env,
+        // Empty env keys are transient editor rows — never persist them.
+        advanced_env: Object.fromEntries(
+          Object.entries(form.advanced_env).filter(([k]) => k.trim() !== ""),
+        ),
       };
 
       if (payload.display_name !== e.display_name) {
         await endpointSetName(id, payload.display_name);
       }
-      const newModelsJson = JSON.stringify(payload.models);
-      if (newModelsJson !== JSON.stringify(e.models ?? {})) {
+      if (stableJson(payload.models) !== stableJson(e.models ?? {})) {
         await endpointSetModels(id, payload.models);
       }
-      const newAdvJson = JSON.stringify(payload.advanced_env);
-      const curAdv: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(e.advanced_env ?? {})) {
-        curAdv[k] = typeof v === "string" ? v : JSON.stringify(v);
-      }
-      if (newAdvJson !== JSON.stringify(curAdv)) {
+      if (stableJson(payload.advanced_env) !== stableJson(serializeAdvancedEnv(e.advanced_env))) {
         await endpointSetAdvancedEnv(id, payload.advanced_env);
       }
-      const newAbilities = JSON.stringify(form.model_abilities);
-      if (newAbilities !== JSON.stringify(e.model_abilities ?? {})) {
+      if (stableJson(form.model_abilities) !== stableJson(e.model_abilities ?? {})) {
         await endpointSetModelAbilities(id, form.model_abilities);
       }
       // Protocols: diff against the stored set, apply adds/removes on Save.
@@ -120,6 +118,13 @@ export function ProviderEditPage({ id }: { id: string }) {
       qc.invalidateQueries({ queryKey: qk.endpoints() });
       toast(t("providerEdit.saved"), "success");
     },
+    onError: () => {
+      // The save is a sequence of independent IPC writes — a mid-sequence
+      // failure may have persisted SOME of them. Refresh the cached endpoint
+      // so the next retry diffs against the real server state instead of a
+      // stale snapshot (protocol add/removes are set-diffs).
+      qc.invalidateQueries({ queryKey: qk.endpoint(id) });
+    },
   });
 
   const deleteMut = useMutation({
@@ -128,6 +133,12 @@ export function ProviderEditPage({ id }: { id: string }) {
       qc.invalidateQueries({ queryKey: qk.endpoints() });
       toast(t("providerEdit.deleted"), "success");
       navigate({ to: "/providers" });
+    },
+    onError: (err) => {
+      toast(
+        t("providerEdit.deleteFailed", { err: extractError(err) ?? t("common.error") }),
+        "error",
+      );
     },
   });
 
@@ -170,10 +181,10 @@ export function ProviderEditPage({ id }: { id: string }) {
       </Page>
     );
   }
-  if (q.isError) {
-    // A failed fetch must not hang on the skeleton forever (the old
-    // `!form`-gated branch was unreachable — form stays null only while
-    // loading, so an error rendered an infinite skeleton).
+  if (q.isError && !q.data) {
+    // A failed INITIAL fetch must not hang on the skeleton forever. A failed
+    // background refetch (data still present) keeps the editor open —
+    // replacing a form mid-edit with a banner would discard UI state.
     return (
       <Page>
         <ErrorBanner onRetry={() => q.refetch()}>
@@ -197,7 +208,7 @@ export function ProviderEditPage({ id }: { id: string }) {
   return (
     <Page>
       <PageHeader
-        back={<BackLink to="/">{t("nav.providers")}</BackLink>}
+        back={<BackLink to="/providers">{t("nav.providers")}</BackLink>}
         title={form.display_name || data.id}
         subtitle={<SectionLabel inline>{t("common.edit")}</SectionLabel>}
         sticky

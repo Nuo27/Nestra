@@ -87,20 +87,26 @@ export function SessionsPage() {
   });
 
   const sessions = listQuery.data ?? [];
-  // Filter options derive from the sessions themselves — every provider
+  // Filter options MUST derive from an UNFILTERED list: the rows above are
+  // already narrowed by the selected provider, so deriving options from them
+  // would collapse the dropdown to exactly that one provider. Every provider
   // present in the data gets a chip, whatever the registry grows into.
   // Deliberately NOT gated on agent detection: sessions are reconciled for
   // every registry importer regardless, so an undetected agent's history
   // stays filterable. A new agent needs no frontend entry to appear.
+  const allSessionsQ = useQuery({
+    queryKey: qk.sessions("", ""),
+    queryFn: () => sessionList(undefined, undefined, 300),
+  });
   const providerOptions = useMemo(() => {
     const set = new Map<string, string>(); // providerId -> label
-    for (const s of sessions) {
+    for (const s of allSessionsQ.data ?? []) {
       if (!set.has(s.provider)) {
         set.set(s.provider, labelsById.get(s.provider) ?? providerMeta(s.provider).label);
       }
     }
     return set;
-  }, [sessions, labelsById]);
+  }, [allSessionsQ.data, labelsById]);
   const buckets = useMemo(() => bucketByDate(sessions), [sessions]);
   const selection = useSessionSelection(sessions);
 
@@ -210,7 +216,14 @@ export function SessionsPage() {
       {/* ---- detail ---- */}
       <section className="min-h-0 min-w-0 flex-1 overflow-y-auto">
         {selectedId && selectedProvider ? (
-          <SessionDetail id={selectedId} provider={selectedProvider} />
+          // key forces a remount per session — pagination state (shown) and
+          // action errors must not carry across session switches when the
+          // router reuses this component instance.
+          <SessionDetail
+            key={`${selectedProvider}:${selectedId}`}
+            id={selectedId}
+            provider={selectedProvider}
+          />
         ) : (
           <div className="prose flex h-full items-center justify-center p-6 text-sm text-subtle">
             {t("sessions.emptyDetail")}

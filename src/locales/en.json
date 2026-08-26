@@ -692,6 +692,7 @@
     "roleChipTip": "{{count}} requests · edit policy for {{role}}",
     "noGatewayTraffic": "no gateway traffic",
     "noGatewayTrafficHint": "Once this agent is routed and a request flows through, each task appears here with its full route lineage: requested model → resolved provider, route reason, prompt-cache metrics, and generation-broken flags.",
+    "tasksLoadFailedHint": "The task list could not be loaded — this is a read failure, not a routing verdict.",
     "usage": "Usage & spend",
     "usageHint": "gateway-observed tokens, last 30 days · spend priced live from the model catalog",
     "usageRequests": "requests",
@@ -710,7 +711,8 @@
     "subUnbound": "direct · unbound",
     "subRouted": "routed · {{provider}} · {{model}}",
     "subRoutedEmpty": "routed · no targets",
-    "usageEmptyHint": "Usage appears once requests flow through the gateway."
+    "usageEmptyHint": "Usage appears once requests flow through the gateway.",
+    "usageLoadFailedHint": "Usage could not be loaded — this is a read failure, not zero usage."
   },
   "routingPolicy": {
     "notSaved": "Policy not saved",
@@ -757,6 +759,7 @@
     "validationError": "{{err}} — fix the field and click Save again.",
     "saved": "Provider saved",
     "deleted": "Provider deleted",
+    "deleteFailed": "Delete failed: {{err}}",
     "dangerZone": "Danger zone",
     "dangerHint": "Removes the provider and deletes its API key from the OS keychain.",
     "deleteLine": "Delete \"{{name}}\"",

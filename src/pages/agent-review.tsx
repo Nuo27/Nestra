@@ -96,15 +96,20 @@ function ReviewBody({ preselectSession }: { preselectSession?: string }) {
   useEffect(() => {
     setEvents([]);
     if (!selected) return;
-    const unlistenP = listen<unknown>(`review:${selected}:event`, (e) => {
-      setEvents((prev) => [...prev.slice(-200), e.payload]);
-    });
-    const doneP = listen(`review:${selected}:done`, () => {
-      invalidate(qc, "review");
-    });
+    // Unsubscribing is async: an event that arrives between cleanup and the
+    // unlisten resolution must not touch the (already switched) state.
+    let disposed = false;
+    const regs = [
+      listen<unknown>(`review:${selected}:event`, (e) => {
+        if (!disposed) setEvents((prev) => [...prev.slice(-200), e.payload]);
+      }),
+      listen(`review:${selected}:done`, () => {
+        if (!disposed) invalidate(qc, "review");
+      }),
+    ];
     return () => {
-      void unlistenP.then((u) => u());
-      void doneP.then((u) => u());
+      disposed = true;
+      void Promise.all(regs).then((uns) => uns.forEach((u) => u()));
     };
   }, [selected, qc]);
 
