@@ -81,7 +81,15 @@ fn load_or_create_master_key() -> AppResult<[u8; 32]> {
                 name.to_string_lossy().ends_with(".bin") && name != std::ffi::OsStr::new(MASTER_FILENAME)
             })
         })
-        .unwrap_or(false);
+        // A failed listing must NOT read as "no stored keys": a transient IO
+        // error treated as "empty dir" would silently regenerate master.bin
+        // and lock every stored credential behind a key they were never
+        // encrypted with.
+        .map_err(|e| {
+            AppError::Internal(format!(
+                "cannot inspect secrets dir to check for stored keys: {e}"
+            ))
+        })?;
     if has_stored_keys {
         return Err(AppError::Internal(
             "master key missing but stored provider keys exist — refusing to regenerate (credentials would be unrecoverable)".into(),

@@ -650,7 +650,8 @@ fn probe_auth_http(protocol: &str, base_url: &str, key: &str, model: &str) -> Ap
         "max_tokens": 1,
         "stream": false,
     });
-    let req = ureq::post(&url);
+    // Bounded probe: a hung upstream must not pin the blocking-pool thread.
+    let req = ureq::post(&url).timeout(std::time::Duration::from_secs(10));
     let req = match protocol {
         "anthropic" => req
             .set("x-api-key", key)
@@ -758,7 +759,8 @@ fn fetch_models_http(
         crate::config_writer::ProviderKind::Openai
     };
     let url = crate::protocol_url::join_models_path(base_url, kind);
-    let req = ureq::get(&url);
+    // Bounded fetch: a hung upstream must not pin the blocking-pool thread.
+    let req = ureq::get(&url).timeout(std::time::Duration::from_secs(10));
     let req = match protocol {
         "anthropic" => req.set("x-api-key", key).set("anthropic-version", "2023-06-01"),
         _ => req.set("Authorization", &format!("Bearer {key}")),

@@ -18,6 +18,32 @@ fn gateway_alias_debug_redacts_sentinel_key() {
 }
 
 #[test]
+fn switch_context_debug_redacts_api_key() {
+    let ctx = SwitchContext {
+        provider_id: "z-ai".into(),
+        provider_kind: ProviderKind::Anthropic,
+        display_name: "Z.ai".into(),
+        base_url: "https://api.z.ai".into(),
+        api_key: "sk-super-secret-value".into(),
+        models: ModelsConfig::Anthropic {
+            default: "glm-4.7".into(),
+            haiku: "glm-4.7-air".into(),
+            sonnet: "glm-4.7".into(),
+            opus: "glm-4.7-plus".into(),
+        },
+        advanced_env: Default::default(),
+        model_abilities: Default::default(),
+    };
+    let s = format!("{ctx:?}");
+    assert!(s.contains("api_key"), "field name should appear");
+    assert!(
+        !s.contains("sk-super-secret-value"),
+        "Debug must NOT leak the api key; got: {s}"
+    );
+    assert!(s.contains("<redacted>"));
+}
+
+#[test]
 fn json_serialize_preserves_key_order_probe() {
     // Probe: serde_json is built WITH `preserve_order` (Map = IndexMap —
     // parse→modify→serialize keeps the document's original key order).

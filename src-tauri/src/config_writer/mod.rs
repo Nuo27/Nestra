@@ -120,7 +120,7 @@ pub(crate) fn default_model_of(m: &ModelsConfig) -> String {
 }
 
 /// Everything a writer needs to render "use this Provider".
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SwitchContext {
     pub provider_id: String,
     pub provider_kind: ProviderKind,
@@ -135,6 +135,24 @@ pub struct SwitchContext {
     /// sourced from models.dev. **Only the OpenCode adapter reads this**;
     /// other writers ignore it. Empty when offline/unmatched.
     pub model_abilities: HashMap<String, crate::model_abilities::ModelAbilities>,
+}
+
+// Manual Debug: the struct carries the plaintext API key — a derived impl
+// would leak it into logs/panic messages. Mirrors GatewayAlias's redaction
+// of `sentinel_key`.
+impl std::fmt::Debug for SwitchContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SwitchContext")
+            .field("provider_id", &self.provider_id)
+            .field("provider_kind", &self.provider_kind)
+            .field("display_name", &self.display_name)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<redacted>")
+            .field("models", &self.models)
+            .field("advanced_env", &self.advanced_env)
+            .field("model_abilities", &self.model_abilities)
+            .finish()
+    }
 }
 
 /// The full provider set Nestra will write into the agent's config file.

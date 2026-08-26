@@ -600,14 +600,15 @@ pub(crate) fn on_disk_version(conn: &Connection) -> AppResult<Option<i32>> {
     if has_table == 0 {
         return Ok(None);
     }
-    let v: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    // 0 means the table exists but has no rows — treat as empty/new.
+    let v: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+    // 0 means the table exists but has no rows — treat as empty/new. A real
+    // query failure propagates: swallowing it here would read a corrupt/
+    // unreadable version table as "empty DB" and rebuild over data the
+    // migration contract promises to refuse.
     Ok((v != 0).then_some(v as i32))
 }
 
