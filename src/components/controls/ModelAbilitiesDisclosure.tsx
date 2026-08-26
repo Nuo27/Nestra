@@ -87,7 +87,7 @@ function ModelAbilitiesDisclosure({
         <>
           <span className="min-w-0 flex-1 truncate font-mono text-xs">{modelId}</span>
           {apiLabel}
-          <span className={`shrink-0 text-2xs ${hasOverride ? "text-warning" : "text-subtle"}`}>
+              <span className={`ml-1 shrink-0 text-2xs ${hasOverride ? "text-warning" : "text-subtle"}`}>
             {sourceLabel}
           </span>
         </>
