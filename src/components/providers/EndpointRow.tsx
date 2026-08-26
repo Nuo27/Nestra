@@ -112,9 +112,11 @@ export function EndpointRow({
         </span>
 
         {/* Protocol summary — mono, subtle. Hidden on narrow widths to keep
-            the row legible (the badge + name take priority). */}
+            the row legible (the badge + name take priority); `min-w-0
+            truncate` (not shrink-0) so a long dual-protocol label yields to
+            the badges instead of pushing the row past the card edge. */}
         {protoSummary && (
-          <span className="hidden shrink-0 font-mono text-xs text-subtle sm:inline">
+          <span className="hidden min-w-0 truncate font-mono text-xs text-subtle sm:inline">
             {protoSummary}
           </span>
         )}
@@ -199,7 +201,12 @@ function BreakerBadge({ endpointId }: { endpointId: string }) {
       >
         <Badge tone="danger" variant="soft">
           {t("providers.breakerOpen")}
-          {snap.model ? ` · ${snap.model}` : ""}
+          {/* Model ids (e.g. `moonshotai/kimi-k2`) are unbounded and the
+              badge is whitespace-nowrap — cap the visible text and let the
+              Tip carry the full id, or a long name overflows the card. */}
+          {snap.model && (
+            <span className="max-w-40 truncate">{` · ${snap.model}`}</span>
+          )}
         </Badge>
       </Tip>
     );

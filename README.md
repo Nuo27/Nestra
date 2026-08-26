@@ -4,14 +4,34 @@
 ![Platform](https://img.shields.io/badge/platform-Windows-informational)
 ![Mode](https://img.shields.io/badge/local--only-127.0.0.1-success)
 
-> A local-only desktop control center for AI coding agents — **Claude Code**,
-> **OpenCode**, **Pi**, **ZCode**, and **Codex**.
-
-![Nestra gateway](docs/screenshots/gateway.png)
+> A local-only desktop control center for AI coding agents.
 
 - **Route everything** — a local gateway with per-role routing chains, quota-aware failover, and a model-grain circuit breaker.
 - **Own your keys** — encrypted at rest (AES-256-GCM), no account, no telemetry, traffic never leaves `127.0.0.1`.
 - **See everything** — sessions, quotas, live request logs, and per-model usage in one place.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/gateway.png" alt="Gateway — runtime state, routing activity"></td>
+    <td><img src="docs/screenshots/routing.png" alt="Per-role routing policy editor"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/providers.png" alt="Providers with quota bars and breaker health"></td>
+    <td><img src="docs/screenshots/sessions.png" alt="Sessions with context detail"></td>
+  </tr>
+</table>
+
+## Supported agents
+
+One registry line per agent — every surface (config, sessions, MCP, routing) derives from it.
+
+- **Claude Code** — `claude` CLI; tier-aware routing (`[haiku]` / `[sonnet]` / `[opus]`).
+- **OpenCode** — desktop app; per-server MCP enable state.
+- **Pi** — `pi` CLI; per-role sub-agents and the review runtime.
+- **ZCode** — desktop app.
+- **Codex** — desktop app; Responses-API inbound bridging.
 
 Agents are auto-detected on launch, and every config write is backed up first.
 
@@ -32,20 +52,14 @@ Windows today; macOS and Linux are on the roadmap.
    **Routed**. Run your agent; requests land in Gateway → Activity with per-request
    route, model, and token usage.
 
-<p>
-  <img src="docs/screenshots/providers.png" width="32%" alt="Providers with quota bars">
-  <img src="docs/screenshots/sessions.png" width="32%" alt="Sessions with context detail">
-  <img src="docs/screenshots/routing.png" width="32%" alt="Per-role routing policy editor">
-</p>
-
 ## Routing
 
 Each agent runs in one of two modes (toggled on its page):
 
-| Mode    | What Nestra writes     | What you get                                            |
-| ------- | ---------------------- | ------------------------------------------------------- |
-| Direct  | the real provider      | Nestra as configurator only                             |
-| Routed  | a stable gateway alias | routing, failover, usage observation — per request      |
+| Mode    | What Nestra writes     | What you get                                       |
+| ------- | ---------------------- | -------------------------------------------------- |
+| Direct  | the real provider      | Nestra as configurator only                        |
+| Routed  | a stable gateway alias | routing, failover, usage observation — per request |
 
 In Routed mode the gateway resolves every request through a fixed cascade:
 **explicit** pin → **affinity** (keep a task on one provider so the prompt
