@@ -140,32 +140,26 @@ impl GatewayControl {
     /// transitions to `Error` and returns `Err`. Idempotent: a no-op when
     /// already `Running`. Serialized — concurrent callers wait on the bind.
     pub async fn start(&self, state: super::GatewayState, port: u16) -> AppResult<()> {
-        {
-            let g = self.inner.lock().await;
-            if g.state == GatewayRuntimeState::Running && g.handle.is_some() {
-                return Ok(());
-            }
+        // ONE critical section from the Running check through spawn + state
+        // set. Releasing the lock between them let two concurrent starts
+        // both pass the check; the loser's failed bind then marked the LIVE
+        // gateway as Error, wedging restarts against a running listener.
+        let mut g = self.inner.lock().await;
+        if g.state == GatewayRuntimeState::Running && g.handle.is_some() {
+            return Ok(());
         }
-        // Mark Starting and hold the lock across bind so start/stop/restart
-        // serialize (the accept loop itself is spawned, not awaited here).
-        {
-            let mut g = self.inner.lock().await;
-            g.state = GatewayRuntimeState::Starting;
-            g.last_error = None;
-        }
+        g.state = GatewayRuntimeState::Starting;
+        g.last_error = None;
         match super::spawn(state, port).await {
             Ok((handle, join)) => {
                 let watched_addr = handle.addr;
-                {
-                    let mut g = self.inner.lock().await;
-                    g.handle = Some(handle);
-                    g.state = GatewayRuntimeState::Running;
-                }
+                g.handle = Some(handle);
+                g.state = GatewayRuntimeState::Running;
+                drop(g);
                 self.spawn_watcher(watched_addr, join);
                 Ok(())
             }
             Err(e) => {
-                let mut g = self.inner.lock().await;
                 g.state = GatewayRuntimeState::Error;
                 g.last_error = Some(e.to_string());
                 Err(e)

@@ -118,17 +118,34 @@ fn probe_stdio(t: &crate::mcp::McpTransport) -> AppResult<ProbeResult> {
         Err(e) => return Ok(fail(&format!("spawn failed: {e}"))),
     };
 
-    let mut stdin = child.stdin.take().ok_or_else(|| AppError::Internal("no stdin".into()))?;
-    let mut stdout = child.stdout.take().ok_or_else(|| AppError::Internal("no stdout".into()))?;
+    // kill + wait on EVERY early exit: kill alone leaves a zombie child.
+    let mut stdin = match child.stdin.take() {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(fail("no stdin"));
+        }
+    };
+    let mut stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(fail("no stdout"));
+        }
+    };
 
     // Write initialize line; MCP stdio servers expect one JSON-RPC request
     // per line.
     if let Err(e) = writeln!(stdin, "{INIT_REQUEST}") {
         let _ = child.kill();
+        let _ = child.wait();
         return Ok(fail(&format!("write failed: {e}")));
     }
     if let Err(e) = stdin.flush() {
         let _ = child.kill();
+        let _ = child.wait();
         return Ok(fail(&format!("flush failed: {e}")));
     }
     // NOTE: do NOT close stdin yet. A conformant MCP server needs the session
@@ -208,8 +225,19 @@ fn probe_stdio(t: &crate::mcp::McpTransport) -> AppResult<ProbeResult> {
         Err(_timeout) => {
             let _ = child.kill();
             // Reap the reader so a pipe-holding grandchild can't leak the
-            // thread; the read unblocks once the pipe write-end closes.
-            let _ = reader.join();
+            // thread — but BOUNDED: if the grandchild keeps the write end
+            // open the read never EOFs and a bare join() would block this
+            // probe forever. Wait a short grace period, then detach (the
+            // thread exits by itself once the pipe finally closes).
+            let (joined_tx, joined_rx) = mpsc::channel::<()>();
+            // Detached: if the grace period lapses, this helper (and the
+            // reader inside it) keep running until the pipe closes — the
+            // caller is never held hostage.
+            thread::spawn(move || {
+                let _ = reader.join();
+                let _ = joined_tx.send(());
+            });
+            let _ = joined_rx.recv_timeout(Duration::from_secs(2));
             fail(&format!("timed out after {}s", PROBE_TIMEOUT.as_secs()))
         }
     };

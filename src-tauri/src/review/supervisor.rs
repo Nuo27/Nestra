@@ -151,6 +151,22 @@ impl PiSupervisor {
     }
 }
 
+impl Drop for PiSupervisor {
+    /// Safety net: if the runner task dies without calling `shutdown`
+    /// (panic, task abort), the last `Arc` drop still kills + reaps the
+    /// node child instead of leaking it. `get_mut` needs no locking on the
+    /// exclusive `&mut self` path.
+    fn drop(&mut self) {
+        if let Ok(c) = self.child.get_mut() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        if let Ok(g) = self.stdin.get_mut() {
+            *g = None;
+        }
+    }
+}
+
 /// `agent_settled` seen — the documented "fully done" signal.
 pub fn has_settled(events: &[Value]) -> bool {
     events.iter().any(|v| {

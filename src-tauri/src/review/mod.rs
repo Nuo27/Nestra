@@ -36,37 +36,39 @@ pub struct ActiveReview {
 }
 
 impl ReviewRegistry {
+    // Poison-tolerant lock recovery everywhere: the slot is plain data (an
+    // Option of Arc handles) with no invariants to repair, and swallowing a
+    // PoisonError would wedge the single-flight slot at "already running"
+    // forever — every later review refused, none recoverable without a
+    // restart.
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<ActiveReview>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// The active review, if any (cloned handles — cheap).
     pub fn active(&self) -> Option<(String, Arc<supervisor::PiSupervisor>)> {
-        self.inner
-            .lock()
-            .ok()?
+        self.slot()
             .as_ref()
             .map(|a| (a.review_id.clone(), a.sup.clone()))
     }
 
     /// Install; `false` (and no install) when another review is running.
     pub fn try_install(&self, a: ActiveReview) -> bool {
-        match self.inner.lock() {
-            Ok(mut slot) => {
-                if slot.is_some() {
-                    false
-                } else {
-                    *slot = Some(a);
-                    true
-                }
-            }
-            Err(_) => false,
+        let mut slot = self.slot();
+        if slot.is_some() {
+            false
+        } else {
+            *slot = Some(a);
+            true
         }
     }
 
     /// Clear only when `id` still owns the slot (an abort racing the natural
     /// finish must not clear a NEWER review).
     pub fn clear(&self, id: &str) {
-        if let Ok(mut slot) = self.inner.lock() {
-            if slot.as_ref().map(|a| a.review_id.as_str()) == Some(id) {
-                *slot = None;
-            }
+        let mut slot = self.slot();
+        if slot.as_ref().map(|a| a.review_id.as_str()) == Some(id) {
+            *slot = None;
         }
     }
 }

@@ -78,6 +78,8 @@ pub async fn session_read(
     provider_id: String,
     id: String,
     offset: Option<u32>,
+    // Max messages after `offset`. `0` (and the default) means UNLIMITED —
+    // a sentinel, not "no messages".
     limit: Option<u32>,
 ) -> AppResult<MessageWindow> {
     let db = state.db_read.clone();

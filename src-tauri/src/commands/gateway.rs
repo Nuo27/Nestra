@@ -489,7 +489,9 @@ pub fn gateway_recent_activity(
         .db_read
         .lock()
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    crate::orchestration::store::recent_route_requests(&conn, limit.unwrap_or(10))
+    // Clamp: a negative i64 reaches SQLite as `LIMIT -1` = an unbounded
+    // full-table scan on a UI-facing command.
+    crate::orchestration::store::recent_route_requests(&conn, limit.unwrap_or(10).clamp(1, 500))
 }
 
 /// Read the live gateway tuning (timeouts + circuit-breaker parameters).

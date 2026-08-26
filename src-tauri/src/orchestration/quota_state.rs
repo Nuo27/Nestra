@@ -100,7 +100,7 @@ impl QuotaState {
     /// mirrors it to the `last_quota_state` column so it survives a restart.
     pub fn mark_exhausted(&self, endpoint_id: &str, reason: Option<String>) {
         let now = chrono::Utc::now().timestamp_millis();
-        let mut map = self.inner.lock().expect("quota lock poisoned");
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(
             endpoint_id.to_string(),
             EndpointQuotaState {
@@ -118,7 +118,7 @@ impl QuotaState {
     /// A remaining of 0 does NOT set `exhausted` — only the gateway's own
     /// observation may declare that.
     pub fn set_remaining(&self, endpoint_id: &str, remaining_pct: f64) {
-        let mut map = self.inner.lock().expect("quota lock poisoned");
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let entry = map
             .entry(endpoint_id.to_string())
             .or_insert_with(EndpointQuotaState::default);
@@ -127,34 +127,34 @@ impl QuotaState {
 
     /// Last known remaining budget (percent 0–100); `None` = no signal.
     pub fn remaining(&self, endpoint_id: &str) -> Option<f64> {
-        let map = self.inner.lock().expect("quota lock poisoned");
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         map.get(endpoint_id).and_then(|s| s.remaining_pct)
     }
 
     /// Clear exhaustion for an endpoint (called when the gateway observes a
     /// successful request, indicating the provider reset the window).
     pub fn clear_exhausted(&self, endpoint_id: &str) {
-        let mut map = self.inner.lock().expect("quota lock poisoned");
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         map.remove(endpoint_id);
     }
 
     /// `true` when the endpoint is currently quota-exhausted (the router
     /// skips it unless policy forces last-resort use).
     pub fn is_exhausted(&self, endpoint_id: &str) -> bool {
-        let map = self.inner.lock().expect("quota lock poisoned");
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         map.get(endpoint_id).map(|s| s.exhausted).unwrap_or(false)
     }
 
     /// Snapshot the state for one endpoint (defaulted if unseen).
     pub fn get(&self, endpoint_id: &str) -> EndpointQuotaState {
-        let map = self.inner.lock().expect("quota lock poisoned");
+        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         map.get(endpoint_id)
             .cloned()
             .unwrap_or_default()
 }
 
     pub fn clear(&self) {
-        self.inner.lock().expect("quota lock poisoned").clear();
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
