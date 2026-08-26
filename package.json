@@ -1,7 +1,7 @@
 {
   "name": "nestra",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Unified control center for AI coding agents",
   "license": "MIT",
   "author": "Nestra",
