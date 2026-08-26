@@ -5,6 +5,14 @@ import { initTheme } from "./components/layout/ThemeToggle";
 import "./i18n";
 import "./styles.css";
 
+// Dev-only example fixtures (`?seed=example`): mock the Tauri IPC layer so
+// the real UI renders with invented data in a plain browser tab — used for
+// README screenshots and demos. The DEV guard plus dynamic import keep this
+// module out of production builds entirely.
+if (import.meta.env.DEV && new URLSearchParams(location.search).has("seed")) {
+  await import("./dev/seed");
+}
+
 // Apply the persisted theme + language before first paint so a light choice
 // (or OS light under `system`) never flashes the dark default and text renders
 // in the saved locale immediately. `nestra-ui` is the zustand persist key;
