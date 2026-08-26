@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 import i18n from "../../i18n"
 import {
   Dialog,
@@ -61,15 +61,30 @@ function setConfirmDispatcher(dispatch: (c: PendingConfirm) => void) {
 
 export function ConfirmHost() {
   const [current, setCurrent] = useState<PendingConfirm | null>(null)
+  // Latest committed confirm — the unmount cleanup needs to settle it even
+  // though it can't read `current` from a stale closure.
+  const currentRef = useRef<PendingConfirm | null>(null)
+  useEffect(() => {
+    currentRef.current = current
+  }, [current])
   // Register the dispatcher in an effect (NOT a useState initializer — that
   // runs during render, fires twice in StrictMode, and never cleans up; a
   // later unmount would leave the dispatcher pointing at a dead component,
   // making every confirmDialog() call hang forever).
   useEffect(() => {
-    setConfirmDispatcher((c) => setCurrent(c))
+    setConfirmDispatcher((c) =>
+      setCurrent((prev) => {
+        // A second confirm while one is still pending resolves the first as
+        // cancelled — its awaiter must never hang on an overwritten dialog.
+        prev?.resolve(false)
+        return c
+      }),
+    )
     return () => {
-      // Restore a safe default so calls after unmount resolve (false) instead
-      // of hanging: never setState on the unmounted host.
+      // Settle whatever is still open, then restore a safe default so calls
+      // after unmount resolve (false) instead of hanging: never setState on
+      // the unmounted host.
+      currentRef.current?.resolve(false)
       setConfirmDispatcher((c) => c.resolve(false))
     }
   }, [])

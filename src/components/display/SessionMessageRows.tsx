@@ -155,8 +155,14 @@ function MessageRow({ m }: { m: SessionMessage }) {
 export function SessionMessageRows({ items }: { items: RenderItem[] }) {
   return (
     <>
-      {items.map((item, i) => {
-        const key = `${i}`;
+      {items.map((item) => {
+        // seq-derived keys keep a row's identity stable across window
+        // pagination/refresh — index keys would hand one message's expand
+        // state to whichever message lands at its old position.
+        const key =
+          item.kind === "tool_pair"
+            ? `pair-${item.use.seq}-${item.result?.seq ?? "open"}`
+            : `${item.kind}-${item.m.seq}`;
         if (item.kind === "single") {
           return <MessageRow key={key} m={item.m} />;
         }

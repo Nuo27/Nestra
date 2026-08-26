@@ -22,6 +22,17 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 
+/// Masks the VALUE of secret-looking keys in raw config text (JSON / TOML /
+/// env-line flavored) before it reaches the screen. The config file itself is
+/// untouched — screenshots and screen shares are the exposure, not the disk.
+const SECRET_VALUE_RE =
+  /(["']?[\w.-]*(?:api[-_]?key|auth[-_]?token|token|secret|password|credential|cookie)[\w.-]*["']?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|[^\s,;\n}]+)/gi;
+const REDACTED = "<redacted>";
+
+export function redactSecrets(text: string): string {
+  return text.replace(SECRET_VALUE_RE, `$1${REDACTED}`);
+}
+
 // ============ AgentConfigDialog ============
 /// Preview-only dialog: shows the live config file content + any detected
 /// (non-Nestra-managed) provider entries. Opened from the card's
@@ -55,7 +66,12 @@ export function AgentConfigDialog({ agent, onClose }: { agent: AgentInfo; onClos
         <DialogBody className="space-y-2">
           <div className="pt-2">
             <Note>{t("agents.configPreviewTitle", { name: agent.display_name })}</Note>
-            <ConfigFilePreview path={readConfig?.path ?? null} content={readConfig?.content ?? null} />
+            <ConfigFilePreview
+              path={readConfig?.path ?? null}
+              content={readConfig?.content ?? null}
+              loadFailed={q.isError}
+              onRetry={() => q.refetch()}
+            />
           </div>
           <DetectedProviders
             agent={agent}
@@ -75,17 +91,30 @@ export function AgentConfigDialog({ agent, onClose }: { agent: AgentInfo; onClos
 function ConfigFilePreview({
   path,
   content,
+  loadFailed,
+  onRetry,
 }: {
   path: string | null;
   content: string | null;
+  loadFailed: boolean;
+  onRetry: () => void;
 }) {
   const { t } = useTranslation();
   return (
     <div className="mt-2">
       {path && <Note>{t("agents.configFile", { path })}</Note>}
-      {content ? (
+      {loadFailed ? (
+        // A failed read must not masquerade as "no config yet" — the user
+        // would believe the agent was never configured.
+        <div className="mt-1 flex items-center gap-2">
+          <span className="text-xs text-danger">{t("common.loadFailed")}</span>
+          <Button size="sm" variant="ghost" onClick={onRetry}>
+            {t("common.retry")}
+          </Button>
+        </div>
+      ) : content ? (
         <CodeBlock maxH="max-h-64" tone="subtle" className="mt-1 p-2.5">
-          {content}
+          {redactSecrets(content)}
         </CodeBlock>
       ) : (
         <div className="prose mt-1 border border-dashed border-border p-2.5 text-xs italic text-subtle leading-relaxed">

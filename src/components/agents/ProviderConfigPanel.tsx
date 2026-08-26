@@ -108,8 +108,10 @@ export function ProviderConfigPanel({
     const active = agent.active_provider_id;
     if (active && next.has(active)) {
       setDefaultId(active);
-    } else if (active === null) {
-      setDefaultId(null);
+    } else {
+      // Active is null OR points at a binding that no longer exists — the
+      // stale value would fake-dirty the panel and submit a dead provider id.
+      setDefaultId(next.size > 0 ? [...next][0] : null);
     }
     // Merge (don't overwrite) protoChoice: only seed entries the user hasn't
     // touched yet, and bail when nothing was added so an in-progress picker
@@ -160,11 +162,14 @@ export function ProviderConfigPanel({
         await agentApplyProviderSelection(agent.id, list, list[0].provider_id);
         return;
       }
-      if (list.length === 0 || defaultId === null) {
-        await agentApplyProviderSelection(agent.id, [], defaultId ?? "");
+      if (list.length === 0) {
+        await agentApplyProviderSelection(agent.id, [], "");
         return;
       }
-      await agentApplyProviderSelection(agent.id, list, defaultId);
+      // A non-empty selection with no default must NOT be silently cleared —
+      // fall back to the first selected row instead.
+      const def = defaultId ?? list[0].provider_id;
+      await agentApplyProviderSelection(agent.id, list, def);
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.agents() });

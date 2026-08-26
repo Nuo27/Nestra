@@ -28,11 +28,12 @@ export function PageHeader({
 }) {
   return (
     <div
-      className={
-        (sticky
-          ? "sticky top-0 z-10 -mx-4 px-4 py-2.5 mb-3 border-b border-border bg-canvas"
-          : "") + "flex items-start justify-between gap-3"
-      }
+      className={[
+        sticky ? "sticky top-0 z-10 -mx-4 px-4 py-2.5 mb-3 border-b border-border bg-canvas" : "",
+        "flex items-start justify-between gap-3",
+      ]
+        .filter(Boolean)
+        .join(" ")}
     >
       <div className="min-w-0">
         {back && <div className="mb-2">{back}</div>}

@@ -9,6 +9,12 @@ import { StatusDot } from "../feedback/StatusDot";
 
 // Recursive subagent tree: each node is a session row that lazily fetches
 // its own grandchildren only when it has children.
+//
+// Hard recursion cap: subagent parentage is parsed from external session
+// files, and dirty data with a cycle would otherwise recurse unboundedly
+// (each level firing its own children IPC) until the stack blows.
+const MAX_DEPTH = 8;
+
 export function SubagentTree({ s, depth }: { s: Session; depth: number }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -19,7 +25,8 @@ export function SubagentTree({ s, depth }: { s: Session; depth: number }) {
     queryFn: () => sessionChildren(s.provider, s.id),
     enabled: s.child_count > 0,
   });
-  const grandchildren = childrenQuery.data ?? [];
+  const grandchildren =
+    depth >= MAX_DEPTH ? [] : childrenQuery.data ?? [];
   const pad = depth === 0 ? "px-3" : depth === 1 ? "pl-7 pr-3" : "pl-11 pr-3";
   return (
     <li className="border-b border-border last:border-0">

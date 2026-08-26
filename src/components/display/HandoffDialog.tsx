@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 
@@ -44,17 +44,38 @@ export function HandoffDialog({
   const [err, setErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // Latest-ref for `t`: keeping the translation function OUT of the effect
+  // deps stops a language switch from re-running the preview fetch (which
+  // would silently discard unsaved edits under a skeleton flash).
+  const tRef = useRef(t);
+  tRef.current = t;
+
   useEffect(() => {
     if (!open) return;
     setMarkdown(null);
     setErr(null);
+    // A slow response for a previous (provider, session, open) tuple must
+    // never clobber the current one — guard with a cancelled flag.
+    let cancelled = false;
     handoffPreview(provider, sessionId)
-      .then((p) => setMarkdown(p.markdown))
-      .catch((e) => setErr(extractError(e) ?? t("sessions.handoffPreviewFailed")));
-  }, [open, provider, sessionId, t]);
+      .then((p) => {
+        if (!cancelled) setMarkdown(p.markdown);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setErr(extractError(e) ?? tRef.current("sessions.handoffPreviewFailed"));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, provider, sessionId]);
 
   const save = async () => {
-    if (markdown == null) return;
+    if (markdown === null) return;
+    // An empty (whitespace-only) artifact is a destructive overwrite of the
+    // existing handoff — refuse it.
+    if (markdown.trim().length === 0) return;
     setSaving(true);
     try {
       await handoffSave(provider, sessionId, markdown);
@@ -69,7 +90,15 @@ export function HandoffDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      // Esc / overlay close stays available except mid-save: the write is in
+      // flight and its toast/invalidate must land on a mounted dialog.
+      onOpenChange={(o) => {
+        if (!o && saving) return;
+        onOpenChange(o);
+      }}
+    >
       <DialogContent size="lg">
         <DialogHeader>
           <DialogTitle>{t("sessions.handoffTitle")}</DialogTitle>
@@ -88,6 +117,7 @@ export function HandoffDialog({
             <Textarea
               value={markdown}
               onChange={(e) => setMarkdown(e.target.value)}
+              disabled={saving}
               spellCheck={false}
               size="sm"
               rows={16}
@@ -96,14 +126,19 @@ export function HandoffDialog({
           )}
         </DialogBody>
         <DialogFooter>
-          <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={saving}
+            onClick={() => onOpenChange(false)}
+          >
             {t("common.cancel")}
           </Button>
           <Button
             variant="primary"
             size="sm"
             loading={saving}
-            disabled={markdown == null}
+            disabled={markdown === null || markdown.trim().length === 0}
             onClick={save}
           >
             {t("sessions.handoffSaveButton")}

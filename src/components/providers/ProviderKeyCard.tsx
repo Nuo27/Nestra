@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import { useNow } from "../../lib/useNow";
 import type { EndpointInfo } from "../../ipc";
 import type { FormState } from "../../lib/providerForm";
 import { Card } from "../controls/Card";
@@ -90,8 +91,11 @@ export function ProviderKeyCard({
 
 function FreshnessHint({ endpoint }: { endpoint: EndpointInfo }) {
   const { t } = useTranslation();
+  // Minute-granularity clock so the age label doesn't freeze at the value
+  // computed on mount.
+  const now = useNow(60_000);
   if (!endpoint.last_validated_at) return null;
-  const ageMin = Math.floor((Date.now() - endpoint.last_validated_at) / 60_000);
+  const ageMin = Math.max(0, Math.floor((now - endpoint.last_validated_at) / 60_000));
   const label = ageMin < 1 ? t("providerEdit.validatedJustNow") : t("providerEdit.validatedMinAgo", { n: ageMin });
   const stale = ageMin > 5;
   return (

@@ -116,13 +116,8 @@ export function SessionDetail({ id, provider }: { id: string; provider: string }
     // The actual deletion runs in the background; a failure rolls the row back
     // via the refetch that invalidate triggers.
     try {
-      const result = await sessionDelete(provider, id);
+      await sessionDelete(provider, id);
       toast(t("sessions.deleted"), "success");
-      // A non-empty removed_files list is the normal business result — log
-      // at debug (was info, which noise-flooded every delete with files).
-      if (result.removed_files.length > 0) {
-        console.debug("Deleted session files:", result.removed_files);
-      }
     } catch (err) {
       toast(extractError(err) ?? t("sessions.failedToDelete"), "error");
     }
@@ -186,7 +181,12 @@ export function SessionDetail({ id, provider }: { id: string; provider: string }
     try {
       await handoffSpawn(handoffId);
       toast(t("sessions.handoffSpawned"), "success");
+      // Safety valve: if the done event never arrives (the spawn backend
+      // died silently), unlisten after 10 minutes instead of leaking the
+      // handler for the app's lifetime.
+      const timer = setTimeout(() => void unlistenP.then((u) => u()), 10 * 60_000);
       const unlistenP = listen(`handoff:${handoffId}:done`, () => {
+        clearTimeout(timer);
         toast(t("sessions.handoffSpawnReady"), "success");
         invalidate(qc, "handoff");
         void unlistenP.then((u) => u());

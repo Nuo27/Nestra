@@ -43,11 +43,15 @@ export function GatewayTuningSection() {
   const toast = useUI((s) => s.pushToast);
   const q = useQuery({ queryKey: ["gateway-tuning"], queryFn: gatewayTuningGet });
   const [draft, setDraft] = useState<GatewayTuning | null>(null);
+  // Any unsaved edit parks the server-follow: after a save the backend may
+  // CLAMP values, and the refetched (clamped) truth must flow back into the
+  // form — otherwise the display keeps claiming an unclamped value stuck.
+  const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (q.data && !draft) setDraft(q.data);
-  }, [q.data, draft]);
+    if (q.data && !dirty) setDraft(q.data);
+  }, [q.data, dirty]);
 
   if (!draft) return null;
 
@@ -55,6 +59,7 @@ export function GatewayTuningSection() {
     setSaving(true);
     try {
       await gatewayTuningSet(draft);
+      setDirty(false);
       await qc.invalidateQueries({ queryKey: ["gateway-tuning"] });
       toast(t("settings.gatewayTuningSavedToast"), "success");
     } catch {
@@ -65,6 +70,7 @@ export function GatewayTuningSection() {
   };
 
   const resetDefaults = () => {
+    setDirty(true);
     setDraft({
       headers_timeout_secs: 30,
       first_event_timeout_secs: 30,
@@ -89,9 +95,19 @@ export function GatewayTuningSection() {
         max={f.max}
         value={draft[f.key]}
         onChange={(e) => {
+          // Number("") === 0 passes on purpose so a cleared field stays
+          // editable; the blur handler below restores/clamps it.
           const v = Number(e.currentTarget.value);
           if (!Number.isFinite(v)) return;
+          setDirty(true);
           setDraft({ ...draft, [f.key]: v });
+        }}
+        onBlur={(e) => {
+          let v = Number(e.currentTarget.value);
+          if (!Number.isFinite(v) || e.currentTarget.value.trim() === "") v = f.min;
+          const clamped = Math.min(f.max, Math.max(f.min, Math.round(v)));
+          setDirty(true);
+          setDraft({ ...draft, [f.key]: clamped });
         }}
       />
       <span className="text-[11px] leading-tight text-subtle">

@@ -53,8 +53,10 @@ export function QuotaExtractorFields({
     setResult(null);
     try {
       const res = await endpointFetchQuota(endpointId);
-      await qc.invalidateQueries({ queryKey: qk.quotaRefresh() });
       if (res.ok && res.items.length > 0) {
+        // Only a successful test provisions — so only a success refreshes
+        // the settings blob (and without blocking the result display).
+        void qc.invalidateQueries({ queryKey: qk.quotaRefresh() });
         const it = res.items[0];
         const val = it.is_balance
           ? it.remaining != null
@@ -72,16 +74,22 @@ export function QuotaExtractorFields({
     }
   };
 
-  // headers map <-> "Key: Value" textarea lines.
-  const headersText = Object.entries(ex.headers ?? {})
+  // headers map <-> "Key: Value" textarea lines. The textarea is driven by a
+  // LOCAL draft while typing: parsing per keystroke would drop half-typed
+  // lines (no ":" yet), and the controlled value rebuilt from the parsed map
+  // would erase them from under the cursor. Commit the parse on blur.
+  const committedHeadersText = Object.entries(ex.headers ?? {})
     .map(([k, v]) => `${k}: ${v}`)
     .join("\n");
-  const setHeadersText = (text: string) => {
+  const [headersDraft, setHeadersDraft] = useState<string | null>(null);
+  const commitHeaders = () => {
+    if (headersDraft === null) return;
     const headers: Record<string, string> = {};
-    for (const line of text.split("\n")) {
+    for (const line of headersDraft.split("\n")) {
       const idx = line.indexOf(":");
       if (idx > 0) headers[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
     }
+    setHeadersDraft(null);
     patch({ headers });
   };
 
@@ -109,9 +117,10 @@ export function QuotaExtractorFields({
         />
       </FieldRow>
       <FieldRow label={t("quota.extractorHeaders")}>
-<Textarea
-          value={headersText}
-          onChange={(e) => setHeadersText(e.target.value)}
+        <Textarea
+          value={headersDraft ?? committedHeadersText}
+          onChange={(e) => setHeadersDraft(e.target.value)}
+          onBlur={commitHeaders}
           placeholder={t("quota.extractorHeadersPlaceholder", { apiKey: "{{apiKey}}" })}
           size="sm"
           rows={2}

@@ -28,8 +28,10 @@ export function EnvEditor({
     // Prototype-pollution guard: these keys trigger object-prototype
     // setters and can never be saved by the backend anyway.
     if (newKey === "__proto__" || newKey === "constructor" || newKey === "prototype") return
-    // Empty keys would merge onto "" — refuse.
-    if (!newKey.trim()) return
+    // An empty key is a legal INTERMEDIATE state (user cleared the field to
+    // retype) — the input is controlled, so refusing it would bounce the
+    // field back to its old value mid-edit. Persist-side filters drop
+    // still-empty keys at save time.
     // Renaming onto an existing key would silently overwrite that row.
     if (newKey !== oldKey && Object.prototype.hasOwnProperty.call(pairs, newKey)) return
     const next = { ...pairs }

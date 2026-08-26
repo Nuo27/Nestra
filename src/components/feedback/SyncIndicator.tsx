@@ -23,9 +23,7 @@ export function SyncIndicator({
 
   // Diff payload signatures across data changes. `data` identity changes on
   // every refetch; `signature` collapses equivalent payloads so "same data"
-  // refreshes stay invisible. The 1.8s timer lives in a ref so a rapid data
-  // change re-arms it instead of cancelling the pending flash.
-  const briefTimer = useRef<number | undefined>(undefined);
+  // refreshes stay invisible.
   useEffect(() => {
     if (isPending || data == null) return;
     const sig = signature(data);
@@ -37,14 +35,18 @@ export function SyncIndicator({
     if (sig !== lastSig.current) {
       lastSig.current = sig;
       setBrief(true);
-      if (briefTimer.current !== undefined) window.clearTimeout(briefTimer.current);
-      briefTimer.current = window.setTimeout(() => setBrief(false), 1800);
     }
-    return () => {
-      if (briefTimer.current !== undefined) window.clearTimeout(briefTimer.current);
-      briefTimer.current = undefined;
-    };
   }, [data, isPending]);
+
+  // The 1.8s reset timer is keyed on `brief` itself: while the flash is up a
+  // live timer ALWAYS exists, so an equivalent data refresh re-running the
+  // diff effect above can never clear the timer and strand "updated" on
+  // screen until the next real change.
+  useEffect(() => {
+    if (!brief) return;
+    const id = window.setTimeout(() => setBrief(false), 1800);
+    return () => window.clearTimeout(id);
+  }, [brief]);
 
   if (isError) {
     return (

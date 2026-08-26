@@ -46,6 +46,9 @@ export function SessionsListToolbar({
 }) {
   const { t } = useTranslation();
   const { liveSelected, toggleAll, clearSelection, bulkReveal, bulkDelete } = selection;
+  // Batch actions are non-reentrant in the hook — mirror that here so the
+  // buttons physically block a double click mid-flight.
+  const busy = selection.busy;
 
   return (
     <div className="border-b border-border px-3 py-2">
@@ -129,6 +132,7 @@ export function SessionsListToolbar({
                 size="xs"
                 variant="ghost"
                 onClick={bulkReveal}
+                disabled={busy}
                 aria-label={t("sessions.revealSelectedAria")}
                 className="!px-0"
               >
@@ -140,6 +144,7 @@ export function SessionsListToolbar({
                 size="xs"
                 variant="danger"
                 onClick={bulkDelete}
+                disabled={busy}
                 aria-label={t("sessions.deleteSelectedAria")}
                 className="!px-0"
               >

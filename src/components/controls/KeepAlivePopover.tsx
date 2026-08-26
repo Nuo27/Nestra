@@ -157,7 +157,13 @@ export function KeepAliveEditor({ endpointId }: { endpointId: string }) {
     setTesting(true);
     setTestError(null);
     try {
-      await quotaPingNow(endpointId);
+      const res = await quotaPingNow(endpointId);
+      // The IPC resolves even on transport-layer success with a business
+      // failure (ok: false) — check it or a dead ping reads as "passed".
+      if (!res.ok) {
+        setTestError(res.status || t("common.error"));
+        return;
+      }
       await qc.invalidateQueries({ queryKey: qk.keepaliveStatus(endpointId) });
       await qc.invalidateQueries({ queryKey: qk.quotaRefresh() });
     } catch (e) {
@@ -209,7 +215,9 @@ function buildCurl(p: PingPreview): string {
     .map(([k, v]) => `-H ${shq(`${k}: ${v}`)}`)
     .join(" \\\n  ");
   const body = shq(p.body);
-  return `curl -X ${p.method} \\\n  ${headerLines} \\\n  -d ${body} \\\n  ${shq(p.url)}`;
+  // `method` is quoted like every other field: it's backend-controlled, but
+  // an unquoted interpolation is the one hole in the copy-paste safety story.
+  return `curl -X ${shq(p.method)} \\\n  ${headerLines} \\\n  -d ${body} \\\n  ${shq(p.url)}`;
 }
 
 /// Relative countdown for a future fire time (formatTime would render a

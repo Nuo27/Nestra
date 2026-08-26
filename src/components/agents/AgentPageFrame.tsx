@@ -113,9 +113,12 @@ function AgentPageHeader({
 function ModeSubtitle({ agent, routed }: { agent: AgentInfo; routed: boolean }) {
   const { t } = useTranslation();
   const endpointsQ = useQuery({ queryKey: qk.endpoints(), queryFn: endpointList });
+  const routedActive = agent.capability.supports_gateway && routed;
   const policiesQ = useQuery({
     queryKey: qk.routingPolicies(agent.id),
     queryFn: () => routingPolicyList(agent.id),
+    // Only Routed mode reads the `*` policy — no IPC for Direct/non-gateway.
+    enabled: routedActive,
   });
   const endpoints = endpointsQ.data ?? [];
   const nameFor = (id: string) =>
@@ -130,6 +133,15 @@ function ModeSubtitle({ agent, routed }: { agent: AgentInfo; routed: boolean }) 
         {active
           ? t("agentDetail.subDirect", { provider: nameFor(active.provider_id) })
           : t("agentDetail.subUnbound")}
+      </span>
+    );
+  }
+  // A failed policy load must not render as "no route" — that reads as a
+  // config verdict when it's a read failure.
+  if (policiesQ.isError) {
+    return (
+      <span className="font-mono text-2xs text-warning">
+        {t("common.loadFailed")}
       </span>
     );
   }

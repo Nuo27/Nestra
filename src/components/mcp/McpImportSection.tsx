@@ -105,8 +105,12 @@ export function McpImportSection({
               variant="primary"
               size="sm"
               onClick={() => {
-                onImport(it.agent_ids, it.name);
-                invalidate();
+                // Wait for the (async, read-modify-write) import to settle
+                // BEFORE rescanning: an immediate invalidate refetches while
+                // the import is still in flight and shows pre-import data.
+                void Promise.resolve(onImport(it.agent_ids, it.name))
+                  .catch(() => {})
+                  .finally(() => invalidate());
               }}
             >
               {t("mcp.importBtn")}

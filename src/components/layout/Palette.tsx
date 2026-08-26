@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { paletteSearch, type PaletteItem } from "../../ipc";
@@ -49,21 +49,40 @@ export function Palette() {
     return () => clearTimeout(id);
   }, [paletteQuery, guard]);
 
+  // group items by kind for section headers. `flat` is the RENDER order —
+  // the keyboard handler must index the SAME array or the highlighted row
+  // and the Enter target desync whenever the backend order differs from the
+  // section grouping.
+  const flat = useMemo(() => {
+    const grouped = items.reduce<Record<string, PaletteItem[]>>((acc, it) => {
+      (acc[it.kind] ??= []).push(it);
+      return acc;
+    }, {});
+    const rows: { item: PaletteItem; section: string }[] = [];
+    for (const kind of ["nav", "provider", "session", "skill"]) {
+      for (const it of grouped[kind] ?? []) rows.push({ item: it, section: kind });
+    }
+    return rows;
+  }, [items]);
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setActive((i) => Math.min(items.length - 1, i + 1));
+        setActive((i) =>
+          items.length === 0 ? 0 : Math.min(items.length - 1, i + 1),
+        );
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         setActive((i) => Math.max(0, i - 1));
       } else if (e.key === "Enter") {
         // IME composing (Chinese/Japanese input): the Enter that confirms a
         // composition must NOT trigger navigation — it would clear the query
-        // and jump the user mid-typing.
-        if (e.isComposing) return;
+        // and jump the user mid-typing. keyCode 229 backs up WebKit, where
+        // compositionend can fire before keydown leaves isComposing true.
+        if (e.isComposing || e.keyCode === 229) return;
         e.preventDefault();
-        const target = items[active]?.target;
+        const target = flat[active]?.item.target;
         if (target) {
           navigate({ to: target });
           closePalette();
@@ -72,18 +91,7 @@ export function Palette() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [items, active, navigate, closePalette]);
-
-  // group items by kind for section headers
-  const grouped = items.reduce<Record<string, PaletteItem[]>>((acc, it) => {
-    (acc[it.kind] ??= []).push(it);
-    return acc;
-  }, {});
-
-  const flat: { item: PaletteItem; section: string }[] = [];
-  for (const kind of ["nav", "provider", "session", "skill"]) {
-    for (const it of grouped[kind] ?? []) flat.push({ item: it, section: kind });
-  }
+  }, [items, active, flat, navigate, closePalette]);
 
   return (
     <div

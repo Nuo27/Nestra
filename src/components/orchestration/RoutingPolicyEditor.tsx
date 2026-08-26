@@ -104,13 +104,28 @@ export function RoutingPolicyEditor({ agentId }: { agentId: string }) {
 
   // Guarded role-add: `routingPolicyUpsert` is ON CONFLICT DO UPDATE, so
   // adding a role that already exists would silently OVERWRITE the whole row
-  // (targets wiped). Refuse instead.
-  const addRole = (role: string) => {
+  // (targets wiped). Refuse instead — against a FRESH fetch, not the possibly
+  // stale cache snapshot (another window may have created the role since).
+  const addRole = async (role: string) => {
     const r = role.trim();
     if (!r) return;
-    if (policies.some((p) => p.role === r)) {
+    const exists = (list: { role: string }[]) => list.some((p) => p.role === r);
+    if (exists(policies)) {
       toast(t("routingPolicy.alreadyExists"), "error");
       return;
+    }
+    try {
+      const latest = await qc.fetchQuery({
+        queryKey: qk.routingPolicies(agentId),
+        queryFn: () => routingPolicyList(agentId),
+      });
+      if (exists(latest)) {
+        toast(t("routingPolicy.alreadyExists"), "error");
+        return;
+      }
+    } catch {
+      // Refetch failed — fall through to the local check above rather than
+      // blocking the add; the backend's upsert stays the last line of defense.
     }
     addMut.mutate(r);
   };

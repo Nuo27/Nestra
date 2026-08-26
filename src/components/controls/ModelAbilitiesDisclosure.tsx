@@ -46,7 +46,7 @@ function ModelAbilitiesDisclosure({
     // An override with no fields left is not an override — delete the row.
     onChange(Object.keys(next).length === 0 ? undefined : next);
   };
-  const setLimit = (lim: { context: number; output: number } | undefined) => {
+  const setLimit = (lim: ModelAbilities["limit"] | undefined) => {
     const next: ModelAbilities = { ...(overrideAbility ?? {}) };
     if (lim === undefined) delete next.limit;
     else next.limit = lim;
@@ -158,6 +158,10 @@ function ModelAbilitiesDisclosure({
           </div>
           <div className="mt-2 grid grid-cols-2 gap-2">
             <Input
+              // Uncontrolled inputs need the key: without it a Reset/clear
+              // leaves the stale number on screen and a later blur would
+              // write that stale value back as a fresh override.
+              key={`ctx:${limitRow.effective?.context ?? ""}:${limitRow.overridden}`}
               size="sm"
               type="number"
               placeholder={t("providerEdit.ctxPlaceholder")}
@@ -165,13 +169,16 @@ function ModelAbilitiesDisclosure({
               onBlur={(e) => {
                 const v = Number(e.currentTarget.value);
                 if (!Number.isFinite(v) || v <= 0) return;
+                const prev = limitRow.effective;
                 setLimit({
+                  ...prev, // keep the optional `input` cap when present
                   context: v,
-                  output: limitRow.effective?.output ?? 0,
+                  output: prev?.output ?? 0,
                 });
               }}
             />
             <Input
+              key={`out:${limitRow.effective?.output ?? ""}:${limitRow.overridden}`}
               size="sm"
               type="number"
               placeholder={t("providerEdit.outPlaceholder")}
@@ -179,8 +186,10 @@ function ModelAbilitiesDisclosure({
               onBlur={(e) => {
                 const v = Number(e.currentTarget.value);
                 if (!Number.isFinite(v) || v <= 0) return;
+                const prev = limitRow.effective;
                 setLimit({
-                  context: limitRow.effective?.context ?? 0,
+                  ...prev, // keep the optional `input` cap when present
+                  context: prev?.context ?? 0,
                   output: v,
                 });
               }}

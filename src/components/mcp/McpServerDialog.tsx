@@ -3,7 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { mcpSave, type McpKind, type McpServer } from "../../ipc";
 import { extractError } from "../../ipc/errors";
-import { splitArgs } from "../../lib/mcp";
+import { splitArgs, quoteArg } from "../../lib/mcp";
 import type { AgentState } from "../controls/AgentToggleGroup";
 import { AgentStateGroup } from "../controls/AgentToggleGroup";
 import { EnvEditor } from "../controls/EnvEditor";
@@ -43,7 +43,10 @@ export function McpServerDialog({
   const [name, setName] = useState(initial?.name ?? "");
   const [kind, setKind] = useState<McpKind>(initial?.transport.kind ?? "stdio");
   const [command, setCommand] = useState(initial?.transport.command ?? "");
-  const [args, setArgs] = useState((initial?.transport.args ?? []).join(" "));
+  // Args pre-fill must quote whitespace-containing args — submit re-splits
+  // with splitArgs, so a bare join(" ") would corrupt `["--config","a b"]`
+  // into three args on a no-op open→save round trip.
+  const [args, setArgs] = useState((initial?.transport.args ?? []).map(quoteArg).join(" "));
   const [url, setUrl] = useState(initial?.transport.url ?? "");
   const [env, setEnv] = useState<Record<string, string>>(initial?.transport.env ?? {});
   // Per-agent overrides keyed by agent id. Initialized from the server (edit)
@@ -76,6 +79,9 @@ export function McpServerDialog({
       setError(t("mcp.needsName"));
       return;
     }
+    // Empty env keys are transient editor rows — never persist them.
+    const dropEmptyKeys = (env: Record<string, string>) =>
+      Object.fromEntries(Object.entries(env).filter(([k]) => k.trim() !== ""));
     const server: McpServer = {
       // The backend canonicalizes the id from the name (slugify); pass the
       // existing id in edit mode (so a suffixed collision row edits in place)
@@ -86,7 +92,7 @@ export function McpServerDialog({
         kind,
         command: kind === "stdio" ? command.trim() || null : null,
         args: kind === "stdio" ? splitArgs(args) : [],
-        env,
+        env: dropEmptyKeys(env),
         url: kind === "stdio" ? null : url.trim() || null,
       },
       enabled_agents: agents
@@ -96,13 +102,24 @@ export function McpServerDialog({
         .filter((a) => agentStates[a.id] === "disabled")
         .map((a) => a.id),
       managed: true,
-      env_overrides: overrides,
+      env_overrides: Object.fromEntries(
+        Object.entries(overrides).map(([id, env]) => [id, dropEmptyKeys(env)]),
+      ),
     };
     saveMut.mutate(server);
   };
 
   return (
-    <Dialog open onOpenChange={() => onCancel()}>
+    <Dialog
+      open
+      // Block Esc / overlay / X while a save is in flight: unmounting the
+      // dialog drops the mutation's onSuccess (invalidate + onDone), leaving
+      // the list stale after the backend actually saved.
+      onOpenChange={(o) => {
+        if (!o && saveMut.isPending) return;
+        if (!o) onCancel();
+      }}
+    >
       <DialogContent size="md">
         <DialogHeader>
           <DialogTitle>
