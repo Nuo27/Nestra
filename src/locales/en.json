@@ -290,6 +290,7 @@
   "skills": {
     "title": "Skills",
     "help": "One canonical copy per skill, synced into each agent's skills dir. Toggle an agent to install or remove the skill from its folder.",
+    "rescan": "rescan",
     "tabManaged": "Managed",
     "tabImportable": "Importable",
     "tabBuiltin": "Built-in",

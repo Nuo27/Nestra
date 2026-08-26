@@ -283,6 +283,7 @@
   "skills": {
     "title": "技能",
     "help": "每个技能一份规范副本，同步到每个智能体的技能目录。切换智能体即可安装或从其文件夹中移除技能。",
+    "rescan": "重新扫描",
     "tabManaged": "已管理",
     "tabImportable": "可导入",
     "tabBuiltin": "内置",

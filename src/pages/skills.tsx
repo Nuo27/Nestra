@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FolderOpen, Trash2, Unlink } from "lucide-react";
+import { FolderOpen, RefreshCw, Trash2, Unlink } from "lucide-react";
 import {
   skillsImportOne,
   skillsList,
@@ -137,7 +137,22 @@ export function SkillsPage() {
       <PageHeader
         title={t("skills.title")}
         info={t("skills.help")}
-        action={<SyncIndicator query={q} />}
+        action={
+          <>
+            <SyncIndicator query={q} />
+            {/* skills_list re-walks the agent skill dirs on every call, so a
+                refetch IS a rescan — same anatomy as the gateway-logs refresh. */}
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={q.isFetching}
+              onClick={() => void q.refetch()}
+            >
+              {!q.isFetching && <RefreshCw data-icon size={13} />}
+              {t("skills.rescan")}
+            </Button>
+          </>
+        }
       />
 
       {q.isError && (
