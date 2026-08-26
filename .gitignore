@@ -3,8 +3,15 @@ node_modules/
 
 # build artifacts
 dist/
+coverage/
 src-tauri/target/
 src-tauri/gen/
+
+# keys / certificates (Tauri updater signing key, TLS certs, etc.)
+*.pem
+*.key
+*.p12
+*.pfx
 
 # logs / stderr captures
 *.log
