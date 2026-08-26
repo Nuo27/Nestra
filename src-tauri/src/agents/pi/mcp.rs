@@ -69,7 +69,7 @@ impl Provider for Pi {
     fn config_path(&self, home: &Path) -> PathBuf {
         home.join(".pi").join("agent").join("mcp.json")
     }
-    fn read_raw(&self, raw: &str) -> Vec<(String, Value)> {
+    fn read_raw(&self, raw: &str) -> AppResult<Vec<(String, Value)>> {
         read_map(raw, |o| o.get("mcpServers").and_then(|s| s.as_object()))
     }
     fn to_native(&self, s: &McpTransport, _enabled: bool) -> Value {

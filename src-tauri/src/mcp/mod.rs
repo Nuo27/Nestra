@@ -509,20 +509,6 @@ pub fn sync_agent(conn: &Connection, agent: &str) -> AppResult<()> {
         // those too — nothing to write.
         return Ok(());
     };
-    let path = p.config_path(&home_dir()?);
-    if !path.exists() {
-        // Missing config file: create it (empty JSON object) and fall through
-        // to the normal apply path. Toggle callers already verified the agent
-        // is registered; sync_all iterates registered providers only. A
-        // no-op-write would otherwise leave toggles pretending to succeed
-        // while writing nothing. `apply_at_path`/`opencode_apply` treat an
-        // empty file as an empty object root.
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, "{}")?;
-    }
-    let raw = std::fs::read_to_string(&path)?;
     let (enabled, disabled, remove): (Vec<McpServer>, Vec<McpServer>, Vec<String>) = {
         let all = list(conn)?;
         let mut en = Vec::new();
@@ -539,11 +525,36 @@ pub fn sync_agent(conn: &Connection, agent: &str) -> AppResult<()> {
         }
         (en, dis, rem)
     };
-    // Write enabled ones with the flag on and disabled ones with it off;
-    // drop the rest. A file that isn't valid JSON refuses the rewrite
-    // (apply errors) instead of being replaced by an empty object.
-    let native_map = p.to_native_map(&enabled, &disabled);
-    let out = p.apply(&raw, &native_map, &remove)?;
+    write_agent(p.as_ref(), &enabled, &disabled, &remove)
+}
+
+/// File-IO half of a per-agent sync — no DB access, so it runs WITHOUT the
+/// app write lock (see `sync_all`). Write enabled servers with the flag on
+/// and disabled ones with it off; drop the rest. A file that isn't valid
+/// JSON/TOML refuses the rewrite (apply errors) instead of being replaced by
+/// an empty object.
+fn write_agent(
+    p: &dyn providers::Provider,
+    enabled: &[McpServer],
+    disabled: &[McpServer],
+    remove: &[String],
+) -> AppResult<()> {
+    let path = p.config_path(&home_dir()?);
+    if !path.exists() {
+        // Missing config file: create it (empty JSON object) and fall through
+        // to the normal apply path. Toggle callers already verified the agent
+        // is registered; sync_all iterates registered providers only. A
+        // no-op-write would otherwise leave toggles pretending to succeed
+        // while writing nothing. `apply_at_path`/`opencode_apply` treat an
+        // empty file as an empty object root.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, "{}")?;
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let native_map = p.to_native_map(enabled, disabled);
+    let out = p.apply(&raw, &native_map, remove)?;
     atomic_write_cfg(&path, &out)
 }
 
@@ -628,7 +639,10 @@ pub fn import_scan_unmanaged(
             continue;
         }
         let Ok(raw) = std::fs::read_to_string(&path) else { continue };
-        for (name, native) in p.read_raw(&raw) {
+        let entries = p.read_raw(&raw).map_err(|e| {
+            AppError::Internal(format!("{} MCP config unreadable: {e}", p.agent_id()))
+        })?;
+        for (name, native) in entries {
             let id = id_for(&name);
             // Skip when this id is ALREADY MANAGED for THIS CLI. An id
             // managed only under other CLIs is still importable here —
@@ -729,8 +743,9 @@ pub fn import_one(conn: &Connection, agent_id: &str, name: &str) -> AppResult<Mc
         return Err(AppError::NotFound(format!("no {agent_id} config at {}", path.display())));
     }
     let raw = std::fs::read_to_string(&path)?;
+    let entries = p.read_raw(&raw)?;
     let mut found: Option<(String, serde_json::Value)> = None;
-    for (n, v) in p.read_raw(&raw) {
+    for (n, v) in entries {
         // Match by exact name OR by canonical id: the scan aggregates by
         // `id_for(name)`, so a case/whitespace variant of the same name
         // ("My Server" vs "my-server") must resolve to the same entry.
@@ -821,44 +836,93 @@ pub fn import_one(conn: &Connection, agent_id: &str, name: &str) -> AppResult<Mc
 /// agent pair, write the entry if the row is written on that agent (enabled
 /// or disabled), remove it otherwise. Useful when the user hand-edits an
 /// agent config out from under Nestra and wants it re-aligned with the DB.
-pub fn sync_all(conn: &Connection) -> AppResult<()> {
-    let rows = crate::db::list_mcp_servers(conn)?;
-    // TODO: consolidate into a per-platform `sync_enabled_to` for an O(M) pass
-    // instead of the current O(rows × agents).
+///
+/// Phased lock discipline: a SHORT lock snapshots the rows, all config-file
+/// IO runs WITHOUT the app write lock (it spans multiple file reads/writes
+/// and must not stall every UI read command behind it), then a SHORT lock
+/// persists the registry-churn prune.
+pub fn sync_all(db: &std::sync::Arc<std::sync::Mutex<Connection>>) -> AppResult<()> {
+    let (servers, prune): (Vec<McpServer>, Vec<(String, Vec<String>, Vec<String>)>) = {
+        let conn = db
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let servers = list(&conn)?;
+        // The prune plan must come from the RAW rows: `list()` already
+        // filters unknown ids at the read boundary, so computing it from the
+        // pruned view would find nothing to heal.
+        let raw_rows = db::list_mcp_servers(&conn)?;
+        (servers, registry_prune(&raw_rows))
+    };
+    // One whole-agent projection per provider (the old per-row loop called
+    // sync_agent N times per agent — each pass re-reading the whole DB).
     for p in providers::all() {
         let agent = p.agent_id();
-        for row in &rows {
-            if row.enabled_agents.iter().any(|c| c == agent)
-                || row.disabled_agents.iter().any(|c| c == agent)
-            {
-                sync_agent(conn, agent)?;
+        // Same runtime-gate semantics as `sync_agent`: a closed gate
+        // (pi without its adapter package) writes nothing.
+        if providers::for_agent(agent).is_none() {
+            continue;
+        }
+        let mut en = Vec::new();
+        let mut dis = Vec::new();
+        let mut rem = Vec::new();
+        for s in &servers {
+            if s.enabled_agents.iter().any(|a| a == agent) {
+                en.push(s.clone());
+            } else if s.disabled_agents.iter().any(|a| a == agent) {
+                dis.push(s.clone());
             } else {
-                providers::remove_server(agent, &row.name)?;
+                rem.push(s.name.clone());
             }
         }
+        if en.is_empty() && dis.is_empty() {
+            // No bindings on this agent: strip managed names from an
+            // EXISTING file only (`remove_server` skips missing files) —
+            // never bootstrap a fresh config for an unbound agent.
+            for name in &rem {
+                providers::remove_server(agent, name)?;
+            }
+            continue;
+        }
+        write_agent(p.as_ref(), &en, &dis, &rem)?;
     }
     // Registry-churn repair: persist the pruned agent lists so legacy ids
     // (renamed/removed registry entries) stop accumulating. The read boundary
     // already filters them (`row_to_server`); this makes the cleanup durable.
-    for row in &rows {
-        let known = |a: &str| providers::agent_exists(a);
-        let kept_enabled: Vec<String> = row
-            .enabled_agents
-            .iter()
-            .filter(|a| known(a))
-            .cloned()
-            .collect();
-        let kept_disabled: Vec<String> = row
-            .disabled_agents
-            .iter()
-            .filter(|a| known(a))
-            .cloned()
-            .collect();
-        if kept_enabled != row.enabled_agents || kept_disabled != row.disabled_agents {
-            db::update_mcp_server_agents(conn, &row.id, &kept_enabled, &kept_disabled)?;
+    if !prune.is_empty() {
+        let conn = db
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        for (id, kept_enabled, kept_disabled) in prune {
+            db::update_mcp_server_agents(&conn, &id, &kept_enabled, &kept_disabled)?;
         }
     }
     Ok(())
+}
+
+/// Registry-churn repair plan: rows whose enabled/disabled lists still carry
+/// ids the agent registry no longer knows. `(id, kept_enabled, kept_disabled)`
+/// for each row that needs a durable prune.
+fn registry_prune(rows: &[db::McpServerRow]) -> Vec<(String, Vec<String>, Vec<String>)> {
+    rows
+        .iter()
+        .filter_map(|row| {
+            let known = |a: &str| providers::agent_exists(a);
+            let kept_enabled: Vec<String> = row
+                .enabled_agents
+                .iter()
+                .filter(|a| known(a))
+                .cloned()
+                .collect();
+            let kept_disabled: Vec<String> = row
+                .disabled_agents
+                .iter()
+                .filter(|a| known(a))
+                .cloned()
+                .collect();
+            (kept_enabled != row.enabled_agents || kept_disabled != row.disabled_agents)
+                .then(|| (row.id.clone(), kept_enabled, kept_disabled))
+        })
+        .collect()
 }
 
 /// Delete a managed server (from DB and all agents it was written on).

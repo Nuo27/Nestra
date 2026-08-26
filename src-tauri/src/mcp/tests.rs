@@ -727,7 +727,11 @@ fn row_to_server_prunes_unknown_agent_ids_and_sync_persists() {
     assert_eq!(server.enabled_agents, vec!["claude-code-cli".to_string()]);
 
     // sync_all persists the pruned set (the DB heals on the next sync).
-    sync_all(&conn).unwrap();
+    // Phased lock API: it takes the shared Arc<Mutex<Connection>> so it can
+    // snapshot under a short lock and do file IO without one.
+    let db = std::sync::Arc::new(std::sync::Mutex::new(conn));
+    sync_all(&db).unwrap();
+    let conn = db.lock().unwrap_or_else(|p| p.into_inner());
     let row = crate::db::get_mcp_server(&conn, "s1").unwrap().unwrap();
     assert_eq!(row.enabled_agents, vec!["claude-code-cli".to_string()]);
 }

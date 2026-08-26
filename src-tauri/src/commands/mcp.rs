@@ -69,11 +69,9 @@ pub async fn mcp_unmanage(state: State<'_, crate::AppState>, id: String) -> AppR
 #[tauri::command]
 pub async fn mcp_sync_all(state: State<'_, crate::AppState>) -> AppResult<()> {
     let db = state.db.clone();
-    run_blocking(move || {
-        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-        mcp::sync_all(&conn)
-    })
-    .await
+    // sync_all phases its own lock scopes (short snapshot lock, lock-free
+    // file IO, short prune lock) — do NOT hold one lock across it all.
+    run_blocking(move || mcp::sync_all(&db)).await
 }
 
 #[tauri::command]

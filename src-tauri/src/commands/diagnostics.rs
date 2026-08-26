@@ -86,7 +86,20 @@ pub async fn diag_export_logs(dest_path: String) -> AppResult<()> {
         if !log_dir.exists() {
             return Err(AppError::NotFound("no logs yet".into()));
         }
-        std::fs::create_dir_all(&dest_path)?;
+        let dest = std::path::PathBuf::from(&dest_path);
+        // Frontend-supplied destination: absolute only, and never the log
+        // dir itself (copying the dir onto itself corrupts generations).
+        if !dest.is_absolute() {
+            return Err(AppError::Validation("export destination must be absolute".into()));
+        }
+        if let (Ok(a), Ok(b)) = (dest.canonicalize(), log_dir.canonicalize()) {
+            if a == b {
+                return Err(AppError::Validation(
+                    "export destination must differ from the log directory".into(),
+                ));
+            }
+        }
+        std::fs::create_dir_all(&dest)?;
         // The log dir is entirely Nestra-owned (the daily-rotated text and
         // JSON generations, crash.log), so every regular file ships — an
         // extension filter would silently drop a rotated generation.
@@ -94,7 +107,7 @@ pub async fn diag_export_logs(dest_path: String) -> AppResult<()> {
             let path = entry.path();
             if path.is_file() {
                 let file_name = path.file_name().unwrap();
-                let target = std::path::PathBuf::from(&dest_path).join(file_name);
+                let target = dest.join(file_name);
                 std::fs::copy(&path, &target)?;
             }
         }

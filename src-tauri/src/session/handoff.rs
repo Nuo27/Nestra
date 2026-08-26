@@ -537,9 +537,27 @@ fn insert_handoff_row(conn: &Connection, info: &HandoffInfo) -> AppResult<()> {
     Ok(())
 }
 
+/// Artifact paths are DB-written by `save_handoff` under a
+/// `.nestra/handoffs/` directory (session-repo or Nestra home). Reads that
+/// feed UI or LLM prompts verify that shape before touching the filesystem —
+/// a tampered/legacy row must not turn into an arbitrary-file read.
+pub(crate) fn is_handoff_artifact_path(p: &std::path::Path) -> bool {
+    let comps: Vec<&str> = p
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    comps.windows(2).any(|w| w == [".nestra", "handoffs"])
+}
+
 fn row_to_info(r: &rusqlite::Row<'_>) -> rusqlite::Result<HandoffInfo> {
     let artifact_path: String = r.get(6)?;
     let sections_json: String = r.get(7)?;
+    let artifact = std::path::Path::new(&artifact_path);
+    let markdown = if is_handoff_artifact_path(artifact) {
+        std::fs::read_to_string(artifact).ok()
+    } else {
+        None
+    };
     Ok(HandoffInfo {
         id: r.get(0)?,
         source_provider: r.get(1)?,
@@ -549,7 +567,7 @@ fn row_to_info(r: &rusqlite::Row<'_>) -> rusqlite::Result<HandoffInfo> {
         cost_snapshot: r.get(5)?,
         created_at: r.get(8)?,
         sections: serde_json::from_str(&sections_json).unwrap_or_default(),
-        markdown: std::fs::read_to_string(&artifact_path).ok(),
+        markdown,
         artifact_path,
     })
 }

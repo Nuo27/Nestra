@@ -414,6 +414,9 @@ pub fn toggle(
 /// Import an unmanaged agent-dir skill into SSOT, marked enabled for that agent.
 pub fn import_one(conn: &Connection, path: &str, agent_id: &str) -> AppResult<SkillMeta> {
     let src = PathBuf::from(path);
+    if !src.is_absolute() {
+        return Err(AppError::Validation("import path must be absolute".into()));
+    }
     if !src.exists() {
         return Err(AppError::NotFound(format!("skill path not found: {path}")));
     }
@@ -423,6 +426,15 @@ pub fn import_one(conn: &Connection, path: &str, agent_id: &str) -> AppResult<Sk
         .unwrap_or("skill");
     let id = unique_id(conn, &slugify(base));
     let root = ssot_root()?;
+    // Reject importing from inside the SSOT itself — copying managed content
+    // onto a fresh id would silently duplicate it.
+    if let (Ok(c), Ok(rc)) = (src.canonicalize(), root.canonicalize()) {
+        if c.starts_with(&rc) {
+            return Err(AppError::Validation(
+                "cannot import a skill from inside the managed SSOT".into(),
+            ));
+        }
+    }
     std::fs::create_dir_all(&root)?;
     let ssot = root.join(&id);
     ingest_source(&src, &ssot)?;
@@ -573,11 +585,22 @@ pub fn list(conn: &Connection) -> AppResult<Vec<SkillMeta>> {
 
 pub fn reveal(path: &str) -> AppResult<()> {
     let p = PathBuf::from(path);
+    // Frontend-supplied path: require an absolute, existing location before
+    // handing anything to the OS file manager.
+    if !p.is_absolute() {
+        return Err(AppError::Validation("reveal path must be absolute".into()));
+    }
     let target = if p.is_file() {
         p.parent().map(|x| x.to_path_buf()).unwrap_or(p)
     } else {
         p
     };
+    if !target.is_dir() {
+        return Err(AppError::NotFound(format!(
+            "reveal target is not a directory: {}",
+            target.display()
+        )));
+    }
     crate::agents::reveal_in_explorer(&target).map_err(|e| AppError::Internal(format!("open failed: {e}")))?;
     Ok(())
 }

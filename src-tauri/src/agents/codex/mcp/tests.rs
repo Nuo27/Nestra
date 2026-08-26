@@ -17,7 +17,7 @@ someKey = true
 
 #[test]
 fn read_raw_parses_stdio_and_http_entries() {
-    let entries = Codex.read_raw(RAW);
+    let entries = Codex.read_raw(RAW).unwrap();
     let get = |name: &str| {
         entries
             .iter()
@@ -70,5 +70,5 @@ fn apply_writes_entries_and_preserves_unrelated_sections() {
     // Untouched section survives.
     assert_eq!(doc["desktop"]["someKey"].as_bool(), Some(true));
     // And the written config round-trips through read_raw.
-    assert_eq!(Codex.read_raw(&out).len(), 3);
+    assert_eq!(Codex.read_raw(&out).unwrap().len(), 3);
 }

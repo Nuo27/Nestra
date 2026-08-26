@@ -25,8 +25,10 @@ pub trait Provider: Send + Sync {
     fn agent_id(&self) -> &'static str;
     /// Absolute path to the agent's MCP config file under a home dir.
     fn config_path(&self, home: &Path) -> PathBuf;
-    /// Read native server entries out of the raw file contents.
-    fn read_raw(&self, raw: &str) -> Vec<(String, Value)>;
+    /// Read native server entries out of the raw file contents. A parse
+    /// failure of the underlying file is an Err — "config corrupt" must be
+    /// distinguishable from "no servers configured".
+    fn read_raw(&self, raw: &str) -> AppResult<Vec<(String, Value)>>;
     /// Whether this format can express a per-server `enabled` flag (opencode).
     /// Formats without one can only write-or-drop an entry, so a "disabled"
     /// state on them degrades to absent (see `set_state`).
@@ -214,16 +216,16 @@ fn needs_cmd_wrap(cmd: &str) -> bool {
 pub(crate) fn read_map(
     raw: &str,
     pick: fn(&Map<String, Value>) -> Option<&Map<String, Value>>,
-) -> Vec<(String, Value)> {
-    let Ok(v) = serde_json::from_str::<Value>(raw) else {
-        return Vec::new();
-    };
+) -> AppResult<Vec<(String, Value)>> {
+    let v: Value = serde_json::from_str(raw)
+        .map_err(|e| AppError::Validation(format!("MCP config is not valid JSON: {e}")))?;
     let Some(map) = v.as_object().and_then(pick) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    map.iter()
+    Ok(map
+        .iter()
         .map(|(k, v2)| (k.clone(), v2.clone()))
-        .collect()
+        .collect())
 }
 
 /// Mutate a (possibly nested) object path inside a JSON root, preserving all

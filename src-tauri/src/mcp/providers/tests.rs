@@ -544,6 +544,6 @@ fn zcode_native_round_trip_and_apply() {
     assert_eq!(parsed["mcp"]["servers"]["fs"]["command"], "npx");
 
     // read_raw finds the nested map
-    let entries = ZCode.read_raw(&out);
+    let entries = ZCode.read_raw(&out).unwrap();
     assert_eq!(entries[0].0, "fs");
 }

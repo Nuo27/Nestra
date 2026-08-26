@@ -27,20 +27,20 @@ impl Provider for Codex {
     fn config_path(&self, home: &Path) -> PathBuf {
         home.join(".codex").join("config.toml")
     }
-    fn read_raw(&self, raw: &str) -> Vec<(String, Value)> {
-        let Ok(doc) = raw.parse::<toml_edit::DocumentMut>() else {
-            return Vec::new();
-        };
+    fn read_raw(&self, raw: &str) -> AppResult<Vec<(String, Value)>> {
+        let doc: toml_edit::DocumentMut = raw.parse().map_err(|e| {
+            AppError::Validation(format!("MCP config is not valid TOML: {e}"))
+        })?;
         let Some(providers) = doc.get("mcp_servers").and_then(Item::as_table) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        providers
+        Ok(providers
             .iter()
             .filter_map(|(name, item)| {
                 let t = item.as_table()?;
                 Some((name.to_string(), table_to_json(t)))
             })
-            .collect()
+            .collect())
     }
     fn to_native(&self, s: &McpTransport, _enabled: bool) -> Value {
         match s.kind {
@@ -49,6 +49,12 @@ impl Provider for Codex {
                 "args": s.args.clone(),
                 "env": s.env.clone(),
             }),
+            // Known round-trip limitation: Codex's config.toml format has NO
+            // transport discriminator — a bare `url` is the only HTTP shape
+            // it accepts, and `from_native` reads every url entry back as
+            // Http. An SSE-managed server folds into HTTP on sync; writing
+            // an invented `type` field here would risk Codex rejecting the
+            // file, so the fold stays until upstream grows a discriminator.
             McpKind::Http | McpKind::Sse => json!({ "url": s.url.clone() }),
         }
     }

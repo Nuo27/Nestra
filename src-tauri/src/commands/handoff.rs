@@ -171,7 +171,13 @@ pub async fn handoff_spawn(
         })
         .await?
     };
-    let markdown = std::fs::read_to_string(&artifact_path)
+    let artifact = std::path::PathBuf::from(&artifact_path);
+    if !crate::session::handoff::is_handoff_artifact_path(&artifact) {
+        return Err(AppError::Validation(format!(
+            "handoff artifact path outside .nestra/handoffs: {artifact_path}"
+        )));
+    }
+    let markdown = std::fs::read_to_string(&artifact)
         .map_err(|e| AppError::Internal(format!("handoff artifact unreadable: {e}")))?;
 
     let exe = super::review::resolve_pi_exe(&state).await?;

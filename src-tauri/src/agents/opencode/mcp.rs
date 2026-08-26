@@ -28,12 +28,11 @@ impl Provider for OpenCode {
     fn config_path(&self, home: &Path) -> PathBuf {
         home.join(".config").join("opencode").join("opencode.json")
     }
-    fn read_raw(&self, raw: &str) -> Vec<(String, Value)> {
-        let Ok(v) = serde_json::from_str::<Value>(raw) else {
-            return Vec::new();
-        };
+    fn read_raw(&self, raw: &str) -> AppResult<Vec<(String, Value)>> {
+        let v: Value = serde_json::from_str(raw)
+            .map_err(|e| AppError::Validation(format!("MCP config is not valid JSON: {e}")))?;
         let Some(mcp) = v.get("mcp").and_then(|m| m.as_object()) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let mut out = Vec::new();
         // Flat layout: every `mcp.<name>` object is a server. Also surface
@@ -61,7 +60,7 @@ impl Provider for OpenCode {
                 out.push((k.clone(), sv.clone()));
             }
         }
-        out
+        Ok(out)
     }
     fn to_native(&self, s: &McpTransport, enabled: bool) -> Value {
         match s.kind {

@@ -22,7 +22,7 @@ impl Provider for ClaudeCode {
     fn config_path(&self, home: &Path) -> PathBuf {
         home.join(".claude.json")
     }
-    fn read_raw(&self, raw: &str) -> Vec<(String, Value)> {
+    fn read_raw(&self, raw: &str) -> AppResult<Vec<(String, Value)>> {
         read_map(raw, |o| o.get("mcpServers").and_then(|s| s.as_object()))
     }
     fn to_native(&self, s: &McpTransport, _enabled: bool) -> Value {
