@@ -222,6 +222,7 @@
     "failedToReveal": "显示失败",
     "failedToDelete": "删除失败",
     "subagentSuffix": " · 子代理",
+    "backToParent": "父会话",
     "messagesCount": "{{n}} 条消息",
     "updatedAt": "更新于 {{rel}}",
     "openTip": "在原生智能体中打开此会话",

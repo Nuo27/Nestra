@@ -41,7 +41,7 @@ import { Card } from "../controls/Card";
 import { Button } from "../controls/Button";
 import { ButtonGroup } from "../controls/ButtonGroup";
 import { confirmDialog } from "../controls/ConfirmDialog";
-import { SectionLabel } from "../layout/PageHeader";
+import { SectionLabel, BackLink } from "../layout/PageHeader";
 import { StatusDot } from "../feedback/StatusDot";
 import { ErrorBanner } from "../feedback/ErrorBanner";
 import { Skeleton } from "../ui/skeleton";
@@ -200,6 +200,24 @@ export function SessionDetail({ id, provider }: { id: string; provider: string }
     <div className="w-full p-4">
       {/* header card */}
       <Card padding="md">
+        {/* Subagent sessions had no way back up: the parent's detail shows
+            this session in its subagent tree, but this detail offered no
+            return link. parent_session_id is same-provider (parsed from the
+            same file family), so the back link reselects within `provider`. */}
+        {session?.parent_session_id && (
+          <div className="mb-2">
+            <BackLink
+              onClick={() =>
+                navigate({
+                  to: "/sessions",
+                  search: { id: session.parent_session_id!, provider },
+                })
+              }
+            >
+              {t("sessions.backToParent")}
+            </BackLink>
+          </div>
+        )}
         <div className="flex items-center gap-2">
           <StatusDot color={meta.color} size={2.5} title={meta.label} />
           <SectionLabel inline>

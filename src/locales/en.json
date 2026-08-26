@@ -228,6 +228,7 @@
     "failedToReveal": "failed to reveal",
     "failedToDelete": "failed to delete",
     "subagentSuffix": " · subagent",
+    "backToParent": "parent session",
     "messagesCount": "{{n}} messages",
     "updatedAt": "updated {{rel}}",
     "openTip": "Open this session in its native agent",
