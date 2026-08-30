@@ -14,11 +14,15 @@
 
 <table>
   <tr>
-    <td><img src="docs/screenshots/gateway.png" alt="Gateway — runtime state, routing activity"></td>
-    <td><img src="docs/screenshots/routing.png" alt="Per-role routing policy editor"></td>
+    <td><img src="docs/screenshots/overview.png" alt="Overview — gateway health, 30-day usage, agent modes, anomalies"></td>
+    <td><img src="docs/screenshots/gateway.png" alt="Gateway — breaker health, routed agents, live activity"></td>
   </tr>
   <tr>
+    <td><img src="docs/screenshots/routing.png" alt="Per-role routing policy editor with ordered target chains"></td>
     <td><img src="docs/screenshots/providers.png" alt="Providers with quota bars and breaker health"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/agents.png" alt="Agents with mode, status, and 30-day usage"></td>
     <td><img src="docs/screenshots/sessions.png" alt="Sessions with context detail"></td>
   </tr>
 </table>
