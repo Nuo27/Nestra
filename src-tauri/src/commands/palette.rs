@@ -7,7 +7,8 @@ use tauri::State;
 
 #[derive(Serialize)]
 pub struct PaletteItem {
-    pub kind: &'static str, // "provider" | "session" | "skill" | "nav"
+    pub kind: &'static str, // "provider" | "session" | "skill" — nav entries
+                            // are injected frontend-side (i18n'd, route-accurate)
     pub label: String,
     pub detail: Option<String>,
     pub target: String,
@@ -29,20 +30,6 @@ pub async fn palette_search(
     let db = state.db_read.clone();
     run_blocking(move || {
         let mut items: Vec<PaletteItem> = Vec::new();
-        for (label, target) in [
-            ("Providers", "/providers"),
-            ("Quota", "/quota"),
-            ("Sessions", "/sessions"),
-            ("Skills", "/skills"),
-            ("Settings", "/settings"),
-        ] {
-            items.push(PaletteItem {
-                kind: "nav",
-                label: label.into(),
-                detail: None,
-                target: target.into(),
-            });
-        }
         // Pure read on db_read — the launch reconcile runs in the background
         // on its own connection, so palette never waits on it.
         let conn = match db.lock() {

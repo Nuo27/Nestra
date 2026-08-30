@@ -9,13 +9,13 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
-  redirect,
   useParams,
 } from "@tanstack/react-router";
 import { useState } from "react";
 import { ErrorBoundary } from "./components/feedback/ErrorBoundary";
 import { useUI } from "./stores/ui";
 import { RootShell } from "./components/layout/RootShell";
+import { OverviewPage } from "./pages/overview";
 import { ProvidersPage } from "./pages/providers";
 import { ProviderEditPage } from "./pages/provider-edit";
 import { QuotaPage } from "./pages/quota";
@@ -34,14 +34,12 @@ const rootRoute = createRootRoute({
   component: RootShell,
 });
 
-// Providers lives at /providers so the top bar shows the real route; the
-// root path just bounces there (opening the app lands on /providers).
+// The root path IS the Overview dashboard — the landing page summarizing
+// gateway health, agent modes, usage, and anomalies.
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  beforeLoad: () => {
-    throw redirect({ to: "/providers" });
-  },
+  component: OverviewPage,
 });
 const providersRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -100,11 +98,15 @@ const mcpRoute = createRoute({ getParentRoute: () => rootRoute, path: "/mcp", co
 const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: SettingsPage });
 const gatewayRoute = createRoute({ getParentRoute: () => rootRoute, path: "/gateway", component: GatewayPage });
 // Gateway log viewer sub-page (entered from the Gateway page header) — reads
-// the JSON twin layer; same shape as the per-agent sub-pages.
+// the JSON twin layer; same shape as the per-agent sub-pages. `task` prefills
+// the search box (deep links from task rows: one request's whole lifecycle).
 const gatewayLogsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/gateway/logs",
   component: GatewayLogsPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    task: (search.task as string) || undefined,
+  }),
 });
 
 const routeTree = rootRoute.addChildren([

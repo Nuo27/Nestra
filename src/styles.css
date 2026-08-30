@@ -447,7 +447,18 @@ a:focus-visible,
  * compact keyboard-row grammar; colors follow the token theme.
  * The checkbox is visually hidden but stays focusable (so keyboard users
  * land on it), and the label re-checks it on click.
+ * The wrapper MUST stay `position: relative` (and non-inline): without a
+ * positioned ancestor the absolute .tgl's containing block escapes to the
+ * viewport, `main`'s overflow clip can't contain it, and every switch
+ * below the fold grows the document scroll area — a phantom second
+ * scrollbar plus empty space under the app (and focus-scroll jumps to the
+ * document bottom). Same rule as DESIGN.md §11: every absolute overlay
+ * needs a positioned owner.
  * ────────────────────────────────────────────────────────────────────── */
+.checkbox-wrapper-8 {
+  display: inline-block;
+  position: relative;
+}
 .checkbox-wrapper-8 .tgl {
   position: absolute;
   width: 1px;

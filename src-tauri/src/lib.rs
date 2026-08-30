@@ -381,6 +381,7 @@ pub fn run() {
             commands::mcp::mcp_usage_stats,
             commands::mcp::mcp_sync_all,
             commands::mcp::mcp_probe,
+            commands::mcp::mcp_probe_draft,
             // Settings
             commands::settings::setting_get,
             commands::settings::setting_set,
@@ -389,6 +390,7 @@ pub fn run() {
             commands::palette::palette_search,
             // Diagnostics
             commands::diagnostics::diag_export_logs,
+            commands::diagnostics::diag_export_text,
             commands::diagnostics::diag_health,
             commands::diagnostics::diag_open_data_dir,
             commands::diagnostics::diag_log_files,
@@ -446,9 +448,8 @@ pub fn run() {
             commands::orchestration::orch_model_catalog,
             commands::orchestration::orch_model_catalog_rebuild,
             commands::orchestration::orch_resolve_preview,
-            // Gateway: per-agent opt-in + live status
+            // Gateway: per-agent opt-in
             commands::gateway::agent_set_gateway_enabled,
-            commands::gateway::orch_status,
             // Gateway Service control surface: global enable, port, token, restart
             commands::gateway::gateway_get_status,
             commands::gateway::gateway_set_enabled,
@@ -471,6 +472,8 @@ pub fn run() {
             commands::orchestration::orch_session_tasks,
             // Usage dashboard (tokens + read-time cost per day/agent/model)
             commands::orchestration::orch_usage_summary,
+            // Observability data wipe (Settings → Data danger action)
+            commands::orchestration::orch_obs_clear,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

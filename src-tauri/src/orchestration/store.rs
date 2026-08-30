@@ -870,6 +870,23 @@ pub fn usage_summary_rows(
     Ok(rows)
 }
 
+/// Wipe ALL gateway observability data: tasks (cascading to route_request /
+/// route_migration), the lifetime usage rollup, and the persisted affinity
+/// snapshot. Configuration — endpoints, policies, bindings, secrets, imported
+/// sessions — is untouched. The deletes run in ONE transaction: a partial
+/// wipe (tasks gone, usage/affinity left) must never be observable. Callers
+/// must ALSO clear the in-memory affinity table or the runtime re-persists
+/// its snapshot (see `orch_obs_clear`).
+pub fn clear_observability(conn: &Connection) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM task", [])?;
+    tx.execute("DELETE FROM usage_daily", [])?;
+    // Affinity rides in setting_kv (session-grain snapshot), not a table.
+    tx.execute("DELETE FROM setting_kv WHERE key = 'route_affinity'", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================

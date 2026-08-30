@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
@@ -14,6 +14,7 @@ import {
   BookMarked,
   ShieldCheck,
   Rocket,
+  MoreHorizontal,
 } from "lucide-react";
 import {
   sessionChildren,
@@ -248,8 +249,10 @@ export function SessionDetail({ id, provider }: { id: string; provider: string }
           )}
         </div>
         <ButtonGroup className="mt-3" justify="end" space="loose" wrap>
-          {/* Labeled featured action (Context Lifecycle): opens the editable
-              handoff preview dialog. */}
+          {/* Primary actions stay inline (DESIGN.md §4): the labeled featured
+              handoff action + the two icon actions users fire constantly.
+              Everything else (reveal / copy path / review / delete) folds
+              into the ⋯ overflow menu below. */}
           <Button size="sm" variant="secondary" onClick={() => setHandoffOpen(true)}>
             <FileOutput data-icon size={12} />
             {t("sessions.handoffGenerate")}
@@ -267,11 +270,6 @@ export function SessionDetail({ id, provider }: { id: string; provider: string }
               </Button>
             </Tip>
           )}
-          <Tip content={t("sessions.revealTip")}>
-            <Button size="sm" variant="ghost" onClick={handleReveal} aria-label={t("sessions.revealSourceAria")}>
-              <FolderOpen data-icon size={12} />
-            </Button>
-          </Tip>
           {session?.resume_command && (
             <Tip content={t("sessions.copyResumeTip", { cmd: session.resume_command })}>
               <Button
@@ -284,39 +282,22 @@ export function SessionDetail({ id, provider }: { id: string; provider: string }
               </Button>
             </Tip>
           )}
-          {session && (
-            <Tip content={t("sessions.copyPathTip", { path: session.source_path })}>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => copyPath(session.source_path)}
-                aria-label={copiedPath ? t("sessions.pathCopied") : t("sessions.copyPath")}
-              >
-                {copiedPath ? <Check data-icon size={12} /> : <Copy data-icon size={12} />}
-              </Button>
-            </Tip>
-          )}
-          {/* Review Runtime entry (Pi only): jump to the review page with this
-              session preselected. */}
-          {provider === "pi-cli" && (
-            <Tip content={t("sessions.reviewThisTip")}>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() =>
-                  navigate({ to: "/agents/$id/review", params: { id: "pi-cli" }, search: { session: id } })
-                }
-                aria-label={t("sessions.reviewThisTip")}
-              >
-                <ShieldCheck data-icon size={12} />
-              </Button>
-            </Tip>
-          )}
-          <Tip content={t("sessions.deleteTip")}>
-            <Button size="sm" variant="danger" onClick={handleDelete} aria-label={t("sessions.deleteAria")}>
-              <Trash2 data-icon size={12} />
-            </Button>
-          </Tip>
+          <DetailOverflow
+            onReveal={handleReveal}
+            onCopyPath={session ? () => copyPath(session.source_path) : null}
+            pathCopied={copiedPath}
+            onReview={
+              provider === "pi-cli"
+                ? () =>
+                    navigate({
+                      to: "/agents/$id/review",
+                      params: { id: "pi-cli" },
+                      search: { session: id },
+                    })
+                : null
+            }
+            onDelete={handleDelete}
+          />
           {actionErr && (
             <ErrorBanner
               variant="bare"
@@ -464,6 +445,118 @@ export function SessionDetail({ id, provider }: { id: string; provider: string }
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/// Secondary-action overflow menu for the detail header: reveal, copy path,
+/// review, delete — the low-frequency tail that used to crowd the header as
+/// four more icon buttons. Same outside-click/Escape close pattern as
+/// KeepAlivePopover; no portal (the header is in normal document flow).
+function DetailOverflow({
+  onReveal,
+  onCopyPath,
+  pathCopied,
+  onReview,
+  onDelete,
+}: {
+  onReveal: () => void;
+  onCopyPath: (() => void) | null;
+  pathCopied: boolean;
+  onReview: (() => void) | null;
+  onDelete: () => void;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  // Base anatomy without colors — the danger item REPLACES the muted pair
+  // instead of stacking a second set (conflicting utilities resolve by
+  // stylesheet order, which the source can't control).
+  const item =
+    "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-[color] duration-fast focus-visible:shadow-focus";
+  const itemMuted = item + " text-muted hover:text-fg";
+  return (
+    <div ref={wrapRef} className="relative">
+      <Tip content={t("sessions.moreActions")}>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => setOpen((v) => !v)}
+          aria-label={t("sessions.moreActions")}
+          aria-expanded={open}
+        >
+          <MoreHorizontal data-icon size={12} />
+        </Button>
+      </Tip>
+      {open && (
+        <div className="absolute right-0 top-full z-20 mt-1 min-w-44 border border-border bg-overlay py-1 animate-in fade-in-0 zoom-in-95 duration-fast">
+          <button
+            type="button"
+            className={itemMuted}
+            onClick={() => {
+              setOpen(false);
+              onReveal();
+            }}
+          >
+            <FolderOpen data-icon size={12} />
+            {t("sessions.revealTip")}
+          </button>
+          {onCopyPath && (
+            <button
+              type="button"
+              className={itemMuted}
+              onClick={() => {
+                setOpen(false);
+                onCopyPath();
+              }}
+            >
+              {pathCopied ? <Check data-icon size={12} /> : <Copy data-icon size={12} />}
+              {pathCopied ? t("sessions.pathCopied") : t("sessions.copyPath")}
+            </button>
+          )}
+          {onReview && (
+            <button
+              type="button"
+              className={itemMuted}
+              onClick={() => {
+                setOpen(false);
+                onReview();
+              }}
+            >
+              <ShieldCheck data-icon size={12} />
+              {t("sessions.reviewThis")}
+            </button>
+          )}
+          <button
+            type="button"
+            className={item + " text-danger hover:text-danger"}
+            onClick={() => {
+              setOpen(false);
+              onDelete();
+            }}
+          >
+            <Trash2 data-icon size={12} />
+            {t("common.delete")}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

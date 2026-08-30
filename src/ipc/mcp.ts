@@ -52,6 +52,10 @@ export interface ProbeResult {
   reason: string | null;
 }
 export const mcpProbe = (id: string) => invoke<ProbeResult>("mcp_probe", { id });
+/// Probe an UNSAVED draft transport (add/edit dialog "test connection").
+/// Nothing is persisted — verify before committing.
+export const mcpProbeDraft = (transport: McpTransport) =>
+  invoke<ProbeResult>("mcp_probe_draft", { transport });
 
 /** Per-server gateway-observed tool usage (P1-1). Zero `total_calls` means
  *  none were observed — attribution currently covers the Claude-style

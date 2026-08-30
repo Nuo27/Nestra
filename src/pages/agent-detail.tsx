@@ -2,16 +2,18 @@ import { useTranslation } from "react-i18next";
 import { useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { Workflow, ListTree, Plug, ShieldCheck, Coins } from "lucide-react";
+import { Workflow, ListTree, Plug, ShieldCheck, Coins, ScrollText } from "lucide-react";
 import { AgentPageFrame } from "../components/agents/AgentPageFrame";
 import { Button } from "../components/controls/Button";
 import { Card } from "../components/controls/Card";
 import { SectionHeader } from "../components/layout/SectionHeader";
+import { Disclosure } from "../components/controls/Disclosure";
 import { Stat } from "../components/display/Stat";
 import { Skeleton } from "../components/ui/skeleton";
 import { Badge } from "../components/ui/badge";
 import { EmptyOrchestration } from "../components/orchestration/EmptyOrchestration";
 import { useAgentModeToggle } from "../components/orchestration/ModeSwitch";
+import { ROLE_CHIP_ACTIVE, ROLE_CHIP_BASE } from "../components/orchestration/RoleChip";
 import { RouteLineage } from "../components/orchestration/RouteLineage";
 import { RoleKey } from "../components/orchestration/RoleKey";
 import { SteadyRouteCard } from "../components/orchestration/SteadyRouteCard";
@@ -163,7 +165,7 @@ function RoutingEntryCard({ agent }: { agent: AgentInfo }) {
                 key={r.role}
                 to="/agents/$id/routing"
                 params={{ id: agent.id }}
-                className="inline-flex items-center gap-1.5 border border-border bg-inset px-1.5 py-0.5 font-mono text-2xs text-fg transition-colors duration-fast hover:border-accent-border hover:bg-raised"
+                className={ROLE_CHIP_BASE + ROLE_CHIP_ACTIVE}
                 title={t("agentDetail.roleChipTip", { count: r.request_count, role: r.role })}
               >
                 <RoleKey roleKey={r.role} />
@@ -250,69 +252,68 @@ function TaskRow({ summary }: { summary: TaskSummary }) {
   const status = summary.latest_status;
   const statusTone = statusToneOf(status);
 
+  // Disclosure owns the toggle; the side link jumps to the gateway log
+  // filtered on this task (outside the toggle button — no nested controls).
   return (
-    <div className="border border-border bg-inset">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs"
-      >
-        <span
-          aria-hidden
-          className="text-subtle transition-transform"
-          style={{ transform: open ? "rotate(90deg)" : undefined }}
-        >
-          ▸
-        </span>
-        <span className="min-w-0 flex-1 truncate font-mono text-fg">
-          {summary.task_id.slice(0, 8)}
-          {summary.logical_session ? (
-            <span className="ml-1.5 font-mono text-2xs text-subtle">
-              {summary.logical_session.slice(0, 12)}
+    <div className="flex items-center border border-border bg-inset">
+      <Disclosure
+        className="min-w-0 flex-1"
+        onOpenChange={setOpen}
+        header={
+          <span className="flex items-center gap-2 font-mono text-xs">
+            <span className="min-w-0 flex-1 truncate text-fg">
+              {summary.task_id.slice(0, 8)}
+              {summary.logical_session ? (
+                <span className="ml-1.5 font-mono text-2xs text-subtle">
+                  {summary.logical_session.slice(0, 12)}
+                </span>
+              ) : null}
             </span>
-          ) : null}
-        </span>
-        <span className="font-mono text-2xs text-subtle tabular">
-          {t("orchestration.reqCount", { n: summary.request_count })}
-        </span>
-        {summary.generation_broken && (
-          <Badge tone="danger" variant="soft" className="font-mono text-2xs">
-            {t("orchestration.genBroken")}
-          </Badge>
-        )}
-        {status != null && (
-          <Badge tone={statusTone} variant="soft" className="font-mono text-2xs">
-            http {status}
-          </Badge>
-        )}
-      </button>
-      <div
-        className="grid transition-[grid-template-rows] duration-150 ease-out"
-        style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
-        aria-hidden={!open}
+            <span className="font-mono text-2xs text-subtle tabular">
+              {t("orchestration.reqCount", { n: summary.request_count })}
+            </span>
+            {summary.generation_broken && (
+              <Badge tone="danger" variant="soft" className="font-mono text-2xs">
+                {t("orchestration.genBroken")}
+              </Badge>
+            )}
+            {status != null && (
+              <Badge tone={statusTone} variant="soft" className="font-mono text-2xs">
+                http {status}
+              </Badge>
+            )}
+          </span>
+        }
       >
-        <div className="min-h-0 overflow-hidden">
-          <div className="border-t border-border px-3 py-2">
-            {historyQ.isLoading ? (
-              <Skeleton className="h-8 w-full" />
-            ) : (
-              <RouteLineage records={historyQ.data ?? []} />
-            )}
-            {(migrationsQ.data ?? []).length > 0 && (
-              <div className="mt-2 border-t border-border pt-2">
-                <div className="mb-1 font-mono text-2xs text-subtle">
-                  {t("orchestration.migrations", { count: migrationsQ.data?.length })}
-                </div>
-                <ul className="space-y-1">
-                  {(migrationsQ.data ?? []).map((m) => (
-                    <MigrationRow key={m.id} m={m} />
-                  ))}
-                </ul>
+        <div className="border-t border-border px-3 py-2">
+          {historyQ.isLoading ? (
+            <Skeleton className="h-8 w-full" />
+          ) : (
+            <RouteLineage records={historyQ.data ?? []} />
+          )}
+          {(migrationsQ.data ?? []).length > 0 && (
+            <div className="mt-2 border-t border-border pt-2">
+              <div className="mb-1 font-mono text-2xs text-subtle">
+                {t("orchestration.migrations", { count: migrationsQ.data?.length })}
               </div>
-            )}
-          </div>
+              <ul className="space-y-1">
+                {(migrationsQ.data ?? []).map((m) => (
+                  <MigrationRow key={m.id} m={m} />
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
-      </div>
+      </Disclosure>
+      <Link
+        to="/gateway/logs"
+        search={{ task: summary.task_id }}
+        aria-label={t("orchestration.viewLogs")}
+        title={t("orchestration.viewLogs")}
+        className="shrink-0 px-2 text-subtle transition-[color] duration-fast hover:text-accent"
+      >
+        <ScrollText data-icon size={13} />
+      </Link>
     </div>
   );
 }

@@ -27,8 +27,9 @@
     "howItWorks": "工作原理"
   },
   "nav": {
-    "manage": "管理",
-    "observe": "观察",
+    "overview": "总览",
+    "run": "运行",
+    "records": "记录",
     "extend": "扩展",
     "system": "系统",
     "providers": "提供商",
@@ -37,15 +38,37 @@
     "skills": "技能",
     "mcp": "MCP",
     "settings": "设置",
+    "quota": "配额",
     "expandSidebar": "展开侧边栏",
-    "collapseSidebar": "收起",
+    "collapseSidebar": "折叠侧边栏",
     "gateway": "网关"
   },
   "palette": {
     "placeholder": "搜索或跳转…",
     "navigation": "导航",
     "noMatches": "无匹配",
-    "searchFailed": "搜索失败 — 请检查 Nestra 日志"
+    "searchFailed": "搜索失败 — 请查看 Nestra 日志"
+  },
+  "overview": {
+    "title": "总览",
+    "help": "一眼掌握全局：待处理事项、网关健康、30 天用量、各已启用智能体的路由模式。",
+    "alertsCard": "需要关注",
+    "alertsHint": "聚合异常：网关未运行但有智能体走路由、熔断器打开、保活失败、智能体离线。",
+    "alertsClear": "一切正常",
+    "alertGatewayDown": "网关{{state}}，但有智能体处于 Routed — 恢复运行前请求会失败",
+    "alertBreakerOpen": "熔断打开 · {{endpoint}} · {{model}} · {{secs}}s 后恢复",
+    "alertBreakerHalfOpen": "探测中 · {{endpoint}} · {{model}}",
+    "alertKeepalive": "保活 {{phase}} · {{endpoint}}",
+    "alertAgentMissing": "智能体离线 · {{name}}",
+    "gatewayCard": "网关",
+    "gatewayHint": "网关实时状态。可在此重启，或打开网关页进行完整控制。",
+    "routingAgents": "已路由智能体",
+    "usageCard": "用量 · 30 天",
+    "usageHint": "网关观测到的全局用量（含所有智能体），花费按读取时价格计算。",
+    "usageEmptyHint": "智能体经网关产生流量后，汇总会显示在这里。",
+    "agentsCard": "智能体",
+    "agentsHint": "已启用的智能体及其当前模式。点击行进入完整驾驶舱。",
+    "loadFailedHint": "查询失败 — 重试或查看 Nestra 日志。"
   },
   "keepalive": {
     "title": "保持活跃",
@@ -278,7 +301,14 @@
     "handoffSpawnTip": "以此交接启动一个新的受管 Pi 会话",
     "handoffSpawned": "交接会话启动中…",
     "handoffSpawnFailed": "启动交接会话失败",
-    "handoffSpawnReady": "交接已送达——新会话已记录"
+    "handoffSpawnReady": "交接已送达——新会话已记录",
+    "dateFilter": "日期范围",
+    "dateAll": "全部",
+    "dateToday": "今天",
+    "date7d": "最近 7 天",
+    "date30d": "最近 30 天",
+    "moreActions": "更多操作",
+    "reviewThis": "审查此会话"
   },
   "skills": {
     "title": "技能",
@@ -357,7 +387,7 @@
     "importFailed": "导入失败：{{err}}",
     "synced": "已同步所有服务器",
     "syncFailed": "同步失败：{{err}}",
-    "probeOk": "探测成功（{{ms}} 毫秒）",
+    "probeOk": "可达 · {{ms}} ms",
     "probeOkPlain": "探测成功",
     "probeFailed": "探测失败：{{reason}}",
     "probeUnknown": "未知",
@@ -392,7 +422,10 @@
     "loadFailed": "加载 MCP 服务器失败。",
     "importScanFailed": "扫描可导入服务器失败。",
     "usageObserved": "观察到 {{n}} 次调用 · {{rel}}",
-    "usageNone": "未观察到调用"
+    "usageNone": "未观察到调用",
+    "testDraft": "测试连接",
+    "testDraftTip": "保存前探测所配置的传输 —— 不会写入任何内容",
+    "probeFail": "不可达 · {{reason}}"
   },
   "settings": {
     "title": "设置",
@@ -443,7 +476,7 @@
     "cache": "缓存",
     "cacheDesc": "缓存数据（模型目录、配额快照、页面数据）会自动重建。此操作仅丢弃缓存副本。",
     "clearCaches": "清除所有缓存",
-    "clearCachesDesc": "移除缓存的页面数据、配额快照和 models.dev 目录。提供商、密钥和会话不受影响。",
+    "clearCachesDesc": "移除缓存的页面数据、配额快照与 models.dev / pi.dev 目录缓存。提供商、密钥与会话不受影响。",
     "clearCachesBtn": "清除缓存",
     "savedToast": "设置已保存",
     "notSavedToast": "设置未保存",
@@ -511,6 +544,29 @@
     "gatewayTuningReset": "恢复默认",
     "gatewayTuningSavedToast": "网关参数已保存 — 对下一个请求生效",
     "gatewayTuningSaveFailedToast": "网关参数保存失败",
+    "captureLevel": "捕获级别",
+    "captureLevelDesc": "运行中日志捕获的详细程度。即时生效 —— 日志查看页有同一开关。",
+    "logEnvOverrideNote": "NESTRA_LOG 环境变量正在覆盖捕获级别 —— 取消该变量前此开关无效。",
+    "obsClearCard": "观测数据",
+    "obsClearCardDesc": "网关记录的路由与任务历史。",
+    "obsClear": "清除观测数据",
+    "obsClearDesc": "删除全部任务、请求、迁移与累计用量。提供商、策略、绑定与密钥不受影响。不可撤销。",
+    "obsClearBtn": "清除观测数据",
+    "obsConfirmTitle": "清除观测数据？",
+    "obsConfirmBody": "将删除网关观测到的所有任务、请求、迁移与用量总计，无法恢复。",
+    "obsConfirmLabel": "删除观测数据",
+    "obsClearDone": "观测数据已清除",
+    "storage": "存储与网关",
+    "storageDesc": "Nestra 数据的存放位置。只读 —— 修改请到对应页面（网关、诊断）。",
+    "storageDb": "数据库",
+    "storageLogs": "日志",
+    "storagePort": "网关端口",
+    "diagProviders": "已配置密钥的提供商",
+    "diagSessions": "已索引会话",
+    "diagRecentErrors": "最近错误",
+    "autoUpdateCheck": "启动时检查",
+    "autoUpdateCheckDesc": "每次启动时静默检查 GitHub 是否有新版本，有则提示。默认关闭。",
+    "updateToast": "Nestra {{version}} 可用 —— 见 设置 → 更新。",
     "licensesTitle": "开源许可证",
     "licensesDesc": "Nestra 基于开源软件构建。",
     "licensesApp": "Nestra 采用 MIT 许可证。",
@@ -633,7 +689,8 @@
     "protoAnthropic": "Anthropic",
     "protoOpenai": "OpenAI",
     "protoResponses": "Responses",
-    "protoCustom": "Custom"
+    "protoCustom": "Custom",
+    "openCardTip": "打开智能体详情驾驶舱"
   },
   "orchestration": {
     "gateway": "网关",
@@ -663,10 +720,12 @@
     "modeBlocked": "已阻断",
     "modeBlockedHint": "请在网关页面启用网关服务，然后再为此 agent 启用路由。",
     "modeLoadFailed": "模式设置加载失败，请重试。",
-    "gatewayStatusFailed": "网关状态不可用"
+    "gatewayStatusFailed": "网关状态不可用",
+    "viewLogs": "在网关日志中查看此任务"
   },
   "agentRouting": {
     "titleSuffix": "路由",
+    "crumb": "路由",
     "steadyTitle": "当前生效路由",
     "steadyHint": "在当前策略下，新请求会解析到哪——试运行，不发送请求。保存策略后自动更新。",
     "steadyContext": "{{n}} 上下文",
@@ -679,6 +738,7 @@
     "directNote": "该 agent 当前处于 Direct 模式——切换到 Routed 后策略立即生效。在这里编辑是安全的。"
   },
   "agentDetail": {
+    "crumbReview": "审查",
     "helpGateway": "Direct 模式将真实提供商写入此智能体的配置。Routed 模式通过 Nestra 网关发送流量 — 按任务解析提供商/模型，支持配额感知回退和迁移。",
     "helpPlain": "已安装的编码智能体。",
     "tasks": "任务",
@@ -841,7 +901,14 @@
     "configPreviewAria": "复制配置",
     "pick": "选择",
     "customOption": "自定义…",
-    "loadFailed": "加载提供商失败。"
+    "loadFailed": "加载提供商失败。",
+    "anchorName": "名称",
+    "anchorProtocols": "协议",
+    "anchorKey": "密钥",
+    "anchorModels": "模型",
+    "anchorEnv": "环境变量",
+    "anchorPreview": "预览",
+    "anchorDanger": "危险区"
   },
   "gateway": {
     "title": "网关服务",
@@ -900,15 +967,21 @@
     "lastRequest": "最近请求",
     "activeTasks": "活跃任务",
     "noActivity": "尚无路由请求。",
+    "breakerCard": "熔断器",
+    "breakerCardDesc": "按模型粒度的上游健康状态。打开的熔断在恢复窗口结束前会被跳过；重置后所有端点立即可用。",
+    "breakerAllClosed": "全部熔断关闭",
+    "breakerRecoversIn": "{{secs}}s 后探测",
     "restart": "重启",
     "offConfirmTitle": "关闭网关？",
     "offConfirmBody": "这些已路由的 agent 将恢复为直连模式：{{agents}}",
     "offConfirmLabel": "关闭",
     "hide": "隐藏",
-    "viewLogs": "查看日志"
+    "viewLogs": "查看日志",
+    "breakerQueryFailed": "熔断状态不可用 —— 快照查询失败"
   },
   "gatewayLogs": {
     "title": "网关日志",
+    "crumb": "日志",
     "help": "网关日志实时视图。每行都带请求关联 id（task / attempt）——把 task id 粘进搜索框即可看到该请求的完整生命周期：入站 → 路由 → 每次尝试（状态、延迟）→ 决策 → 完成。Debug 级额外记录截断的请求/响应报文（绝不记录头部和凭据）。",
     "back": "网关",
     "auto": "自动刷新",
@@ -930,7 +1003,11 @@
     "emptyHint": "让请求经过网关，或放宽过滤条件。",
     "loadMore": "加载更多",
     "fullBodies": "完整报文",
-    "fullBodiesHint": "Debug 报文证据记录完整的请求/响应内容，而非 2 KiB 截断片段。日志量会变大；依然绝不记录头部或凭据。"
+    "fullBodiesHint": "Debug 报文证据记录完整的请求/响应内容，而非 2 KiB 截断片段。日志量会变大；依然绝不记录头部或凭据。",
+    "exportTitle": "导出筛选后的日志",
+    "exportFiltered": "导出当前筛选结果",
+    "exported_other": "已导出 {{count}} 行",
+    "exportFailed": "导出失败：{{err}}"
   },
   "cache": {
     "noCache": "无缓存",

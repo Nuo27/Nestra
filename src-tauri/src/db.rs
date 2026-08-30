@@ -1091,10 +1091,19 @@ pub fn clear_active_binding(
 /// freed pages for new inserts, so the file size holds at its high-water mark
 /// without a VACUUM — growth is bounded, which is the goal.
 pub fn prune_observability_data(conn: &Connection) -> AppResult<u64> {
-    let days = get_setting(conn, "log_retention_days")
+    // The Settings UI writes retention INSIDE the "app" settings object
+    // (`setting_set("app", { log_retention_days })`); a top-level
+    // `log_retention_days` key is honored as a legacy/fallback form.
+    let days = get_setting(conn, "app")
         .ok()
         .flatten()
-        .and_then(|v| v.as_u64())
+        .and_then(|v| v.get("log_retention_days").and_then(|d| d.as_u64()))
+        .or_else(|| {
+            get_setting(conn, "log_retention_days")
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_u64())
+        })
         .unwrap_or(30)
         .max(1); // clamp: 0 would prune everything immediately
     let now = chrono::Utc::now().timestamp_millis();

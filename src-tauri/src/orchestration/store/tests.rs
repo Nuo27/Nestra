@@ -650,3 +650,47 @@ fn usage_summary_filters_agent_and_computes_cost_at_read_time() {
     assert_eq!(rows.len(), 1);
     assert!(rows[0].cost_usd.is_none());
 }
+
+/// `clear_observability` wipes the gateway's observability set (tasks +
+/// cascade, usage rollup, affinity snapshot) while configuration tables —
+/// routing policy, endpoints — survive untouched.
+#[test]
+fn clear_observability_keeps_configuration() {
+    let conn = fresh_db();
+    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    let now = 1_700_000_000;
+
+    seed_usage_task(&conn, "t-a", now, "pi-cli", Some("ep-1"), "m-a", 100, 100);
+    upsert_routing_policy(
+        &conn,
+        &RoutingPolicyRow {
+            agent_id: "pi-cli".into(),
+            role: "*".into(),
+            route_targets: Some(r#"[{"endpoint":"ep-1","model":"m-a"}]"#.into()),
+            migrate_on_quota: true,
+            inject_cache_control: false,
+            affinity_scope: "task".into(),
+            updated_at: now,
+        },
+    )
+    .unwrap();
+    crate::db::set_setting(
+        &conn,
+        "route_affinity",
+        &serde_json::json!({ "k": "v" }),
+    )
+    .unwrap();
+
+    clear_observability(&conn).unwrap();
+
+    let count = |sql: &str| -> i64 {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    };
+    assert_eq!(count("SELECT count(*) FROM task"), 0);
+    assert_eq!(count("SELECT count(*) FROM route_request"), 0);
+    assert_eq!(count("SELECT count(*) FROM usage_daily"), 0);
+    assert_eq!(count("SELECT count(*) FROM setting_kv WHERE key = 'route_affinity'"), 0);
+    // Configuration survives.
+    assert_eq!(count("SELECT count(*) FROM routing_policy"), 1);
+    assert_eq!(count("SELECT count(*) FROM provider_endpoint"), 1);
+}

@@ -282,6 +282,40 @@ fn prune_defaults_to_30_days_when_setting_absent() {
     );
 }
 
+/// The Settings UI writes retention NESTED inside the "app" settings object
+/// (`setting_set("app", { log_retention_days })`) — the pruner must honor
+/// that form, not only the legacy top-level key.
+#[test]
+fn prune_reads_retention_from_app_settings_object() {
+    let conn = Connection::open_in_memory().unwrap();
+    migrate(&conn).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let old = now - 40 * 86_400_000; // 40 days ago
+    let recent = now - 86_400_000; // 1 day ago
+    for (id, ts) in [("task-old", old), ("task-recent", recent)] {
+        conn.execute(
+            "INSERT INTO task (id, started_at) VALUES (?1, ?2)",
+            rusqlite::params![id, ts],
+        )
+        .unwrap();
+    }
+
+    // Exactly the shape `settingSet("app", …)` produces.
+    set_setting(
+        &conn,
+        "app",
+        &serde_json::json!({ "detection_cadence": "on-launch", "log_retention_days": 7 }),
+    )
+    .unwrap();
+
+    let pruned = prune_observability_data(&conn).unwrap();
+    assert_eq!(pruned, 1, "nested log_retention_days=7 must prune the 40-day-old task");
+    assert_eq!(count(&conn, "task", "id = 'task-old'"), 0);
+    assert_eq!(count(&conn, "task", "id = 'task-recent'"), 1);
+}
+
 fn count(conn: &Connection, table: &str, where_clause: &str) -> i64 {
     let sql = format!("SELECT count(*) FROM {table} WHERE {where_clause}");
     conn.query_row(&sql, [], |r| r.get(0)).unwrap()

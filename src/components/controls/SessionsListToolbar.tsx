@@ -3,6 +3,9 @@ import { RotateCw, FolderOpen, Trash2, Search, X } from "lucide-react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import type { Session } from "../../ipc";
 import type { SessionSelection } from "../../lib/sessionSelection";
+
+/** Date-range filter for the session list (client-side, by updated_at). */
+export type DateRange = "all" | "today" | "7d" | "30d";
 import { SyncIndicator } from "../feedback/SyncIndicator";
 import { Button } from "./Button";
 import { ButtonGroup } from "./ButtonGroup";
@@ -31,6 +34,8 @@ export function SessionsListToolbar({
   provider,
   onProviderChange,
   providerOptions,
+  dateRange,
+  onDateRangeChange,
   selection,
   total,
 }: {
@@ -41,6 +46,8 @@ export function SessionsListToolbar({
   provider: string;
   onProviderChange: (v: string) => void;
   providerOptions: Map<string, string>;
+  dateRange: DateRange;
+  onDateRangeChange: (v: DateRange) => void;
   selection: SessionSelection;
   total: number;
 }) {
@@ -106,6 +113,21 @@ export function SessionsListToolbar({
                 {t("sessions.noConnectedAgents")}
               </SelectItem>
             )}
+          </SelectContent>
+        </Select>
+        <Select value={dateRange} onValueChange={(v) => onDateRangeChange(v as DateRange)}>
+          <SelectTrigger
+            size="sm"
+            className="h-7 min-w-0 !w-fit max-w-[8rem] border-0 bg-transparent px-1 text-xs text-muted shadow-none hover:border-0 [&_[data-icon]]:size-3"
+            aria-label={t("sessions.dateFilter")}
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">{t("sessions.dateAll")}</SelectItem>
+            <SelectItem value="today">{t("sessions.dateToday")}</SelectItem>
+            <SelectItem value="7d">{t("sessions.date7d")}</SelectItem>
+            <SelectItem value="30d">{t("sessions.date30d")}</SelectItem>
           </SelectContent>
         </Select>
         {liveSelected.size > 0 && (

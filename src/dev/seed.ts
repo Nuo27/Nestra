@@ -51,14 +51,11 @@ const handlers: Record<string, unknown> = {
     stats: { total_requests: 148, last_request_at: now - mins(3), active_tasks: 2 },
   },
   gateway_recent_activity: recentActivity(),
-  orch_status: {
-    up: true,
-    base_url: "http://127.0.0.1:18777",
-    agents_enabled: DEMO_AGENTS,
-  },
 
   // ---- providers -------------------------------------------------------
   endpoint_list: endpoints(),
+  endpoint_get: ({ id }: { id: string }) =>
+    endpoints().find((e) => e.id === id) ?? null,
   provider_health_snapshot: [
     {
       endpoint_id: "deepseek",
@@ -70,6 +67,48 @@ const handlers: Record<string, unknown> = {
     },
   ],
   orch_usage_summary: usageRows(),
+
+  // ---- overview / agents ----
+  orch_tasks: [
+    { task_id: "t-main", agent_id: "pi-cli", logical_session: "s-pi-retry", request_count: 34, latest_status: 200, generation_broken: false, first_seen: now - hours(6), last_seen: now - mins(3) },
+    { task_id: "t-review", agent_id: "pi-cli", logical_session: "s-pi-retry", request_count: 12, latest_status: 200, generation_broken: false, first_seen: now - hours(2), last_seen: now - mins(9) },
+    { task_id: "t-zcode-ui", agent_id: "zcode-desktop", logical_session: "s-zcode-ui", request_count: 19, latest_status: 200, generation_broken: false, first_seen: now - hours(2.4), last_seen: now - mins(24) },
+  ],
+  // keep-alive on zai-glm is armed in quota_refresh_get_settings; surface an
+  // error phase so the Overview alerts card has a second signal to show.
+  // (The frontend invokes with { endpointId } — Tauri maps it to the Rust
+  // snake_case arg, so the handler must destructure the CAMEL side.)
+  quota_keepalive_status: ({ endpointId }: { endpointId: string }) =>
+    endpointId === "zai-glm"
+      ? { phase: "error", last_success_at: now - hours(1.1), next_fire_at: now + mins(4), last_error: "429 quota window exhausted", attempts: 2, last_heartbeat_at: now - mins(1), last_panic_at: null }
+      : { phase: "disabled", last_success_at: null, next_fire_at: null, last_error: null, attempts: 0, last_heartbeat_at: now - mins(1), last_panic_at: null },
+  gateway_tuning_get: { headers_timeout_secs: 30, first_event_timeout_secs: 30, stream_silence_timeout_secs: 120, buffered_body_timeout_secs: 600, request_deadline_secs: 600, breaker_failure_threshold: 3, breaker_recovery_wait_secs: 60, breaker_success_threshold: 2, breaker_error_rate_pct: 60, breaker_min_requests: 10 },
+  gateway_tuning_set: null,
+  diag_health: {
+    ok: true,
+    version: "0.1.2",
+    os: "Windows",
+    arch: "x86_64",
+    data_dir: "C:\\Users\\dev\\AppData\\Roaming\\nestra",
+    providers_detected: 3,
+    sessions_indexed: 8,
+    last_errors: ["2026-08-28T04:12:01  quota fetch failed: 429 quota window exhausted"],
+    db_path: "C:\\Users\\dev\\AppData\\Roaming\\nestra\\nestra.db",
+    db_size_bytes: 4_712_448,
+    log_dir: "C:\\Users\\dev\\AppData\\Roaming\\nestra\\logs",
+    log_env_override: false,
+  },
+  diag_log_files: ["nestra.2026-08-28.json"],
+  diag_read_logs: [
+    { timestamp: "2026-08-28T05:37:47.123Z", level: "INFO", target: "nestra_lib::orchestration::gateway", message: "request routed policy=main endpoint=anthropic model=claude-opus-4.6", task: "t-main", request: "r-1" },
+    { timestamp: "2026-08-28T05:31:47.456Z", level: "INFO", target: "nestra_lib::orchestration::gateway", message: "attempt ok status=200 endpoint=deepseek model=deepseek-v4-flash", task: "t-review", request: "r-2" },
+    { timestamp: "2026-08-28T05:16:47.789Z", level: "WARN", target: "nestra_lib::orchestration::gateway", message: "quota exhausted endpoint=zai-glm migrating", task: "t-main", request: "r-3" },
+    { timestamp: "2026-08-28T04:12:01.001Z", level: "ERROR", target: "nestra_lib::quota", message: "quota fetch failed: 429 quota window exhausted", task: null, request: null },
+  ],
+  diag_log_level_get: "info",
+  diag_log_level_set: null,
+  diag_log_full_bodies_get: false,
+  diag_log_full_bodies_set: null,
 
   // ---- quota -----------------------------------------------------------
   quota_refresh_get_settings: {

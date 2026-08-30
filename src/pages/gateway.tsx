@@ -12,9 +12,11 @@ import {
   gatewaySetPort,
   gatewayTokenGet,
   gatewayTokenRegenerate,
+  providerHealthReset,
+  providerHealthSnapshot,
   type GatewayRuntimeState,
 } from "../ipc/gateway";
-import { agentList } from "../ipc";
+import { agentList, endpointList } from "../ipc";
 import { extractError } from "../ipc/errors";
 import { invalidateGateway, qk } from "../lib/queries";
 import { useCopy } from "../lib/useCopy";
@@ -23,6 +25,7 @@ import { Page } from "../components/layout/Page";
 import { PageHeader } from "../components/layout/PageHeader";
 import { Card } from "../components/controls/Card";
 import { Button } from "../components/controls/Button";
+import { GatewayTuningSection } from "../components/controls/GatewayTuningSection";
 import { confirmDialog } from "../components/controls/ConfirmDialog";
 import { Badge } from "../components/ui/badge";
 import { Input } from "../components/ui/input";
@@ -171,6 +174,20 @@ export function GatewayPage() {
         />
       )}
 
+      <BreakerHealthCard />
+
+      <Card title={t("gateway.agentsCard")} description={t("gateway.agentsCardDesc")}>
+        <ConnectedAgents
+          enabledIds={status?.agents_enabled ?? []}
+          agents={agentsQ.data ?? []}
+          gatewayRunning={state === "running"}
+        />
+      </Card>
+
+      <ActivityCard />
+
+      <GatewayTuningSection />
+
       <Card title={t("gateway.portCard")} description={t("gateway.portCardDesc")}>
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="min-w-0">
@@ -272,21 +289,87 @@ export function GatewayPage() {
           </div>
         </div>
       </Card>
-
-      <Card title={t("gateway.agentsCard")} description={t("gateway.agentsCardDesc")}>
-        <ConnectedAgents
-          enabledIds={status?.agents_enabled ?? []}
-          agents={agentsQ.data ?? []}
-          gatewayRunning={state === "running"}
-        />
-      </Card>
-
-      <ActivityCard />
     </Page>
   );
 }
 
 // ---- sections ---------------------------------------------------------------
+
+/// Circuit-breaker health: every open/probing `{endpoint}/{model}` circuit
+/// with its recovery countdown, plus the global reset. Shares the
+/// provider-health query with the Providers page badges (same key, one
+/// fetch); all closed → one quiet line.
+function BreakerHealthCard() {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const toast = useUI((s) => s.pushToast);
+  const healthQ = useQuery({
+    queryKey: qk.providerHealth(),
+    queryFn: providerHealthSnapshot,
+    refetchInterval: 10_000,
+  });
+  const endpointsQ = useQuery({ queryKey: qk.endpoints(), queryFn: endpointList });
+  const resetMut = useMutation({
+    mutationFn: providerHealthReset,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.providerHealth() });
+      toast(t("providers.healthResetToast"), "success");
+    },
+    onError: (e: unknown) => toast(extractError(e) ?? String(e), "error"),
+  });
+
+  const rows = (healthQ.data ?? []).filter((s) => s.state !== "closed");
+  const name = (id: string) => endpointsQ.data?.find((e) => e.id === id)?.display_name ?? id;
+
+  return (
+    <Card
+      title={t("gateway.breakerCard")}
+      description={t("gateway.breakerCardDesc")}
+      action={
+        rows.length > 0 ? (
+          <Button size="sm" variant="ghost" loading={resetMut.isPending} onClick={() => resetMut.mutate()}>
+            {t("providers.resetHealth")}
+          </Button>
+        ) : undefined
+      }
+    >
+      {healthQ.isLoading ? (
+        <Skeleton className="h-8 w-full" />
+      ) : healthQ.isError ? (
+        // A failed snapshot must NOT render as "all circuits closed" — that
+        // would dress a query failure up as a health verdict.
+        <div className="flex items-center gap-2 font-mono text-xs text-danger">
+          <StatusDot status="missing" />
+          {t("gateway.breakerQueryFailed")}
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="flex items-center gap-2 font-mono text-xs text-subtle">
+          <StatusDot status="ok" />
+          {t("gateway.breakerAllClosed")}
+        </div>
+      ) : (
+        <ul className="space-y-1.5">
+          {rows.map((s) => (
+            <li key={`${s.endpoint_id}/${s.model}`} className="flex flex-wrap items-center gap-2">
+              <Badge tone={s.state === "open" ? "danger" : "warning"} variant="soft" className="font-mono text-2xs">
+                {s.state === "open" ? t("providers.breakerOpen") : t("providers.breakerHalfOpen")}
+              </Badge>
+              <span className="min-w-0 truncate font-mono text-xs text-fg">
+                {name(s.endpoint_id)}
+                {s.model ? ` · ${s.model}` : ""}
+              </span>
+              {s.state === "open" && (
+                <span className="font-mono text-2xs text-subtle tabular">
+                  {t("gateway.breakerRecoversIn", { secs: Math.ceil((s.recovery_in_ms ?? 0) / 1000) })}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
 
 function RuntimeCard({
   state,
@@ -408,7 +491,7 @@ function ActivityCard() {
       title={t("gateway.activityCard")}
       description={t("gateway.activityCardDesc")}
       action={
-        <Link to="/gateway/logs">
+        <Link to="/gateway/logs" search={{ task: undefined }}>
           <Button size="sm" variant="ghost" aria-label={t("gateway.viewLogs")} title={t("gateway.viewLogs")}>
             <ScrollText data-icon size={14} />
           </Button>

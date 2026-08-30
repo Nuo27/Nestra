@@ -212,6 +212,7 @@ export function ProviderEditPage({ id }: { id: string }) {
         title={form.display_name || data.id}
         subtitle={<SectionLabel inline>{t("common.edit")}</SectionLabel>}
         sticky
+        subBar={<EditAnchors />}
         action={
           <>
             <Button variant="ghost" size="sm" onClick={goBack} disabled={saveMut.isPending}>{t("common.cancel")}</Button>
@@ -232,57 +233,107 @@ export function ProviderEditPage({ id }: { id: string }) {
         </ErrorBanner>
       )}
 
-      <NameField
-        form={form}
-        onChange={(v) => setForm({ ...form, display_name: v })}
-      />
-      <ProtocolsCard
-        form={form}
-        onPatch={(patch) => setForm({ ...form, ...patch })}
-      />
-      <ProviderKeyCard
-        endpoint={data}
-        form={form}
-        onPatch={(patch) => setForm({ ...form, ...patch })}
-      />
-      <ProviderModelsCard
-        endpoint={data}
-        form={form}
-        onPatch={(patch) => setForm({ ...form, ...patch })}
-      />
-      <ProviderAdvancedEnvCard
-        form={form}
-        onChange={(env) => setForm({ ...form, advanced_env: env })}
-      />
-      <ConfigPreview endpoint={data} />
-      <Card
-        title={t("providerEdit.dangerZone")}
-        hint={t("providerEdit.dangerHint")}
-        tone="danger"
-      >
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-sm text-muted">
-            {t("providerEdit.deleteLine", { name: data.display_name })}
+      <section id="pe-name" className="scroll-mt-28">
+        <NameField
+          form={form}
+          onChange={(v) => setForm({ ...form, display_name: v })}
+        />
+      </section>
+      <section id="pe-protocols" className="scroll-mt-28">
+        <ProtocolsCard
+          form={form}
+          onPatch={(patch) => setForm({ ...form, ...patch })}
+        />
+      </section>
+      <section id="pe-key" className="scroll-mt-28">
+        <ProviderKeyCard
+          endpoint={data}
+          form={form}
+          onPatch={(patch) => setForm({ ...form, ...patch })}
+        />
+      </section>
+      <section id="pe-models" className="scroll-mt-28">
+        <ProviderModelsCard
+          endpoint={data}
+          form={form}
+          onPatch={(patch) => setForm({ ...form, ...patch })}
+        />
+      </section>
+      <section id="pe-env" className="scroll-mt-28">
+        <ProviderAdvancedEnvCard
+          form={form}
+          onChange={(env) => setForm({ ...form, advanced_env: env })}
+        />
+      </section>
+      <section id="pe-preview" className="scroll-mt-28">
+        <ConfigPreview endpoint={data} />
+      </section>
+      <section id="pe-danger" className="scroll-mt-28">
+        <Card
+          title={t("providerEdit.dangerZone")}
+          hint={t("providerEdit.dangerHint")}
+          tone="danger"
+        >
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm text-muted">
+              {t("providerEdit.deleteLine", { name: data.display_name })}
+            </div>
+            <Button
+              variant="danger"
+              size="sm"
+              loading={deleteMut.isPending}
+              onClick={async () => {
+                const msg = data.has_api_key
+                  ? t("providerEdit.deleteConfirmHasKey")
+                  : t("providerEdit.deleteConfirmNoKey");
+                const ok = await confirmDialog({
+                  title: t("providerEdit.deleteConfirmTitle", { name: data.display_name }),
+                  body: msg,
+                  confirmLabel: t("providerEdit.deleteConfirmLabel"),
+                });
+                if (ok) deleteMut.mutate();
+              }}
+            >
+              <Trash2 data-icon size={13} />{t("providerEdit.deleteBtn")}</Button>
           </div>
-          <Button
-            variant="danger"
-            size="sm"
-            loading={deleteMut.isPending}
-            onClick={async () => {
-              const msg = data.has_api_key
-                ? t("providerEdit.deleteConfirmHasKey")
-                : t("providerEdit.deleteConfirmNoKey");
-              const ok = await confirmDialog({
-                title: t("providerEdit.deleteConfirmTitle", { name: data.display_name }),
-                body: msg,
-                confirmLabel: t("providerEdit.deleteConfirmLabel"),
-              });
-              if (ok) deleteMut.mutate();
-            }}
-          >
-            <Trash2 data-icon size={13} />{t("providerEdit.deleteBtn")}</Button>
-        </div>
-      </Card>
+        </Card>
+      </section>
     </Page>
+  );
+}
+
+/// In-page section anchors (the sticky header's second row). Plain `<a>`s —
+/// smooth-scroll + `scroll-mt` on the target sections keeps them clear of the
+/// sticky bar.
+function EditAnchors() {
+  const { t } = useTranslation();
+  const anchors: { id: string; label: string }[] = [
+    { id: "pe-name", label: t("providerEdit.anchorName") },
+    { id: "pe-protocols", label: t("providerEdit.anchorProtocols") },
+    { id: "pe-key", label: t("providerEdit.anchorKey") },
+    { id: "pe-models", label: t("providerEdit.anchorModels") },
+    { id: "pe-env", label: t("providerEdit.anchorEnv") },
+    { id: "pe-preview", label: t("providerEdit.anchorPreview") },
+    { id: "pe-danger", label: t("providerEdit.anchorDanger") },
+  ];
+  return (
+    <>
+      {anchors.map((a) => (
+        <a
+          key={a.id}
+          href={`#${a.id}`}
+          onClick={(e) => {
+            e.preventDefault();
+            // Keep the URL hash in sync so back/refresh/deep-links still work
+            // alongside the smooth scroll.
+            history.replaceState(null, "", `#${a.id}`);
+            document.getElementById(a.id)?.scrollIntoView({ behavior: "smooth" });
+          }}
+          className="font-mono text-2xs text-subtle transition-[color] duration-fast hover:text-accent"
+        >
+          {a.label}
+        </a>
+      ))}
+    </>
   );
 }

@@ -8,13 +8,21 @@ export interface HealthReport {
   data_dir: string;
   providers_detected: number;
   sessions_indexed: number;
+  /** Recent ERROR lines from the newest JSON log generation (oldest-first). */
   last_errors: string[];
+  db_path: string;
+  db_size_bytes: number;
+  log_dir: string;
+  /** True when NESTRA_LOG overrides the persisted verbosity preset. */
+  log_env_override: boolean;
 }
 
 // ---- Diagnostics ----
 export const diagHealth = () => invoke<HealthReport>("diag_health");
 export const diagExportLogs = (destPath: string) =>
   invoke<void>("diag_export_logs", { destPath });
+export const diagExportText = (destPath: string, content: string) =>
+  invoke<void>("diag_export_text", { destPath, content });
 export const diagOpenDataDir = () => invoke<void>("diag_open_data_dir");
 
 // ---- Gateway log viewer (reads the JSON twin layer) ----

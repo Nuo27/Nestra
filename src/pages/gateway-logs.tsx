@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { ScrollText } from "lucide-react";
+import { useSearch } from "@tanstack/react-router";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { ScrollText, Download, RefreshCw } from "lucide-react";
 import {
+  diagExportText,
   diagLogFiles,
   diagLogFullBodiesGet,
   diagLogFullBodiesSet,
@@ -34,7 +37,6 @@ import { Switch } from "../components/ui/switch";
 import { EmptyState } from "../components/feedback/EmptyState";
 import { ErrorBanner } from "../components/feedback/ErrorBanner";
 import { Skeleton } from "../components/ui/skeleton";
-import { RefreshCw } from "lucide-react";
 
 /// Gateway log viewer (`/gateway/logs`, entered from the Activity card on
 /// the Gateway page). Reads the JSON twin layer via `diag_read_logs`, with
@@ -47,10 +49,13 @@ export function GatewayLogsPage() {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useUI((s) => s.pushToast);
+  // Deep-link prefill: /gateway/logs?task=<id> (from task rows) seeds the
+  // search box with the task id — one request's whole lifecycle, filtered.
+  const { task: taskParam } = useSearch({ from: "/gateway/logs" });
 
   const [level, setLevel] = useState<LogFilterLevel>("all");
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
+  const [searchInput, setSearchInput] = useState(taskParam ?? "");
+  const [search, setSearch] = useState(taskParam ?? "");
   const [file, setFile] = useState<string | undefined>(undefined);
   const [limit, setLimit] = useState(500);
   // Persisted in the zustand blob — auto-refresh survives page switches and
@@ -63,6 +68,16 @@ export function GatewayLogsPage() {
     const id = setTimeout(() => setSearch(searchInput.trim()), 300);
     return () => clearTimeout(id);
   }, [searchInput]);
+
+  // Re-seed the search box when ?task= changes while already mounted (deep
+  // links from task rows don't remount this page) — the URL stays the source
+  // of truth for the prefill.
+  useEffect(() => {
+    if (taskParam) {
+      setSearchInput(taskParam);
+      setSearch(taskParam);
+    }
+  }, [taskParam]);
 
   const filesQ = useQuery({ queryKey: qk.logFiles(), queryFn: diagLogFiles });
   const levelQ = useQuery({ queryKey: qk.logLevel(), queryFn: diagLogLevelGet });
@@ -96,6 +111,30 @@ export function GatewayLogsPage() {
       toast(t("gatewayLogs.levelFailed", { err: extractError(e) ?? String(e) }), "error"),
   });
 
+  // Export the CURRENT filtered rows (what's rendered, not the whole log dir)
+  // to a user-picked text file.
+  const [exporting, setExporting] = useState(false);
+  async function exportFiltered() {
+    setExporting(true);
+    try {
+      const picked = await saveDialog({
+        title: t("gatewayLogs.exportTitle"),
+        defaultPath: "nestra-logs.txt",
+        filters: [{ name: "Text", extensions: ["txt", "log"] }],
+      });
+      if (!picked || typeof picked !== "string") return;
+      const text = entries
+        .map((e) => `${e.timestamp}  ${e.level.padEnd(5)}  ${e.message}`)
+        .join("\n");
+      await diagExportText(picked, text);
+      toast(t("gatewayLogs.exported", { count: entries.length }), "success");
+    } catch (e) {
+      toast(t("gatewayLogs.exportFailed", { err: extractError(e) ?? String(e) }), "error");
+    } finally {
+      setExporting(false);
+    }
+  }
+
   const entries = logsQ.data ?? [];
 
   return (
@@ -110,6 +149,17 @@ export function GatewayLogsPage() {
           <div className="flex items-center gap-3">
             <span className="text-2xs text-muted">{t("gatewayLogs.auto")}</span>
             <Switch checked={auto} onCheckedChange={setAuto} aria-label={t("gatewayLogs.auto")} />
+            <Button
+              size="sm"
+              variant="ghost"
+              loading={exporting}
+              disabled={entries.length === 0}
+              onClick={() => void exportFiltered()}
+              aria-label={t("gatewayLogs.exportFiltered")}
+              title={t("gatewayLogs.exportFiltered")}
+            >
+              <Download data-icon size={14} />
+            </Button>
             <Button
               size="sm"
               variant="secondary"

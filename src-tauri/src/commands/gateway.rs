@@ -280,28 +280,6 @@ fn apply_direct_config_blocking(
     }
 }
 
-/// Live gateway status (back-comat shim): `up`/`base_url`/`agents_enabled`,
-/// derived from the new control snapshot. Retained for the migration period so
-/// the existing `GatewayStatusBar` keeps working; the rich surface is
-/// [`gateway_get_status`]. Safe to remove once the UI migrates fully.
-#[tauri::command]
-pub async fn orch_status(state: State<'_, crate::AppState>) -> AppResult<GatewayStatus> {
-    let snap = state.gateway.snapshot().await;
-    let agents_enabled = enabled_agent_ids(&state).await.unwrap_or_default();
-    Ok(GatewayStatus {
-        up: snap.state == crate::orchestration::gateway::control::GatewayRuntimeState::Running,
-        base_url: snap.base_url,
-        agents_enabled,
-    })
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct GatewayStatus {
-    pub up: bool,
-    pub base_url: String,
-    pub agents_enabled: Vec<String>,
-}
-
 // ---- Gateway Service control surface --------------------------------------
 //
 // The Service itself: global enable, port (with Hybrid fallback), loopback

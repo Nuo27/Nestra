@@ -11,7 +11,7 @@ import { ErrorBanner } from "../components/feedback/ErrorBanner";
 import { SectionLabel } from "../components/layout/PageHeader";
 import { ResizeHandle } from "../components/layout/ResizeHandle";
 import { ListSkeleton, SessionRow } from "../components/controls/SessionRow";
-import { SessionsListToolbar } from "../components/controls/SessionsListToolbar";
+import { SessionsListToolbar, type DateRange } from "../components/controls/SessionsListToolbar";
 import { SessionDetail } from "../components/display/SessionDetail";
 import { useSessionSelection } from "../lib/sessionSelection";
 import { qk } from "../lib/queries";
@@ -40,6 +40,7 @@ export function SessionsPage() {
 
   const [provider, setProvider] = useState<string>("");
   const [query, setQuery] = useState("");
+  const [dateRange, setDateRange] = useState<DateRange>("all");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const qc = useQueryClient();
@@ -87,6 +88,16 @@ export function SessionsPage() {
   });
 
   const sessions = listQuery.data ?? [];
+  // Date-range filter (client-side on updated_at; the backend list is capped
+  // at 300 anyway). "today" = since local midnight; the rest are day windows.
+  const filtered = useMemo(() => {
+    if (dateRange === "all") return sessions;
+    const cutoff =
+      dateRange === "today"
+        ? new Date(new Date().setHours(0, 0, 0, 0)).getTime()
+        : Date.now() - (dateRange === "7d" ? 7 : 30) * 86_400_000;
+    return sessions.filter((s) => s.updated_at >= cutoff);
+  }, [sessions, dateRange]);
   // Filter options MUST derive from an UNFILTERED list: the rows above are
   // already narrowed by the selected provider, so deriving options from them
   // would collapse the dropdown to exactly that one provider. Every provider
@@ -107,8 +118,8 @@ export function SessionsPage() {
     }
     return set;
   }, [allSessionsQ.data, labelsById]);
-  const buckets = useMemo(() => bucketByDate(sessions), [sessions]);
-  const selection = useSessionSelection(sessions);
+  const buckets = useMemo(() => bucketByDate(filtered), [filtered]);
+  const selection = useSessionSelection(filtered);
 
   const refreshMut = useMutation({
     mutationFn: sessionRefresh,
@@ -156,8 +167,10 @@ export function SessionsPage() {
           provider={provider}
           onProviderChange={setProvider}
           providerOptions={providerOptions}
+          dateRange={dateRange}
+          onDateRangeChange={setDateRange}
           selection={selection}
-          total={sessions.length}
+          total={filtered.length}
         />
 
         {selection.bulkErr && (
@@ -179,10 +192,10 @@ export function SessionsPage() {
                 {(listQuery.error as Error)?.message ?? t("sessions.loadFailed")}
               </ErrorBanner>
             </div>
-          ) : sessions.length === 0 ? (
+          ) : filtered.length === 0 ? (
             <div className="p-3">
               <EmptyState
-                title={query ? t("sessions.noMatches") : t("sessions.noneFound")}
+                title={query || dateRange !== "all" ? t("sessions.noMatches") : t("sessions.noneFound")}
                 hint={t("sessions.noneFoundHint")}
               />
             </div>

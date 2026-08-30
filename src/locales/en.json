@@ -27,8 +27,9 @@
     "howItWorks": "How this works"
   },
   "nav": {
-    "manage": "Manage",
-    "observe": "Observe",
+    "overview": "Overview",
+    "run": "Run",
+    "records": "Records",
     "extend": "Extend",
     "system": "System",
     "providers": "Providers",
@@ -37,8 +38,9 @@
     "skills": "Skills",
     "mcp": "MCP",
     "settings": "Settings",
+    "quota": "Quota",
     "expandSidebar": "Expand sidebar",
-    "collapseSidebar": "collapse",
+    "collapseSidebar": "Collapse sidebar",
     "gateway": "Gateway"
   },
   "palette": {
@@ -46,6 +48,27 @@
     "navigation": "Navigation",
     "noMatches": "no matches",
     "searchFailed": "search failed — check the Nestra log"
+  },
+  "overview": {
+    "title": "Overview",
+    "help": "Everything at a glance: what needs attention, gateway health, 30-day usage, and each enabled agent's routing mode.",
+    "alertsCard": "Needs attention",
+    "alertsHint": "Aggregated anomalies: gateway down while agents are routed, open circuit breakers, keep-alive failures, offline agents.",
+    "alertsClear": "all systems nominal",
+    "alertGatewayDown": "gateway is {{state}} while agents are routed — requests will fail until it runs",
+    "alertBreakerOpen": "circuit open · {{endpoint}} · {{model}} · recovers in {{secs}}s",
+    "alertBreakerHalfOpen": "probing · {{endpoint}} · {{model}}",
+    "alertKeepalive": "keep-alive {{phase}} · {{endpoint}}",
+    "alertAgentMissing": "agent offline · {{name}}",
+    "gatewayCard": "Gateway",
+    "gatewayHint": "Live gateway state. Restart here, or open the Gateway page for full control.",
+    "routingAgents": "Routed agents",
+    "usageCard": "Usage · 30 days",
+    "usageHint": "Global gateway-observed usage across every agent, priced at read time.",
+    "usageEmptyHint": "Once agents route traffic through the gateway, totals land here.",
+    "agentsCard": "Agents",
+    "agentsHint": "Enabled agents and their current mode. Click a row for the full cockpit.",
+    "loadFailedHint": "The backing query failed — retry or check the Nestra log."
   },
   "keepalive": {
     "title": "keep alive",
@@ -285,7 +308,14 @@
     "handoffSpawnTip": "Open a new supervised Pi session seeded with this handoff",
     "handoffSpawned": "Handoff session spawning…",
     "handoffSpawnFailed": "Failed to spawn handoff session",
-    "handoffSpawnReady": "Handoff landed — new session recorded"
+    "handoffSpawnReady": "Handoff landed — new session recorded",
+    "dateFilter": "Date range",
+    "dateAll": "All time",
+    "dateToday": "Today",
+    "date7d": "Last 7 days",
+    "date30d": "Last 30 days",
+    "moreActions": "More actions",
+    "reviewThis": "Review this session"
   },
   "skills": {
     "title": "Skills",
@@ -364,7 +394,7 @@
     "importFailed": "Import failed: {{err}}",
     "synced": "Synced all servers",
     "syncFailed": "Sync failed: {{err}}",
-    "probeOk": "Probe OK ({{ms}} ms)",
+    "probeOk": "reachable · {{ms}} ms",
     "probeOkPlain": "Probe OK",
     "probeFailed": "Probe failed: {{reason}}",
     "probeUnknown": "unknown",
@@ -399,7 +429,10 @@
     "loadFailed": "Failed to load MCP servers.",
     "importScanFailed": "Failed to scan for importable servers.",
     "usageObserved": "observed {{n}} calls · {{rel}}",
-    "usageNone": "no invocations observed"
+    "usageNone": "no invocations observed",
+    "testDraft": "test connection",
+    "testDraftTip": "Probe the configured transport before saving — nothing is written yet",
+    "probeFail": "unreachable · {{reason}}"
   },
   "settings": {
     "title": "Settings",
@@ -450,7 +483,7 @@
     "cache": "Cache",
     "cacheDesc": "Cached data (model catalog, quota snapshots, page data) is rebuilt automatically. This only drops the cached copies.",
     "clearCaches": "Clear all caches",
-    "clearCachesDesc": "Removes cached page data, quota snapshots, and the models.dev catalog. Providers, keys and sessions are untouched.",
+    "clearCachesDesc": "Removes cached page data, quota snapshots, and the models.dev + pi.dev catalogs. Providers, keys and sessions are untouched.",
     "clearCachesBtn": "clear caches",
     "savedToast": "Setting saved",
     "notSavedToast": "Setting not saved",
@@ -518,6 +551,29 @@
     "gatewayTuningReset": "Reset to defaults",
     "gatewayTuningSavedToast": "Gateway tuning saved — applies to the next request",
     "gatewayTuningSaveFailedToast": "Failed to save gateway tuning",
+    "captureLevel": "Capture level",
+    "captureLevelDesc": "Verbosity of the running log capture. Hot-applies — the log viewer carries the same switch.",
+    "logEnvOverrideNote": "The NESTRA_LOG environment variable is overriding the capture level — this switch has no effect until it is unset.",
+    "obsClearCard": "Observability data",
+    "obsClearCardDesc": "Route and task history recorded by the gateway.",
+    "obsClear": "Clear observability data",
+    "obsClearDesc": "Deletes all tasks, requests, migrations and the lifetime usage rollup. Providers, policies, bindings and keys are untouched. Cannot be undone.",
+    "obsClearBtn": "clear observability data",
+    "obsConfirmTitle": "Clear observability data?",
+    "obsConfirmBody": "All gateway-observed tasks, requests, migrations and usage totals will be deleted. This cannot be undone.",
+    "obsConfirmLabel": "delete observability data",
+    "obsClearDone": "Observability data cleared",
+    "storage": "Storage & Gateway",
+    "storageDesc": "Where Nestra keeps its data. Read-only — changes live on the owning pages (Gateway, Diagnostics).",
+    "storageDb": "Database",
+    "storageLogs": "Logs",
+    "storagePort": "Gateway port",
+    "diagProviders": "Providers with keys",
+    "diagSessions": "Sessions indexed",
+    "diagRecentErrors": "Recent errors",
+    "autoUpdateCheck": "Check on launch",
+    "autoUpdateCheckDesc": "Quietly check GitHub for a newer release each launch and toast when one exists. Off by default.",
+    "updateToast": "Nestra {{version}} is available — see Settings → Updates.",
     "licensesTitle": "Open-source licenses",
     "licensesDesc": "Nestra is built on open-source software.",
     "licensesApp": "Nestra is licensed under the MIT License.",
@@ -640,7 +696,8 @@
     "protoAnthropic": "Anthropic",
     "protoOpenai": "OpenAI",
     "protoResponses": "Responses",
-    "protoCustom": "Custom"
+    "protoCustom": "Custom",
+    "openCardTip": "Open the agent detail cockpit"
   },
   "orchestration": {
     "gateway": "gateway",
@@ -670,10 +727,12 @@
     "modeBlocked": "Blocked",
     "modeBlockedHint": "Enable the Gateway service on the Gateway page to route this agent.",
     "modeLoadFailed": "Mode setting failed to load — retry.",
-    "gatewayStatusFailed": "Gateway status unavailable"
+    "gatewayStatusFailed": "Gateway status unavailable",
+    "viewLogs": "View this task in the gateway log"
   },
   "agentRouting": {
     "titleSuffix": "routing",
+    "crumb": "routing",
     "steadyTitle": "Current route",
     "steadyHint": "What a new request resolves to under the current policies — a dry-run, no traffic sent. Updates when you save a policy.",
     "steadyContext": "{{n}} context",
@@ -686,6 +745,7 @@
     "directNote": "This agent is in Direct mode right now — policies take effect the moment you switch to Routed. Editing here is safe."
   },
   "agentDetail": {
+    "crumbReview": "review",
     "helpGateway": "Direct mode writes the real provider into this agent's config. Routed mode sends traffic through the Nestra gateway — provider/model resolved per task, with quota-aware fallback and migration.",
     "helpPlain": "Installed coding agent.",
     "tasks": "Tasks",
@@ -848,7 +908,14 @@
     "configPreviewAria": "Copy config",
     "pick": "pick",
     "customOption": "custom…",
-    "loadFailed": "Failed to load provider."
+    "loadFailed": "Failed to load provider.",
+    "anchorName": "name",
+    "anchorProtocols": "protocols",
+    "anchorKey": "api key",
+    "anchorModels": "models",
+    "anchorEnv": "env",
+    "anchorPreview": "preview",
+    "anchorDanger": "danger"
   },
   "gateway": {
     "title": "Gateway Service",
@@ -907,15 +974,21 @@
     "lastRequest": "Last request",
     "activeTasks": "Active tasks",
     "noActivity": "No requests routed yet.",
+    "breakerCard": "Circuit breakers",
+    "breakerCardDesc": "Per-model upstream health. Open circuits are skipped until their recovery window elapses; reset makes every endpoint eligible immediately.",
+    "breakerAllClosed": "all circuits closed",
+    "breakerRecoversIn": "probes in {{secs}}s",
     "restart": "Restart",
     "offConfirmTitle": "Turn off the Gateway?",
     "offConfirmBody": "These routed agents will be reverted to Direct mode: {{agents}}",
     "offConfirmLabel": "Turn off",
     "hide": "Hide",
-    "viewLogs": "View logs"
+    "viewLogs": "View logs",
+    "breakerQueryFailed": "breaker state unavailable — snapshot query failed"
   },
   "gatewayLogs": {
     "title": "Gateway Logs",
+    "crumb": "logs",
     "help": "Live view of the gateway log. Every line carries the request correlation ids (task / attempt), so pasting a task id into the search shows that request's full lifecycle: inbound → route → each attempt (status, latency) → decision → done. Debug adds truncated request/response bodies (never headers, never credentials).",
     "back": "Gateway",
     "auto": "Auto refresh",
@@ -937,7 +1010,12 @@
     "emptyHint": "Route a request through the gateway, or relax the filters.",
     "loadMore": "Load more",
     "fullBodies": "Full bodies",
-    "fullBodiesHint": "Log COMPLETE request/response bodies in the debug wire evidence instead of 2 KiB truncated snippets. Large logs; still never headers or credentials."
+    "fullBodiesHint": "Log COMPLETE request/response bodies in the debug wire evidence instead of 2 KiB truncated snippets. Large logs; still never headers or credentials.",
+    "exportTitle": "Export filtered logs",
+    "exportFiltered": "Export the current filtered rows",
+    "exported_one": "{{count}} line exported",
+    "exported_other": "{{count}} lines exported",
+    "exportFailed": "Export failed: {{err}}"
   },
   "cache": {
     "noCache": "no cache",

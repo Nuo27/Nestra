@@ -10,6 +10,10 @@ import { InfoButton } from "../controls/InfoButton"
 ///
 /// `info` renders a small info icon after the title whose tooltip carries the
 /// explanatory copy — long descriptions never clutter the header inline.
+///
+/// `subBar` renders a quiet second row INSIDE the sticky bar (under the title
+/// row) — the provider edit page's section anchors live there, staying
+/// visible for the whole long-form scroll.
 export function PageHeader({
   title,
   subtitle,
@@ -17,6 +21,7 @@ export function PageHeader({
   action,
   back,
   sticky,
+  subBar,
 }: {
   title: ReactNode
   subtitle?: ReactNode
@@ -25,19 +30,18 @@ export function PageHeader({
   action?: ReactNode
   back?: ReactNode
   sticky?: boolean
+  subBar?: ReactNode
 }) {
-  return (
+  const stickyCls = sticky
+    ? "sticky top-0 z-10 -mx-4 px-4 py-2.5 mb-3 border-b border-border bg-canvas"
+    : ""
+  const row = (
     <div
-      className={[
-        sticky ? "sticky top-0 z-10 -mx-4 px-4 py-2.5 mb-3 border-b border-border bg-canvas" : "",
-        // No subtitle: the header is one line tall, so center the action
-        // cluster on the title's optical middle (items-start leaves sm/md
-        // buttons 2-4px high of the text-xl cap). With a subtitle the left
-        // block is two lines — top alignment keeps the action on the title row.
-        `flex ${subtitle ? "items-start" : "items-center"} justify-between gap-3`,
-      ]
-        .filter(Boolean)
-        .join(" ")}
+      // No subtitle: the header is one line tall, so center the action
+      // cluster on the title's optical middle (items-start leaves sm/md
+      // buttons 2-4px high of the text-xl cap). With a subtitle the left
+      // block is two lines — top alignment keeps the action on the title row.
+      className={`flex ${subtitle ? "items-start" : "items-center"} justify-between gap-3`}
     >
       <div className="min-w-0">
         {back && <div className="mb-2">{back}</div>}
@@ -54,6 +58,17 @@ export function PageHeader({
       {action && <div className="shrink-0 flex items-center gap-2">{action}</div>}
     </div>
   )
+  if (subBar) {
+    return (
+      <div className={stickyCls}>
+        {row}
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border pt-2">
+          {subBar}
+        </div>
+      </div>
+    )
+  }
+  return <div className={stickyCls}>{row}</div>
 }
 
 /// Inline back navigation. `to` navigates via the router when given;

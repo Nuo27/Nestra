@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -8,6 +8,8 @@ import {
   diagExportLogs,
   diagHealth,
   diagOpenDataDir,
+  settingGet,
+  settingSet,
   updatesCheck,
   type UpdateInfo,
 } from "../../ipc";
@@ -17,6 +19,7 @@ import { ButtonGroup } from "./ButtonGroup";
 import { Card } from "./Card";
 import { SectionLabel } from "../layout/PageHeader";
 import { FieldRow } from "./Field";
+import { Switch } from "../ui/switch";
 import { useUI } from "../../stores/ui";
 
 /// Diagnostics block — rendered as the last section of the Settings page
@@ -27,12 +30,32 @@ import { useUI } from "../../stores/ui";
 /// backs the System card's rows.
 export function DiagnosticsSection() {
   const { t, i18n } = useTranslation();
+  const qc = useQueryClient();
+  const toast = useUI((s) => s.pushToast);
   const healthQ = useQuery({
     queryKey: qk.diagHealth(),
     queryFn: diagHealth,
     refetchOnMount: "always",
   });
-  const toast = useUI((s) => s.pushToast);
+  // Auto-check rides in the shared "app" settings object (same cache as the
+  // Settings page), so the two surfaces never disagree.
+  const appQ = useQuery({
+    queryKey: qk.settings(),
+    queryFn: () => settingGet("app"),
+  });
+
+  const autoCheckMut = useMutation({
+    // Fetch the LATEST "app" object from the backend (not the query cache — a
+    // cold cache would turn `?? {}` into a whole-row overwrite that wipes
+    // detection_cadence / log_retention_days) and merge the flag in.
+    mutationFn: async (enabled: boolean) => {
+      const latest = ((await settingGet("app")) as Record<string, unknown> | null) ?? {};
+      return settingSet("app", { ...latest, auto_update_check: enabled });
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.settings() }),
+    onError: () => toast(t("settings.notSavedToast"), "error"),
+  });
+  const autoCheck = (appQ.data as { auto_update_check?: boolean } | null)?.auto_update_check ?? false;
 
   // Update check is on-demand (no background polling) to respect GitHub's
   // unauthenticated rate limit and the app's no-chatter stance.
@@ -102,6 +125,8 @@ export function DiagnosticsSection() {
                 : "—"
             }
           />
+          <KV k={t("settings.diagProviders")} v={String(healthQ.data?.providers_detected ?? "—")} />
+          <KV k={t("settings.diagSessions")} v={String(healthQ.data?.sessions_indexed ?? "—")} />
           <FieldRow label={<span className="text-muted">{t("settings.diagDataDir")}</span>}>
             <span className="flex min-w-0 items-center gap-1.5">
               <span
@@ -124,6 +149,18 @@ export function DiagnosticsSection() {
             </span>
           </FieldRow>
         </div>
+        {(healthQ.data?.last_errors?.length ?? 0) > 0 && (
+          <div className="mt-3 border-t border-border pt-3">
+            <div className="mb-1 text-xs text-muted">{t("settings.diagRecentErrors")}</div>
+            <ul className="max-h-32 space-y-1 overflow-auto scroll font-mono text-2xs text-danger">
+              {healthQ.data!.last_errors.map((e, i) => (
+                <li key={i} className="truncate" title={e}>
+                  {e}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <ButtonGroup className="mt-3" justify="end" space="loose">
           <Button size="sm" variant="ghost" onClick={exportLogs}>
             {t("common.exportLogs")}
@@ -141,6 +178,21 @@ export function DiagnosticsSection() {
           </Button>
         }
       >
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-3 border-b border-border pb-2">
+          <div className="min-w-0">
+            <div className="text-sm text-fg">{t("settings.autoUpdateCheck")}</div>
+            <div className="prose text-xs text-muted mt-0.5">
+              {t("settings.autoUpdateCheckDesc")}
+            </div>
+          </div>
+          <Switch
+            className="shrink-0 ml-auto"
+            checked={autoCheck}
+            disabled={autoCheckMut.isPending}
+            onCheckedChange={(v) => autoCheckMut.mutate(v)}
+            title={t("settings.autoUpdateCheck")}
+          />
+        </div>
         <UpdateBody
           update={update}
           currentVersion={healthQ.data?.version ?? null}

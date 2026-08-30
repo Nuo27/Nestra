@@ -1,10 +1,13 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { Link } from "@tanstack/react-router";
+import { ScrollText } from "lucide-react";
 import { sessionTasks, routeHistory, type TaskSummary } from "../../ipc/orchestration";
 import { SectionLabel } from "../layout/PageHeader";
 import { Badge } from "../ui/badge";
 import { Skeleton } from "../ui/skeleton";
+import { Disclosure } from "../controls/Disclosure";
 import { RouteLineage } from "./RouteLineage";
 
 /// Tasks the orchestration gateway observed for this logical session (matched
@@ -50,33 +53,27 @@ function SessionTaskRow({
     queryFn: () => routeHistory(taskId),
     enabled: open,
   });
+  // Same anatomy as the agent detail's TaskRow: Disclosure owns the toggle,
+  // the side link jumps to the gateway log filtered on this task.
   return (
-    <div className="border border-border bg-inset">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs"
+    <div className="flex items-center border border-border bg-inset">
+      <Disclosure
+        className="min-w-0 flex-1"
+        onOpenChange={setOpen}
+        header={
+          <span className="flex items-center gap-2 font-mono text-xs">
+            <span className="min-w-0 flex-1 truncate text-fg">{taskId.slice(0, 8)}</span>
+            <span className="font-mono text-2xs text-subtle tabular">
+              {t("orchestration.reqCount", { n: summary.request_count })}
+            </span>
+            {summary.generation_broken && (
+              <Badge tone="danger" variant="soft" className="font-mono text-2xs">
+                {t("orchestration.genBroken")}
+              </Badge>
+            )}
+          </span>
+        }
       >
-        <span
-          aria-hidden
-          className="text-subtle transition-transform"
-          style={{ transform: open ? "rotate(90deg)" : undefined }}
-        >
-          ▸
-        </span>
-        <span className="min-w-0 flex-1 truncate font-mono text-fg">
-          {taskId.slice(0, 8)}
-        </span>
-        <span className="font-mono text-2xs text-subtle tabular">
-          {t("orchestration.reqCount", { n: summary.request_count })}
-        </span>
-        {summary.generation_broken && (
-          <Badge tone="danger" variant="soft" className="font-mono text-2xs">
-            {t("orchestration.genBroken")}
-          </Badge>
-        )}
-      </button>
-      {open && (
         <div className="border-t border-border px-3 py-2">
           {historyQ.isLoading ? (
             <Skeleton className="h-8 w-full" />
@@ -84,7 +81,16 @@ function SessionTaskRow({
             <RouteLineage records={historyQ.data ?? []} />
           )}
         </div>
-      )}
+      </Disclosure>
+      <Link
+        to="/gateway/logs"
+        search={{ task: taskId }}
+        aria-label={t("orchestration.viewLogs")}
+        title={t("orchestration.viewLogs")}
+        className="shrink-0 px-2 text-subtle transition-[color] duration-fast hover:text-accent"
+      >
+        <ScrollText data-icon size={13} />
+      </Link>
     </div>
   );
 }

@@ -7,7 +7,6 @@ import { PageHeader, SectionLabel } from "../components/layout/PageHeader";
 import { SyncIndicator } from "../components/feedback/SyncIndicator";
 import { EmptyState } from "../components/feedback/EmptyState";
 import { ErrorBanner } from "../components/feedback/ErrorBanner";
-import { GatewayStatusBar } from "../components/orchestration/GatewayStatusBar";
 import { AgentCard } from "../components/agents/AgentCard";
 import { qk } from "../lib/queries";
 import { useUI } from "../stores/ui";
@@ -48,10 +47,6 @@ export function AgentsPage() {
           </div>
         }
       />
-
-      <div className="mb-4">
-        <GatewayStatusBar />
-      </div>
 
       {q.isLoading && (
         <div className="space-y-2">

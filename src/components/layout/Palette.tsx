@@ -7,6 +7,7 @@ import { useGuard } from "../../lib/guard";
 import { useUI } from "../../stores/ui";
 import { Input } from "../ui/input";
 import { SectionLabel } from "./PageHeader";
+import { NAV_ALL } from "./nav";
 
 export function Palette() {
   const { t } = useTranslation();
@@ -49,28 +50,43 @@ export function Palette() {
     return () => clearTimeout(id);
   }, [paletteQuery, guard]);
 
+  // Nav entries are synthesized from the shared nav source (same list the
+  // rail renders) — translated here, filtered client-side alongside the
+  // backend results. The backend only knows data items (provider/session/
+  // skill); nav labels live frontend-side so they stay i18n'd and in sync
+  // with the route table.
+  const navItems = useMemo<PaletteItem[]>(() => {
+    const q = paletteQuery.trim().toLowerCase();
+    return NAV_ALL.filter((n) => !q || t(n.labelKey).toLowerCase().includes(q)).map(
+      (n) => ({ kind: "nav", label: t(n.labelKey), detail: null, target: n.path }),
+    );
+  }, [paletteQuery, t]);
+
   // group items by kind for section headers. `flat` is the RENDER order —
   // the keyboard handler must index the SAME array or the highlighted row
   // and the Enter target desync whenever the backend order differs from the
   // section grouping.
   const flat = useMemo(() => {
-    const grouped = items.reduce<Record<string, PaletteItem[]>>((acc, it) => {
-      (acc[it.kind] ??= []).push(it);
-      return acc;
-    }, {});
+    const grouped = [...navItems, ...items].reduce<Record<string, PaletteItem[]>>(
+      (acc, it) => {
+        (acc[it.kind] ??= []).push(it);
+        return acc;
+      },
+      {},
+    );
     const rows: { item: PaletteItem; section: string }[] = [];
     for (const kind of ["nav", "provider", "session", "skill"]) {
       for (const it of grouped[kind] ?? []) rows.push({ item: it, section: kind });
     }
     return rows;
-  }, [items]);
+  }, [navItems, items]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setActive((i) =>
-          items.length === 0 ? 0 : Math.min(items.length - 1, i + 1),
+          flat.length === 0 ? 0 : Math.min(flat.length - 1, i + 1),
         );
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
@@ -91,7 +107,7 @@ export function Palette() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [items, active, flat, navigate, closePalette]);
+  }, [flat, active, navigate, closePalette]);
 
   return (
     <div
@@ -145,17 +161,26 @@ export function Palette() {
                     closePalette();
                   }}
                   className={
-                    "brackets-state mx-1.5 flex w-[calc(100%-0.75rem)] items-center justify-between px-2.5 py-1.5 text-left text-sm transition-[color,box-shadow] duration-fast focus-visible:shadow-focus " +
+                    "brackets-state mx-1.5 flex w-[calc(100%-0.75rem)] items-center px-2.5 py-1.5 text-left text-sm transition-[color,box-shadow] duration-fast focus-visible:shadow-focus " +
                     (isActive ? "text-accent font-medium" : "text-muted hover:text-fg")
                   }
                   data-active={isActive || undefined}
                 >
-                  <span className="truncate">{row.item.label}</span>
-                  {row.item.detail && (
-                    <span className="ml-3 shrink-0 text-2xs text-subtle">
-                      {row.item.detail}
-                    </span>
-                  )}
+                  {/* The label/detail pair rides in one full-width inner row:
+                      `brackets-state`'s [ ] pseudo-elements are themselves flex
+                      items, so putting them alongside label+detail under
+                      `justify-between` pushed the label toward the middle and
+                      left every row starting at a different x. The inner
+                      wrapper owns the between-layout; the brackets pin to the
+                      row's two edges. */}
+                  <span className="flex min-w-0 flex-1 items-center justify-between gap-3">
+                    <span className="truncate">{row.item.label}</span>
+                    {row.item.detail && (
+                      <span className="shrink-0 text-2xs text-subtle">
+                        {row.item.detail}
+                      </span>
+                    )}
+                  </span>
                 </button>
               </div>
             );

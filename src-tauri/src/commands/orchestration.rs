@@ -383,3 +383,17 @@ pub fn orch_usage_summary(
     };
     crate::orchestration::store::usage_summary_rows(&conn, agent_id.as_deref(), days, &prices)
 }
+
+/// Clear ALL gateway observability data (tasks + cascaded requests/migrations,
+/// the lifetime usage rollup, the affinity snapshot) — the Settings → Data
+/// danger action. Configuration (endpoints, policies, bindings, secrets,
+/// imported sessions) is untouched. The in-memory affinity table is cleared
+/// FIRST: the router re-persists its snapshot on the next request / at exit,
+/// which would silently undo the wipe within this process. Write path → the
+/// UI `db` connection.
+#[tauri::command]
+pub fn orch_obs_clear(state: State<'_, crate::AppState>) -> AppResult<()> {
+    state.orch_affinity.clear();
+    let conn = state.db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+    crate::orchestration::store::clear_observability(&conn)
+}

@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { mcpSave, type McpKind, type McpServer } from "../../ipc";
+import { mcpProbeDraft, mcpSave, type McpKind, type McpServer, type ProbeResult } from "../../ipc";
 import { extractError } from "../../ipc/errors";
 import { splitArgs, quoteArg } from "../../lib/mcp";
 import type { AgentState } from "../controls/AgentToggleGroup";
@@ -74,27 +74,46 @@ export function McpServerDialog({
     onError: (e) => setError(extractError(e)),
   });
 
+  // Save-time transport draft, shared by submit + the pre-save probe. Empty
+  // env keys are transient editor rows — never persist them.
+  const dropEmptyKeys = (env: Record<string, string>) =>
+    Object.fromEntries(Object.entries(env).filter(([k]) => k.trim() !== ""));
+  const draftTransport = () => ({
+    kind,
+    command: kind === "stdio" ? command.trim() || null : null,
+    args: kind === "stdio" ? splitArgs(args) : [],
+    env: dropEmptyKeys(env),
+    url: kind === "stdio" ? null : url.trim() || null,
+  });
+
+  // Pre-save connectivity probe on the DRAFT transport: verify before
+  // committing. A failed probe is a result (shown inline), never a dialog
+  // error — saving anyway stays allowed.
+  const [probe, setProbe] = useState<ProbeResult | null>(null);
+  const probeMut = useMutation({
+    mutationFn: () => mcpProbeDraft(draftTransport()),
+    onSuccess: (r) => setProbe(r),
+    onError: (e) =>
+      setProbe({ ok: false, latency_ms: null, reason: extractError(e) ?? String(e) }),
+  });
+  // Editing any transport field invalidates the last probe result — a stale
+  // "reachable" verdict must not vouch for a config the user just changed.
+  useEffect(() => {
+    setProbe(null);
+  }, [kind, command, args, url, env]);
+
   const submit = () => {
     if (!name.trim()) {
       setError(t("mcp.needsName"));
       return;
     }
-    // Empty env keys are transient editor rows — never persist them.
-    const dropEmptyKeys = (env: Record<string, string>) =>
-      Object.fromEntries(Object.entries(env).filter(([k]) => k.trim() !== ""));
     const server: McpServer = {
       // The backend canonicalizes the id from the name (slugify); pass the
       // existing id in edit mode (so a suffixed collision row edits in place)
       // and empty in add mode.
       id: initial?.id ?? "",
       name: name.trim(),
-      transport: {
-        kind,
-        command: kind === "stdio" ? command.trim() || null : null,
-        args: kind === "stdio" ? splitArgs(args) : [],
-        env: dropEmptyKeys(env),
-        url: kind === "stdio" ? null : url.trim() || null,
-      },
+      transport: draftTransport(),
       enabled_agents: agents
         .filter((a) => agentStates[a.id] === "enabled")
         .map((a) => a.id),
@@ -205,9 +224,27 @@ export function McpServerDialog({
               </div>
             </Field>
           )}
+          {probe && (
+            <div
+              className={`font-mono text-2xs ${probe.ok ? "text-success" : "text-danger"}`}
+            >
+              {probe.ok
+                ? t("mcp.probeOk", { ms: probe.latency_ms ?? "—" })
+                : t("mcp.probeFail", { reason: probe.reason ?? "—" })}
+            </div>
+          )}
           {error && <ErrorBanner severity="warn">{error}</ErrorBanner>}
         </DialogBody>
         <DialogFooter>
+          <Button
+            variant="ghost"
+            loading={probeMut.isPending}
+            disabled={saveMut.isPending}
+            onClick={() => probeMut.mutate()}
+            title={t("mcp.testDraftTip")}
+          >
+            {t("mcp.testDraft")}
+          </Button>
           <Button variant="ghost" onClick={onCancel} disabled={saveMut.isPending}>{t("common.cancel")}</Button>
           <Button
             variant="primary"

@@ -155,6 +155,18 @@ pub async fn mcp_probe(
     .await
 }
 
+/// Probe a DRAFT transport — the add/edit dialog's "test connection" before
+/// anything is saved. Same runtime path as [`mcp_probe`], but the transport
+/// arrives inline (nothing persisted), so the user can verify before
+/// committing. A failed draft probe is a result, not an error.
+#[tauri::command]
+pub async fn mcp_probe_draft(
+    transport: crate::mcp::McpTransport,
+) -> AppResult<mcp::ProbeResult> {
+    transport.validate()?;
+    run_blocking(move || mcp::probe_transport(&transport)).await
+}
+
 /// Per-server tool-usage summary (P1-1). `total_calls` counts gateway-
 /// OBSERVED invocations attributed to this managed server (via the shared
 /// `mcp__<server>__<tool>` namespace); zero means none were observed —

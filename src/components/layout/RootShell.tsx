@@ -1,18 +1,8 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  Server,
-  Terminal,
-  History,
-  Wrench,
-  Cable,
-  Settings,
-  Network,
-  PanelLeftClose,
-  PanelLeftOpen,
-  type LucideIcon,
-} from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useUI } from "../../stores/ui";
 import { Palette } from "./Palette";
 import { QuotaAutoDriver } from "./QuotaAutoDriver";
@@ -21,54 +11,11 @@ import { Toaster } from "../feedback/Toaster";
 import { TooltipProvider, Tip } from "../ui/tooltip";
 import { Kbd } from "../ui/kbd";
 import { SectionLabel } from "./PageHeader";
-
-interface NavEntry {
-  path: string;
-  /** Translation key ("nav.*"), resolved at render time. */
-  labelKey: string;
-  icon: LucideIcon;
-  match: string[];
-}
-
-/// Nav sections give the rail structural meaning instead of a flat list.
-/// Matches the IA ownership map: Manage (config) → Observe (read) →
-/// Extend (plugins) → System (app). Orchestration lives inside Agents —
-/// per-agent Direct/Routed mode is on the agent card and its detail page.
-// Labels are translation KEYS ("nav.*"), resolved with `t()` at render time —
-// module-level consts can't use hooks, and a static string would freeze the
-// language at load.
-const NAV_SECTIONS: { labelKey: string; entries: NavEntry[] }[] = [
-  {
-    labelKey: "nav.manage",
-    entries: [
-      { path: "/providers", labelKey: "nav.providers", icon: Server, match: ["/providers"] },
-      { path: "/agents", labelKey: "nav.agents", icon: Terminal, match: ["/agents"] },
-    ],
-  },
-  {
-    labelKey: "nav.observe",
-    entries: [
-      {
-        path: "/sessions",
-        labelKey: "nav.sessions",
-        icon: History,
-        match: ["/sessions"],
-      },
-    ],
-  },
-  {
-    labelKey: "nav.extend",
-    entries: [
-      { path: "/skills", labelKey: "nav.skills", icon: Wrench, match: ["/skills"] },
-      { path: "/mcp", labelKey: "nav.mcp", icon: Cable, match: ["/mcp"] },
-    ],
-  },
-];
-
-const PINNED: NavEntry[] = [
-  { path: "/gateway", labelKey: "nav.gateway", icon: Network, match: ["/gateway"] },
-  { path: "/settings", labelKey: "nav.settings", icon: Settings, match: ["/settings"] },
-];
+import { NAV_TOP, NAV_SECTIONS, NAV_PINNED, type NavEntry } from "./nav";
+import { agentList } from "../../ipc/agent";
+import { endpointList } from "../../ipc/provider";
+import { settingGet, updatesCheck } from "../../ipc";
+import { qk } from "../../lib/queries";
 
 function NavLink({
   n,
@@ -78,7 +25,6 @@ function NavLink({
   n: NavEntry;
   pathname: string;
   collapsed: boolean;
-  
 }) {
   const { t } = useTranslation();
   const label = t(n.labelKey);
@@ -118,8 +64,106 @@ function NavLink({
   );
 }
 
+/// One breadcrumb segment: a translated page label, optionally an entity id
+/// resolved to its display name (agents/endpoints) and/or a translated
+/// sub-page suffix (routing / review / logs). Falls back to the raw id until
+/// the name cache warms — the shell never blocks on it.
+interface Crumb {
+  labelKey: string;
+  entityId?: string;
+  entityKind?: "agent" | "endpoint";
+  subKey?: string;
+}
+
+function crumbFor(pathname: string): Crumb {
+  const seg = pathname.split("/").filter(Boolean);
+  const [head, id, sub] = seg;
+  switch (head) {
+    case undefined:
+      return { labelKey: "nav.overview" };
+    case "providers":
+      return id
+        ? { labelKey: "nav.providers", entityId: id, entityKind: "endpoint" }
+        : { labelKey: "nav.providers" };
+    case "quota":
+      return id
+        ? { labelKey: "nav.quota", entityId: id, entityKind: "endpoint" }
+        : { labelKey: "nav.quota" };
+    case "agents":
+      if (!id) return { labelKey: "nav.agents" };
+      if (sub === "routing")
+        return {
+          labelKey: "nav.agents",
+          entityId: id,
+          entityKind: "agent",
+          subKey: "agentRouting.crumb",
+        };
+      if (sub === "review")
+        return {
+          labelKey: "nav.agents",
+          entityId: id,
+          entityKind: "agent",
+          subKey: "agentDetail.crumbReview",
+        };
+      return { labelKey: "nav.agents", entityId: id, entityKind: "agent" };
+    case "sessions":
+      return { labelKey: "nav.sessions" };
+    case "skills":
+      return { labelKey: "nav.skills" };
+    case "mcp":
+      return { labelKey: "nav.mcp" };
+    case "settings":
+      return { labelKey: "nav.settings" };
+    case "gateway":
+      // `/gateway/logs` has no `$id` level — "logs" IS the second segment.
+      return id === "logs"
+        ? { labelKey: "nav.gateway", subKey: "gatewayLogs.crumb" }
+        : { labelKey: "nav.gateway" };
+    default:
+      return { labelKey: "nav.overview" };
+  }
+}
+
+/// Module-level once-per-process guard for the launch update check (a `t`
+/// identity change on language switch re-runs the effect; this keeps the
+/// check truly one-shot).
+let updateCheckRan = false;
+
+/** Resolve an agent/endpoint id to its display name via the shared list
+ * queries (SWR — warm caches answer instantly, cold ones fetch once). */
+function useEntityName(kind: "agent" | "endpoint" | undefined, id: string | undefined) {
+  const agentsQ = useQuery({
+    queryKey: qk.agents(),
+    queryFn: agentList,
+    enabled: kind === "agent" && !!id,
+  });
+  const endpointsQ = useQuery({
+    queryKey: qk.endpoints(),
+    queryFn: endpointList,
+    enabled: kind === "endpoint" && !!id,
+  });
+  if (!id || !kind) return undefined;
+  if (kind === "agent")
+    return agentsQ.data?.find((a) => a.id === id)?.display_name;
+  return endpointsQ.data?.find((e) => e.id === id)?.display_name;
+}
+
+function Breadcrumb({ pathname }: { pathname: string }) {
+  const { t } = useTranslation();
+  const crumb = crumbFor(pathname);
+  const entityName = useEntityName(crumb.entityKind, crumb.entityId);
+  const segments = [t(crumb.labelKey)];
+  if (crumb.subKey) segments.push(t(crumb.subKey));
+  if (crumb.entityId) segments.push(entityName ?? crumb.entityId);
+  return (
+    <span className="min-w-0 truncate font-mono text-xs font-normal text-muted">
+      {segments.join(" · ")}
+    </span>
+  );
+}
+
 export function RootShell() {
-  const { paletteOpen, openPalette, closePalette, sidebarCollapsed, toggleSidebar } =
+  const { paletteOpen, openPalette, closePalette, sidebarCollapsed, toggleSidebar, pushToast } =
     useUI();
   const { t } = useTranslation();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -139,6 +183,31 @@ export function RootShell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [paletteOpen, openPalette, closePalette]);
 
+  // Launch-time update check (opt-in via Settings → Updates). ONE fetch per
+  // launch, never a poll; an available update surfaces as a quiet toast. A
+  // failure stays silent — a launch check must never nag. The module-level
+  // guard keeps this once-per-process even though `t` changes identity on
+  // language switches (which would otherwise re-run the effect).
+  useEffect(() => {
+    if (updateCheckRan) return;
+    updateCheckRan = true;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const app = (await settingGet("app")) as { auto_update_check?: boolean } | null;
+        if (cancelled || !app?.auto_update_check) return;
+        const info = await updatesCheck();
+        if (cancelled || !info.hasUpdate) return;
+        pushToast(t("settings.updateToast", { version: info.latest }), "success");
+      } catch {
+        /* silent */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pushToast, t]);
+
   return (
     <TooltipProvider delayDuration={200}>
       <div className="flex h-full bg-canvas text-fg">
@@ -150,6 +219,11 @@ export function RootShell() {
             " flex shrink-0 flex-col gap-2 border-r border-border px-2 py-3 overflow-y-auto scroll"
           }
         >
+          {/* Overview sits above the section groups — the landing page. */}
+          <div className="flex flex-col gap-0.5">
+            <NavLink n={NAV_TOP} pathname={pathname} collapsed={sidebarCollapsed} />
+          </div>
+
           {NAV_SECTIONS.map((section) => (
             <div key={section.labelKey} className="flex flex-col gap-0.5">
               {!sidebarCollapsed && (
@@ -172,7 +246,7 @@ export function RootShell() {
             {!sidebarCollapsed && (
               <SectionLabel className="px-2 pb-1 pt-1">{t("nav.system")}</SectionLabel>
             )}
-            {PINNED.map((n) => (
+            {NAV_PINNED.map((n) => (
               <NavLink
                 key={n.path}
                 n={n}
@@ -180,7 +254,11 @@ export function RootShell() {
                 collapsed={sidebarCollapsed}
               />
             ))}
+          </div>
 
+          {/* Collapse control — its own strip under a separator, NOT a nav
+              item: it must never read as one of the rail's tabs. */}
+          <div className="mt-1 border-t border-border pt-2">
             <Tip
               content={sidebarCollapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
               side="right"
@@ -189,15 +267,9 @@ export function RootShell() {
                 type="button"
                 onClick={toggleSidebar}
                 aria-label={sidebarCollapsed ? t("nav.expandSidebar") : t("nav.collapseSidebar")}
-                // Same anatomy as the nav links above (relative + no
-                // brackets-state) so the collapse control reads as one of the
-                // rail's tabs, not as a separate button.
                 className={
-                  "relative flex h-9 items-center text-sm transition-[color,box-shadow] duration-fast focus-visible:shadow-focus " +
-                  (sidebarCollapsed
-                    ? "mx-auto justify-center px-0 w-9 "
-                    : "gap-2 px-2 ") +
-                  "text-muted hover:text-fg"
+                  "relative flex h-9 items-center text-sm text-muted transition-[color,box-shadow] duration-fast hover:text-fg focus-visible:shadow-focus " +
+                  (sidebarCollapsed ? "mx-auto justify-center px-0 w-9 " : "gap-2 px-2 ")
                 }
               >
                 {sidebarCollapsed ? (
@@ -219,16 +291,15 @@ export function RootShell() {
             data-tauri-drag-region
             className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border pl-4 pr-3"
           >
-            {/* Brand + current-page context — the full route path, live on
-                navigation. The nav rail carries the section labels. */}
+            {/* Brand + breadcrumb — the current page as a human label, with
+                route params resolved to entity names. The nav rail carries
+                the section labels. */}
             <span className="flex items-center gap-2 text-sm font-semibold min-w-0">
               <span className="shrink-0">
                 <span className="text-fg">NESTRA</span>
                 <span className="text-accent">{">"}</span>
               </span>
-              <span className="min-w-0 truncate font-mono text-xs font-normal text-muted">
-                {pathname}
-              </span>
+              <Breadcrumb pathname={pathname} />
             </span>
             <div className="flex items-center gap-2">
               <ThemeToggle />

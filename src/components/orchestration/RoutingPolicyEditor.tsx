@@ -18,6 +18,7 @@ import {
   type RouteTarget,
 } from "../../ipc/orchestration";
 import { qk } from "../../lib/queries";
+import { ROLE_CHIP_ACTIVE, ROLE_CHIP_BASE, ROLE_CHIP_DONE } from "./RoleChip";
 import { useUI } from "../../stores/ui";
 import { ErrorBanner } from "../feedback/ErrorBanner";
 import { Card } from "../controls/Card";
@@ -285,10 +286,8 @@ function DetectedRolesStrip({
                 : t("routingPolicy.createTip", { role: r.role })
             }
             className={
-              "inline-flex items-center gap-1.5 border border-border bg-inset px-1.5 py-0.5 font-mono text-2xs transition-colors duration-fast " +
-              (done
-                ? "cursor-default text-muted"
-                : "text-fg hover:border-accent-border hover:bg-raised disabled:opacity-50")
+              ROLE_CHIP_BASE +
+              (done ? ROLE_CHIP_DONE : ROLE_CHIP_ACTIVE)
             }
           >
             <RoleKey roleKey={r.role} />
@@ -332,10 +331,8 @@ function TierPresets({
             onClick={() => !done && onAdd(role)}
             title={t("routingPolicy.tierTip", { role })}
             className={
-              "inline-flex items-center gap-1.5 border border-border bg-inset px-1.5 py-0.5 font-mono text-2xs transition-colors duration-fast " +
-              (done
-                ? "cursor-default text-muted"
-                : "text-fg hover:border-accent-border hover:bg-raised disabled:opacity-50")
+              ROLE_CHIP_BASE +
+              (done ? ROLE_CHIP_DONE : ROLE_CHIP_ACTIVE)
             }
           >
             <RoleKey roleKey={role} />

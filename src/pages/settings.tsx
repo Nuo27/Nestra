@@ -1,8 +1,21 @@
 import { useEffect } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
-import { autostartIsEnabled, autostartSet, settingDelete, settingGet, settingSet } from "../ipc";
+import {
+  autostartIsEnabled,
+  autostartSet,
+  diagHealth,
+  diagLogLevelGet,
+  diagLogLevelSet,
+  settingDelete,
+  settingGet,
+  settingSet,
+  type LogLevelPreset,
+} from "../ipc";
+import { gatewayGetStatus } from "../ipc/gateway";
+import { obsClear } from "../ipc/orchestration";
+import { extractError } from "../ipc/errors";
 import { qk } from "../lib/queries";
 import { Page } from "../components/layout/Page";
 import { Card } from "../components/controls/Card";
@@ -12,9 +25,9 @@ import { Button } from "../components/controls/Button";
 import { Switch } from "../components/ui/switch";
 import { confirmDialog } from "../components/controls/ConfirmDialog";
 import { ErrorBanner } from "../components/feedback/ErrorBanner";
+import { Note } from "../components/feedback/Note";
 import { Skeleton } from "../components/ui/skeleton";
 import { DiagnosticsSection } from "../components/controls/DiagnosticsSection";
-import { GatewayTuningSection } from "../components/controls/GatewayTuningSection";
 import { useUI, type ThemePref } from "../stores/ui";
 
 type Cadence = "on-launch" | "manual";
@@ -22,11 +35,13 @@ type Cadence = "on-launch" | "manual";
 interface Settings {
   detection_cadence: Cadence;
   log_retention_days: 7 | 30 | 90;
+  auto_update_check: boolean;
 }
 
 const DEFAULTS: Settings = {
   detection_cadence: "on-launch",
   log_retention_days: 30,
+  auto_update_check: false,
 };
 
 /// localStorage key for the persisted React Query cache (mirrors app.tsx).
@@ -140,8 +155,10 @@ export function SettingsPage() {
     try {
       // The only step that can FAIL goes first — aborting leaves everything
       // else untouched instead of a half-cleaned state.
-      // Backend models.dev catalog cache (setting_kv entry).
+      // Backend model-catalog caches (setting_kv entries): models.dev +
+      // pi.dev. Both are rebuilt on next use.
       await settingDelete("models_dev_cache");
+      await settingDelete("pi_dev_cache");
       // In-memory React Query cache + persisted copy.
       qc.clear();
       try {
@@ -155,6 +172,27 @@ export function SettingsPage() {
     } catch {
       toast(t("settings.clearFailedToast"), "error");
     }
+  };
+
+  // Observability wipe (Settings → Data danger zone): tasks, requests,
+  // migrations, usage rollup, affinity — configuration untouched.
+  const obsClearMut = useMutation({
+    mutationFn: obsClear,
+    onSuccess: () => {
+      void qc.invalidateQueries();
+      toast(t("settings.obsClearDone"), "success");
+    },
+    onError: (e: unknown) => toast(extractError(e) ?? String(e), "error"),
+  });
+  const clearObs = async () => {
+    const ok = await confirmDialog({
+      title: t("settings.obsConfirmTitle"),
+      body: t("settings.obsConfirmBody"),
+      confirmLabel: t("settings.obsConfirmLabel"),
+      tone: "danger",
+    });
+    if (!ok) return;
+    obsClearMut.mutate();
   };
 
   // First load (no cache yet): show skeletons so switches don't briefly render
@@ -263,24 +301,27 @@ export function SettingsPage() {
             <Skeleton className="h-7 w-72" />
           </div>
         ) : (
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="min-w-0">
-              <div className="text-sm text-fg">{t("settings.retention")}</div>
-              <div className="prose text-xs text-muted mt-0.5">
-                {t("settings.retentionDesc")}
+          <>
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-sm text-fg">{t("settings.retention")}</div>
+                <div className="prose text-xs text-muted mt-0.5">
+                  {t("settings.retentionDesc")}
+                </div>
               </div>
+              <SegmentedControl<"7" | "30" | "90">
+                className="shrink-0 ml-auto"
+                value={String(settings.log_retention_days) as "7" | "30" | "90"}
+                onChange={(v) => update("log_retention_days", Number(v) as 7 | 30 | 90)}
+                items={[
+                  { value: "7", label: t("settings.retention7d"), tooltip: t("settings.retention7dTip") },
+                  { value: "30", label: t("settings.retention30d"), tooltip: t("settings.retention30dTip") },
+                  { value: "90", label: t("settings.retention90d"), tooltip: t("settings.retention90dTip") },
+                ]}
+              />
             </div>
-            <SegmentedControl<"7" | "30" | "90">
-              className="shrink-0 ml-auto"
-              value={String(settings.log_retention_days) as "7" | "30" | "90"}
-              onChange={(v) => update("log_retention_days", Number(v) as 7 | 30 | 90)}
-              items={[
-                { value: "7", label: t("settings.retention7d"), tooltip: t("settings.retention7dTip") },
-                { value: "30", label: t("settings.retention30d"), tooltip: t("settings.retention30dTip") },
-                { value: "90", label: t("settings.retention90d"), tooltip: t("settings.retention90dTip") },
-              ]}
-            />
-          </div>
+            <CaptureLevelRow />
+          </>
         )}
       </Card>
 
@@ -322,7 +363,25 @@ export function SettingsPage() {
         </div>
       </Card>
 
-      <GatewayTuningSection />
+      <Card
+        title={t("settings.obsClearCard")}
+        description={t("settings.obsClearCardDesc")}
+        tone="danger"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-sm text-fg">{t("settings.obsClear")}</div>
+            <div className="prose text-xs text-muted mt-0.5">
+              {t("settings.obsClearDesc")}
+            </div>
+          </div>
+          <Button className="shrink-0 ml-auto" variant="danger" size="sm" loading={obsClearMut.isPending} onClick={clearObs}>
+            {t("settings.obsClearBtn")}
+          </Button>
+        </div>
+      </Card>
+
+      <StorageCard />
 
       <DiagnosticsSection />
 
@@ -346,4 +405,97 @@ export function SettingsPage() {
       </Card>
     </Page>
   );
+}
+
+/// Capture-verbosity row for the Logs card — same hot-swapping control as the
+/// log viewer's, surfaced here as the canonical place to change it. When the
+/// NESTRA_LOG env var is set it overrides any preset, so the row shows a
+/// warning note instead of pretending the switch works.
+function CaptureLevelRow() {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const toast = useUI((s) => s.pushToast);
+  const levelQ = useQuery({ queryKey: qk.logLevel(), queryFn: diagLogLevelGet });
+  const healthQ = useQuery({ queryKey: qk.diagHealth(), queryFn: diagHealth });
+  const setMut = useMutation({
+    mutationFn: (preset: LogLevelPreset) => diagLogLevelSet(preset),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.logLevel() }),
+    onError: (e: unknown) =>
+      toast(t("gatewayLogs.levelFailed", { err: extractError(e) ?? String(e) }), "error"),
+  });
+  return (
+    <>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-4 border-t border-border pt-3">
+        <div className="min-w-0">
+          <div className="text-sm text-fg">{t("settings.captureLevel")}</div>
+          <div className="prose text-xs text-muted mt-0.5">
+            {t("settings.captureLevelDesc")}
+          </div>
+        </div>
+        {levelQ.isLoading ? (
+          <Skeleton className="h-7 w-40" />
+        ) : (
+          <SegmentedControl<LogLevelPreset>
+            className="shrink-0 ml-auto"
+            value={levelQ.data ?? "info"}
+            onChange={(v) => setMut.mutate(v)}
+            items={[
+              { value: "info", label: "Info", tooltip: t("gatewayLogs.presetInfo") },
+              { value: "debug", label: "Debug", tooltip: t("gatewayLogs.presetDebug") },
+              { value: "trace", label: "Trace", tooltip: t("gatewayLogs.presetTrace") },
+            ]}
+          />
+        )}
+      </div>
+      {healthQ.data?.log_env_override && (
+        <Note className="mt-3 text-warning">
+          {t("settings.logEnvOverrideNote")}
+        </Note>
+      )}
+    </>
+  );
+}
+
+/// Read-only storage overview: database file (path + size), log directory,
+/// and the gateway's configured port. Deep controls live on their owning
+/// pages (Gateway for the port, Diagnostics for the data dir + export).
+function StorageCard() {
+  const { t } = useTranslation();
+  const healthQ = useQuery({ queryKey: qk.diagHealth(), queryFn: diagHealth });
+  const gwQ = useQuery({ queryKey: qk.gatewayStatus(), queryFn: gatewayGetStatus });
+  const d = healthQ.data;
+  return (
+    <Card title={t("settings.storage")} description={t("settings.storageDesc")}>
+      <div className="space-y-1">
+        <KVRow
+          k={t("settings.storageDb")}
+          v={d ? `${d.db_path} · ${fmtBytes(d.db_size_bytes)}` : "—"}
+          title={d?.db_path}
+        />
+        <KVRow k={t("settings.storageLogs")} v={d?.log_dir ?? "—"} title={d?.log_dir} />
+        <KVRow
+          k={t("settings.storagePort")}
+          v={gwQ.data ? `127.0.0.1:${gwQ.data.configured_port}` : "—"}
+        />
+      </div>
+    </Card>
+  );
+}
+
+function KVRow({ k, v, title }: { k: string; v: string; title?: string }) {
+  return (
+    <div className="flex min-w-0 items-baseline justify-between gap-4">
+      <span className="shrink-0 text-sm text-muted">{k}</span>
+      <span className="min-w-0 truncate font-mono text-sm text-fg" title={title ?? v}>
+        {v}
+      </span>
+    </div>
+  );
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MiB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GiB`;
 }

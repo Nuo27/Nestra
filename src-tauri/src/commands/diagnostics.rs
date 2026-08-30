@@ -20,32 +20,99 @@ pub struct HealthReport {
     pub data_dir: String,
     pub providers_detected: u32,
     pub sessions_indexed: u32,
+    /// Most recent ERROR lines from the newest JSON log generation (up to 5,
+    /// oldest-first) — the Diagnostics "recent errors" list. Empty when the
+    /// log layer has recorded none (or no log file exists yet).
     pub last_errors: Vec<String>,
+    /// Absolute path to the SQLite database file (Settings → Storage).
+    pub db_path: String,
+    /// On-disk size of the SQLite database file, bytes (0 when unreadable).
+    pub db_size_bytes: u64,
+    /// Absolute path to the log directory (Settings → Storage).
+    pub log_dir: String,
+    /// True when the `NESTRA_LOG` env var overrides the persisted verbosity
+    /// preset — the UI warns that the Settings switch has no effect then.
+    pub log_env_override: bool,
 }
 
 #[tauri::command]
 pub async fn diag_health(state: State<'_, crate::AppState>) -> AppResult<HealthReport> {
     let db = state.db_read.clone();
     run_blocking(move || {
-        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-        let configured = db::list_endpoints(&conn)
-            .map(|v| v.iter().filter(|e| e.has_api_key).count() as u32)
-            .unwrap_or(0);
-        let sessions_indexed = store::count_sessions(&conn).unwrap_or(0);
+        // DB-dependent fields under a SHORT lock — `recent_errors` reads and
+        // parses a whole log file, which must never hold the shared db_read
+        // connection while other UI reads queue behind it.
+        let (configured, sessions_indexed) = {
+            let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+            let configured = db::list_endpoints(&conn)
+                .map(|v| v.iter().filter(|e| e.has_api_key).count() as u32)
+                .unwrap_or(0);
+            let sessions_indexed = store::count_sessions(&conn).unwrap_or(0);
+            (configured, sessions_indexed)
+        };
+        let data_dir = db::data_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "(unavailable)".to_string());
+        let db_file = db::data_dir().map(|p| p.join("nestra.db"));
+        let (db_path, db_size_bytes) = match &db_file {
+            Ok(p) => (
+                p.to_string_lossy().to_string(),
+                std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+            ),
+            Err(_) => ("(unavailable)".to_string(), 0),
+        };
+        let log_dir_path = db::log_dir().ok();
+        let log_dir = log_dir_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "(unavailable)".to_string());
         Ok(HealthReport {
             ok: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
             os: friendly_os(),
             arch: std::env::consts::ARCH.to_string(),
-            data_dir: db::data_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "(unavailable)".to_string()),
+            data_dir,
             providers_detected: configured,
             sessions_indexed,
-            last_errors: vec![],
+            last_errors: recent_errors(log_dir_path.as_deref()),
+            db_path,
+            db_size_bytes,
+            log_dir,
+            // An empty NESTRA_LOG doesn't override anything (EnvFilter would
+            // fall back to the preset) — don't claim it does.
+            log_env_override: std::env::var_os("NESTRA_LOG")
+                .is_some_and(|v| !v.is_empty()),
         })
     })
     .await
+}
+
+/// Last few ERROR messages from the newest JSON log generation, oldest-first.
+/// Rendered as `HH:MM:SS message`; a torn/missing log file is simply "none".
+fn recent_errors(log_dir: Option<&std::path::Path>) -> Vec<String> {
+    let dir = match log_dir {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let Some(newest) = json_log_files(dir).into_iter().next() else {
+        return Vec::new();
+    };
+    let Ok(contents) = std::fs::read_to_string(dir.join(newest)) else {
+        return Vec::new();
+    };
+    let mut errors: Vec<String> = parse_log_entries(&contents)
+        .into_iter()
+        .filter(|e| e.level == "ERROR")
+        .map(|e| {
+            // `get` is char-boundary safe — a byte slice `[..19]` would panic
+            // on a multi-byte timestamp prefix.
+            let ts = e.timestamp.get(..19).unwrap_or(&e.timestamp);
+            format!("{ts}  {}", e.message)
+        })
+        .collect();
+    let n = errors.len();
+    errors.drain(..n.saturating_sub(5));
+    errors
 }
 
 /// Map `std::env::consts::OS` to a friendly platform label, capitalizing the
@@ -111,6 +178,22 @@ pub async fn diag_export_logs(dest_path: String) -> AppResult<()> {
                 std::fs::copy(&path, &target)?;
             }
         }
+        Ok(())
+    })
+    .await
+}
+
+/// Write plain-text content to a user-picked absolute path — the log viewer's
+/// "export current filter" action (the rows already rendered, not the whole
+/// log dir). Absolute paths only, like [`diag_export_logs`].
+#[tauri::command]
+pub async fn diag_export_text(dest_path: String, content: String) -> AppResult<()> {
+    run_blocking(move || {
+        let dest = std::path::PathBuf::from(&dest_path);
+        if !dest.is_absolute() {
+            return Err(AppError::Validation("export destination must be absolute".into()));
+        }
+        std::fs::write(&dest, content)?;
         Ok(())
     })
     .await

@@ -140,21 +140,7 @@ export async function resolvePreview(input: {
   });
 }
 
-// ---- gateway: per-agent opt-in + status -----------------------------------
-
-/// Live gateway status. `up` is false until the gateway binds (which happens
-/// asynchronously at app start). `agents_enabled` is the list of agent ids
-/// currently opted into gateway routing. Mirrors `commands::GatewayStatus`.
-export interface GatewayStatus {
-  up: boolean;
-  base_url: string;
-  agents_enabled: string[];
-}
-
-/// Read the live gateway status.
-export async function orchStatus(): Promise<GatewayStatus> {
-  return invoke<GatewayStatus>("orch_status");
-}
+// ---- gateway: per-agent opt-in --------------------------------------------
 
 /// Toggle gateway routing for an agent. When enabling, writes the stable
 /// gateway alias as the agent's base_url; when disabling, restores direct
@@ -273,6 +259,13 @@ export async function usageSummary(
     agentId: agentId ?? null,
     days: days ?? null,
   });
+}
+
+/// Wipe ALL gateway observability data (tasks, requests, migrations, the
+/// lifetime usage rollup, affinity) — the Settings → Data danger action.
+/// Configuration is untouched.
+export async function obsClear(): Promise<void> {
+  await invoke("orch_obs_clear");
 }
 
 /// `routing_policy` row — keyed `(agent_id, role)`. `role = "*"` is the

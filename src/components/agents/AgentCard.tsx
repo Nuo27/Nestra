@@ -1,9 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { AgentKindBadge } from "./AgentKindBadge";
-import { ArrowRight } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { AgentKindBadge } from "./AgentKindBadge";
 import {
   agentClearOverride,
   agentSetEnabled,
@@ -29,7 +28,23 @@ export function AgentCard({ agent, endpoints }: { agent: AgentInfo; endpoints: E
   const { t } = useTranslation();
   const qc = useQueryClient();
   const toast = useUI((s) => s.pushToast);
+  const navigate = useNavigate();
   const connected = agent.status === "ok" || agent.status === "manual_ok";
+
+  // Whole-card navigation for the connected+enabled state: any click that
+  // didn't land on an inner control (switch, buttons, links) opens the detail
+  // cockpit. The "open →" button this replaces is gone — the card IS the
+  // affordance now.
+  const cardClickable = connected && agent.enabled;
+  const openDetail = () => navigate({ to: "/agents/$id", params: { id: agent.id } });
+  const onCardClick = (e: React.MouseEvent) => {
+    if (!cardClickable) return;
+    // Inner controls keep their own behavior — `label` covers the Switch's
+    // clickable `.tgl-btn` surface (the checkbox itself is visually hidden).
+    if ((e.target as HTMLElement).closest("button, a, input, select, label, [role='switch']"))
+      return;
+    openDetail();
+  };
 
   const setEnabledMut = useMutation({
     mutationFn: (enabled: boolean) => agentSetEnabled(agent.id, enabled),
@@ -117,49 +132,71 @@ export function AgentCard({ agent, endpoints }: { agent: AgentInfo; endpoints: E
           : t("agents.statusMissing");
 
   return (
-    <Card
-      padding="none"
-      className="overflow-hidden transition-colors duration-fast hover:border-border-strong"
+    <div
+      onClick={onCardClick}
+      // Keyboard parity for the whole-card affordance (it replaced a focusable
+      // button, so it must stay reachable by keyboard + announce as a link).
+      role={cardClickable ? "link" : undefined}
+      tabIndex={cardClickable ? 0 : undefined}
+      aria-label={cardClickable ? t("agents.openCardTip") : undefined}
+      onKeyDown={
+        cardClickable
+          ? (e: React.KeyboardEvent) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                openDetail();
+              }
+            }
+          : undefined
+      }
+      className={cardClickable ? "cursor-pointer" : undefined}
+      title={cardClickable ? t("agents.openCardTip") : undefined}
     >
-      <AgentStatusBanner
-        enabled={agent.enabled}
-        connected={connected}
-        agentId={agent.id}
-        displayName={agent.display_name}
-        statusLabel={statusLabel}
-        source={agent.source}
-        loading={setEnabledMut.isPending}
-        onToggle={(v) => setEnabledMut.mutate(v)}
-      />
+      <Card
+        padding="none"
+        className="overflow-hidden transition-colors duration-fast hover:border-border-strong"
+      >
+        <AgentStatusBanner
+          enabled={agent.enabled}
+          connected={connected}
+          agentId={agent.id}
+          displayName={agent.display_name}
+          statusLabel={statusLabel}
+          source={agent.source}
+          loading={setEnabledMut.isPending}
+          onToggle={(v) => setEnabledMut.mutate(v)}
+        />
 
-      <div className="space-y-2 p-3">
-        <div className="flex flex-wrap items-center gap-2 text-xs text-subtle">
-          <CapabilityBadge agent={agent} />
+        <div className="space-y-2 p-3">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-subtle">
+            <CapabilityBadge agent={agent} />
+          </div>
+
+          {!connected ? (
+            <ButtonGroup space="loose" justify="end" wrap>
+              <Button size="sm" variant="ghost" onClick={pickBinary} disabled={setOverrideMut.isPending}>{t("agents.configureBinary")}</Button>
+              <Button size="sm" variant="ghost" onClick={pickFolder} disabled={setOverrideMut.isPending}>{t("agents.configureFolder")}</Button>
+              {hasOverride && (
+                <Button size="sm" variant="ghost" onClick={() => clearOverrideMut.mutate()} disabled={clearOverrideMut.isPending}>{t("agents.clearOverride")}</Button>
+              )}
+              <span className="text-xs text-subtle">
+                {t("agents.installHint")}
+              </span>
+            </ButtonGroup>
+          ) : !agent.enabled ? (
+            <DisabledNote />
+          ) : (
+            <AgentCardBody agent={agent} endpoints={endpoints} />
+          )}
         </div>
-
-        {!connected ? (
-          <ButtonGroup space="loose" justify="end" wrap>
-            <Button size="sm" variant="ghost" onClick={pickBinary} disabled={setOverrideMut.isPending}>{t("agents.configureBinary")}</Button>
-            <Button size="sm" variant="ghost" onClick={pickFolder} disabled={setOverrideMut.isPending}>{t("agents.configureFolder")}</Button>
-            {hasOverride && (
-              <Button size="sm" variant="ghost" onClick={() => clearOverrideMut.mutate()} disabled={clearOverrideMut.isPending}>{t("agents.clearOverride")}</Button>
-            )}
-            <span className="text-xs text-subtle">
-              {t("agents.installHint")}
-            </span>
-          </ButtonGroup>
-        ) : !agent.enabled ? (
-          <DisabledNote />
-        ) : (
-          <AgentCardBody agent={agent} endpoints={endpoints} />
-        )}
-      </div>
-    </Card>
+      </Card>
+    </div>
   );
 }
 
-/// The connected+enabled body: mode switch (Direct | Routed), a compact
-/// mode-specific status summary, and the entry point to the full detail page.
+/// The connected+enabled body: mode switch (Direct | Routed) + a compact
+/// mode-specific status summary. The card itself is the entry point to the
+/// detail page (whole-card click).
 function AgentCardBody({
   agent,
   endpoints,
@@ -167,8 +204,6 @@ function AgentCardBody({
   agent: AgentInfo;
   endpoints: EndpointInfo[];
 }) {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
   const routedQ = useQuery({
     queryKey: ["orchestration", "gateway-flag", agent.id],
     queryFn: () => agentGatewayEnabled(agent.id),
@@ -182,13 +217,6 @@ function AgentCardBody({
         <ModeSwitch agentId={agent.id} supportsGateway={agent.capability.supports_gateway} />
         <div className="flex items-center gap-2">
           {routed ? <RoutedSummary agent={agent} /> : <DirectSummary agent={agent} endpoints={endpoints} />}
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => navigate({ to: "/agents/$id", params: { id: agent.id } })}
-          >
-            {t("agents.open")} <ArrowRight data-icon size={13} />
-          </Button>
         </div>
       </div>
       {routed && <RoutedTaskLine agent={agent} />}
