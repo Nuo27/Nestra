@@ -335,11 +335,9 @@ pub fn run() {
             // Session
             commands::sessions::session_list,
             commands::sessions::session_read,
-            commands::sessions::session_search,
             commands::sessions::session_children,
             commands::sessions::session_get,
             commands::sessions::session_refresh,
-            commands::sessions::session_export,
             commands::sessions::session_open,
             commands::sessions::session_reveal,
             commands::sessions::session_delete,
@@ -504,4 +502,12 @@ fn drain_gateway_on_exit(app: &AppHandle) {
         });
         tracing::info!("gateway drained on exit");
     }
+    // Last chance to TRUNCATE the WAL: with the webview gone no reader can
+    // block the checkpoint, so this is what actually keeps nestra.db-wal
+    // small across runs (autocheckpoint never shrinks the file). Best-effort.
+    if let Ok(conn) = state.db.lock() {
+        if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+            tracing::warn!("exit wal checkpoint failed: {e}");
+        }
+    };
 }

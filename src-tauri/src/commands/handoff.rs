@@ -20,12 +20,35 @@ pub async fn session_context_pressure(
     let db = state.db_read.clone();
     run_blocking(move || {
         let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-        let parts = handoff::parts_for_session(&conn, &provider_id, &session_id)?;
+        // O(1): the reconcile-time rollups on the session row. (The char-width
+        // estimate and the top-consumer label come from the same
+        // `handoff::context_pressure` walk the reconcile ran over the parts.)
+        let Some((est_tokens, top_consumer, last_model)) =
+            crate::session::store::session_rollups(&conn, &provider_id, &session_id)?
+        else {
+            return Err(AppError::Validation(format!(
+                "session {provider_id}/{session_id} not found"
+            )));
+        };
         // Real catalog window when the session's model is identified;
         // otherwise the default 200k window (flagged estimated).
-        let window = handoff::last_model(&parts)
-            .and_then(|m| handoff::window_for_model(&conn, &m));
-        Ok(handoff::context_pressure(&parts, window))
+        let window = last_model
+            .as_deref()
+            .and_then(|m| handoff::window_for_model(&conn, m));
+        let est = est_tokens.unwrap_or(0);
+        let window_tokens = window.unwrap_or(handoff::DEFAULT_CONTEXT_WINDOW);
+        let pct = if window_tokens > 0 {
+            (est * 100 / window_tokens).clamp(0, 100) as u8
+        } else {
+            100
+        };
+        Ok(ContextPressure {
+            est_tokens: est,
+            window_tokens,
+            pct,
+            estimated: true,
+            top_consumer,
+        })
     })
     .await
 }

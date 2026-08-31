@@ -21,62 +21,115 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
+struct SessionRow {
+    id: String,
+    parent_id: Option<String>,
+    directory: Option<String>,
+    title: Option<String>,
+    created: Option<i64>,
+    updated: Option<i64>,
+}
+
 /// Read every session out of a part-style SQLite db. One `RawFile` per session
 /// row (path is the db file itself). Missing tables → empty vec, not an error
 /// (wrong/older layout = nothing to import).
 pub(crate) fn collect(db: &Path) -> AppResult<Vec<RawFile>> {
-    let conn = match rusqlite::Connection::open_with_flags(
+    let Some(conn) = open_part_db(db) else {
+        return Ok(vec![]);
+    };
+    let sessions = read_session_rows(&conn)?;
+    let mut events = HashMap::new();
+    let mut agent_names = HashMap::new();
+    collect_events(&conn, None, &mut events, &mut agent_names)?;
+
+    let db_mtime = mtime_millis(db);
+    let mut out = Vec::new();
+    for s in sessions {
+        let evs = events.remove(&s.id).unwrap_or_default();
+        if let Some(rf) = raw_file_for(s, evs, &agent_names, db, db_mtime) {
+            out.push(rf);
+        }
+    }
+    Ok(out)
+}
+
+/// ONE session out of a part-style db — the on-demand body read behind the
+/// index-only session store (`session.source_files` names the db; the mirror
+/// tables are gone). `None` when the id has no row or no conversational
+/// events (same empty-shell skip as `collect`).
+pub(crate) fn collect_one(db: &Path, session_id: &str) -> AppResult<Option<RawFile>> {
+    let Some(conn) = open_part_db(db) else {
+        return Ok(None);
+    };
+    let Some(s) = read_session_rows(&conn)?.into_iter().find(|s| s.id == session_id) else {
+        return Ok(None);
+    };
+    let mut events = HashMap::new();
+    let mut agent_names = HashMap::new();
+    collect_events(&conn, Some(session_id), &mut events, &mut agent_names)?;
+    let evs = events.remove(session_id).unwrap_or_default();
+    Ok(raw_file_for(s, evs, &agent_names, db, mtime_millis(db)))
+}
+
+/// Open the db read-only and verify the shared layout. `None` (not an error)
+/// when the file can't open or the tables aren't there — a wrong/older layout
+/// means nothing to import.
+fn open_part_db(db: &Path) -> Option<rusqlite::Connection> {
+    let conn = rusqlite::Connection::open_with_flags(
         db,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("session db open failed ({}): {e}", db.display());
-            return Ok(vec![]);
-        }
-    };
+    )
+    .map_err(|e| tracing::warn!("session db open failed ({}): {e}", db.display()))
+    .ok()?;
     for table in ["session", "message", "part"] {
         if !table_exists(&conn, table) {
-            return Ok(vec![]);
+            return None;
         }
     }
+    Some(conn)
+}
 
-    struct SessionRow {
-        id: String,
-        parent_id: Option<String>,
-        directory: Option<String>,
-        title: Option<String>,
-        created: Option<i64>,
-        updated: Option<i64>,
-    }
+fn read_session_rows(conn: &rusqlite::Connection) -> AppResult<Vec<SessionRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, parent_id, directory, title, time_created, time_updated FROM session",
     )?;
-    let sessions: Vec<SessionRow> = stmt
-        .query_map([], |r| {
-            Ok(SessionRow {
-                id: r.get(0)?,
-                parent_id: r.get(1).ok().flatten(),
-                directory: r.get(2).ok().flatten(),
-                title: r.get(3).ok().flatten(),
-                created: r.get(4).ok().flatten(),
-                updated: r.get(5).ok().flatten(),
-            })
-        })?
-        .flatten()
-        .collect();
-    drop(stmt);
+    let rows = stmt.query_map([], |r| {
+        Ok(SessionRow {
+            id: r.get(0)?,
+            parent_id: r.get(1).ok().flatten(),
+            directory: r.get(2).ok().flatten(),
+            title: r.get(3).ok().flatten(),
+            created: r.get(4).ok().flatten(),
+            updated: r.get(5).ok().flatten(),
+        })
+    })?;
+    Ok(rows.flatten().collect())
+}
 
-    // Per-session event buckets, filled in one pass over the parts (joined to
-    // their message for role/synthetic). time_created + rowid = native order.
-    let mut events: HashMap<String, Vec<SemanticEvent>> = HashMap::new();
-    let mut agent_names: HashMap<String, String> = HashMap::new();
-    let mut stmt = conn.prepare(
+/// Fill per-session event buckets in one pass over the parts (joined to their
+/// message for role/synthetic). time_created + rowid = native order. When
+/// `only` is set, just that session's parts are read — the single-session
+/// body read must not scan every part row in the db (the WHERE is built
+/// per-shape because an `?1 IS NULL OR …` catch-all would defeat any index
+/// the source app created on `part.session_id`).
+fn collect_events(
+    conn: &rusqlite::Connection,
+    only: Option<&str>,
+    events: &mut HashMap<String, Vec<SemanticEvent>>,
+    agent_names: &mut HashMap<String, String>,
+) -> AppResult<()> {
+    let filter = match only {
+        Some(_) => "WHERE p.session_id = ?1",
+        None => "",
+    };
+    let mut stmt = conn.prepare(&format!(
         "SELECT p.session_id, p.time_created, p.data, m.data
          FROM part p LEFT JOIN message m ON p.message_id = m.id
-         ORDER BY p.time_created ASC, p.rowid ASC",
-    )?;
-    let rows = stmt.query_map([], |r| {
+         {filter}
+         ORDER BY p.time_created ASC, p.rowid ASC"
+    ))?;
+    // Bind exactly as many params as the SQL carries (0 or 1).
+    let rows = stmt.query_map(rusqlite::params_from_iter(only.into_iter()), |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, Option<i64>>(1).ok().flatten(),
@@ -120,44 +173,47 @@ pub(crate) fn collect(db: &Path) -> AppResult<Vec<RawFile>> {
             events.entry(session_id.clone()).or_default().push(ev);
         }
     }
-    drop(stmt);
+    Ok(())
+}
 
-    let db_mtime = mtime_millis(db);
-    let mut out = Vec::new();
-    for s in sessions {
-        let sidechain = s.parent_id.is_some();
-        let cwd = s.directory.filter(|d| !d.is_empty());
-        let project = cwd
-            .as_deref()
-            .and_then(|c| Path::new(c).file_name())
-            .and_then(|n| n.to_str())
-            .map(String::from);
-        let started = s.created.unwrap_or(db_mtime);
-        let updated = s.updated.unwrap_or(db_mtime);
-        let evs = events.remove(&s.id).unwrap_or_default();
-        // Skip empty shells (sessions compacted away / metadata-only rows).
-        if evs.is_empty() {
-            continue;
-        }
-        let agent_id = agent_names.get(&s.id).cloned();
-        out.push(RawFile {
-            path: db.to_path_buf(),
-            canonical_id: s.id,
-            is_sidechain: sidechain,
-            parent_session_id: s.parent_id,
-            agent_id,
-            title: s.title.unwrap_or_else(|| "(untitled)".into()),
-            summary: String::new(),
-            project,
-            cwd,
-            started_at: started,
-            updated_at: updated,
-            ended_at: Some(updated),
-            events: evs,
-            mtime: db_mtime,
-        });
+/// Session row + its events → the `RawFile` both `collect` and `collect_one`
+/// produce. `None` for empty shells (sessions compacted away / metadata-only
+/// rows with no conversational events).
+fn raw_file_for(
+    s: SessionRow,
+    evs: Vec<SemanticEvent>,
+    agent_names: &HashMap<String, String>,
+    db: &Path,
+    db_mtime: i64,
+) -> Option<RawFile> {
+    if evs.is_empty() {
+        return None;
     }
-    Ok(out)
+    let cwd = s.directory.filter(|d| !d.is_empty());
+    let project = cwd
+        .as_deref()
+        .and_then(|c| Path::new(c).file_name())
+        .and_then(|n| n.to_str())
+        .map(String::from);
+    let started = s.created.unwrap_or(db_mtime);
+    let updated = s.updated.unwrap_or(db_mtime);
+    let agent_id = agent_names.get(&s.id).cloned();
+    Some(RawFile {
+        path: db.to_path_buf(),
+        canonical_id: s.id,
+        is_sidechain: s.parent_id.is_some(),
+        parent_session_id: s.parent_id,
+        agent_id,
+        title: s.title.unwrap_or_else(|| "(untitled)".into()),
+        summary: String::new(),
+        project,
+        cwd,
+        started_at: started,
+        updated_at: updated,
+        ended_at: Some(updated),
+        events: evs,
+        mtime: db_mtime,
+    })
 }
 
 /// Map one native `part` row onto semantic events. A finished tool part yields

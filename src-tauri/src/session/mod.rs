@@ -868,6 +868,41 @@ pub fn collect_raw_files(provider: &str) -> AppResult<Vec<RawFile>> {
     importer.import()
 }
 
+/// Parse ONE indexed session's parts straight from its source files. This is
+/// the body read behind the index-only session store: `session` rows carry
+/// location + rollups, transcripts are never mirrored into SQLite. File
+/// shape picks the parser — a `.jsonl` source parses line-wise (Claude / Pi /
+/// Codex / OpenCode's JSONL layout all store one file per session), anything
+/// else is a part-style SQLite db keyed by session id (zcode /
+/// `opencode.db`). `agent_to_child` links Task-tool spawns to child sessions
+/// (built from index rows — see `store::agent_to_child_map`).
+pub fn read_session_parts(
+    session: &Session,
+    agent_to_child: &std::collections::BTreeMap<String, String>,
+) -> AppResult<Vec<Part>> {
+    let mut files: Vec<RawFile> = Vec::new();
+    for path in &session.source_files {
+        let p = Path::new(path);
+        // A deleted/moved source degrades the session to an empty body — the
+        // index row survives until the next reconcile drops it.
+        if !p.is_file() {
+            continue;
+        }
+        if p.extension().map(|e| e == "jsonl").unwrap_or(false) {
+            if let Ok(parsed) = parse_jsonl_events(p) {
+                files.push(rawfile_from_jsonl(p, parsed));
+            }
+        } else if let Some(rf) = partdb::collect_one(p, &session.id)? {
+            files.push(rf);
+        }
+    }
+    // Only this conversation's files (source_files came out of the same
+    // grouping, so this is belt-and-braces against a shared/moved file).
+    files.retain(|f| f.canonical_id == session.id);
+    files.sort_by_key(|f| (f.started_at, f.path.clone()));
+    Ok(assemble_parts(&files, agent_to_child))
+}
+
 // ============================================================================
 // Shared, provider-agnostic assembler
 //

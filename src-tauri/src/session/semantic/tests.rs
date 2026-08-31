@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn payload_round_trips_through_internally_tagged_json() {
+fn payload_serializes_internally_tagged() {
     let p = PartPayload::ToolInvocation {
         name: "Bash".into(),
         input: Some(r#"{"command":"ls"}"#.into()),
@@ -14,7 +14,7 @@ fn payload_round_trips_through_internally_tagged_json() {
     let s = serde_json::to_string(&p).unwrap();
     // internally tagged: {"kind":"tool_invocation","data":{...}}
     assert!(s.contains("\"kind\":\"tool_invocation\""));
-    let back = parse_payload(&s).unwrap();
+    let back: PartPayload = serde_json::from_str(&s).unwrap();
     assert_eq!(p, back);
 }
 

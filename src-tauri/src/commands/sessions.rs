@@ -31,20 +31,6 @@ pub async fn session_list(
 }
 
 #[tauri::command]
-pub async fn session_search(
-    state: State<'_, crate::AppState>,
-    query: String,
-    limit: Option<u32>,
-) -> AppResult<Vec<Session>> {
-    let db = state.db_read.clone();
-    run_blocking(move || {
-        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-        store::search_sessions(&conn, &query, limit.unwrap_or(50))
-    })
-    .await
-}
-
-#[tauri::command]
 pub async fn session_children(
     state: State<'_, crate::AppState>,
     provider_id: String,
@@ -105,20 +91,6 @@ pub async fn session_refresh(state: State<'_, crate::AppState>) -> AppResult<()>
             *g = true;
         }
         Ok(())
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn session_export(
-    state: State<'_, crate::AppState>,
-    provider_id: String,
-    id: String,
-) -> AppResult<String> {
-    let db = state.db_read.clone();
-    run_blocking(move || {
-        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-        store::export_session(&conn, &provider_id, &id)
     })
     .await
 }

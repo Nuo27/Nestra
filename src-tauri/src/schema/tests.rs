@@ -442,9 +442,8 @@ fn build_v1_drops_legacy_indexes_and_creates_new() {
     build_v1(&conn).unwrap();
     // Simulate a pre-optimization install: re-add the legacy indexes.
     conn.execute_batch(
-        "CREATE INDEX idx_session_message ON session_message(provider, session_id, seq);
-             CREATE INDEX idx_agent_provider_binding_agent ON agent_provider_binding(agent_id);
-             CREATE INDEX idx_route_request_task ON route_request(task_id);",
+        "CREATE INDEX idx_agent_provider_binding_agent ON agent_provider_binding(agent_id);
+         CREATE INDEX idx_route_request_task ON route_request(task_id);",
     )
     .unwrap();
     build_v1(&conn).unwrap();
@@ -455,7 +454,7 @@ fn build_v1_drops_legacy_indexes_and_creates_new() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    for legacy in ["idx_session_message", "idx_agent_provider_binding_agent", "idx_route_request_task"] {
+    for legacy in ["idx_agent_provider_binding_agent", "idx_route_request_task"] {
         assert!(!names.iter().any(|n| n == legacy), "{legacy} should be dropped");
     }
     for keep in [
@@ -549,14 +548,30 @@ fn build_v1_migrates_legacy_routing_policy_to_route_targets() {
 
 // ---- v2 (usage_daily + idx_route_request_agent_started) --------------------
 
-/// Rewind a freshly-built database to a genuine v1 shape: drop the v2
-/// additions and re-stamp version 1.
-fn rewind_to_v1(conn: &Connection) {
+/// Rewind a freshly-built database to a genuine v2 shape: drop the v2/v3
+/// additions, restore the v3-removed mirror tables, and re-stamp version 2.
+fn rewind_to_v2(conn: &Connection) {
     conn.execute_batch(
         "DROP TABLE IF EXISTS usage_daily;
          DROP INDEX IF EXISTS idx_route_request_agent_started;
+         CREATE TABLE IF NOT EXISTS session_message (
+           provider TEXT NOT NULL, session_id TEXT NOT NULL, seq INTEGER NOT NULL,
+           role TEXT NOT NULL, content_text TEXT NOT NULL, tool_name TEXT,
+           tool_input TEXT, tool_output TEXT, parent_message_id TEXT, message_id TEXT,
+           timestamp INTEGER, tool_call_id TEXT, thinking TEXT,
+           provider_metadata_json TEXT NOT NULL DEFAULT '{}',
+           PRIMARY KEY (provider, session_id, seq));
+         CREATE TABLE IF NOT EXISTS session_part (
+           provider TEXT NOT NULL, session_id TEXT NOT NULL, seq INTEGER NOT NULL,
+           part_idx INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL,
+           payload_json TEXT NOT NULL, tool_call_id TEXT, ts INTEGER,
+           raw_json TEXT NOT NULL, provider_metadata_json TEXT NOT NULL DEFAULT '{}',
+           PRIMARY KEY (provider, session_id, seq, part_idx));
+         ALTER TABLE session DROP COLUMN est_tokens;
+         ALTER TABLE session DROP COLUMN top_consumer;
+         ALTER TABLE session DROP COLUMN last_model;
          DELETE FROM schema_version WHERE version >= 2;
-         INSERT INTO schema_version (version, applied_at) VALUES (1, 0);",
+         INSERT INTO schema_version (version, applied_at) VALUES (2, 0);",
     )
     .unwrap();
 }
@@ -571,69 +586,104 @@ fn table_exists(conn: &Connection, name: &str) -> bool {
         == 1
 }
 
-/// v1 → v2: the idempotent canonical rebuild upgrades in place, keeps
-/// existing data, and re-stamps.
+/// v1/v2 → v3: the upgrade drops the transcript mirror in place, keeps the
+/// index rows and every other table's data, forces a full reconcile re-walk
+/// (rollups were only materialized in the dropped tables), and re-stamps.
 #[test]
-fn v1_database_upgrades_to_v2_in_place() {
+fn v2_database_upgrades_to_v3_in_place() {
     let conn = Connection::open_in_memory().unwrap();
     build_v1(&conn).unwrap();
-    rewind_to_v1(&conn);
+    rewind_to_v2(&conn);
     conn.execute(
         "INSERT INTO provider_endpoint (id, kind, display_name, has_api_key, status)
          VALUES ('ep-x','custom','X',0,'unvalidated')",
         [],
     )
     .unwrap();
-
-    migrate(&conn).unwrap();
-
-    assert!(table_exists(&conn, "usage_daily"), "v2 rollup table created");
-    let idx: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='index'
-             AND name='idx_route_request_agent_started'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(idx, 1, "v2 dashboard index created");
-    let v: i64 = conn
-        .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(v, 2, "stamped at v2");
-    let n: i64 = conn
-        .query_row("SELECT count(*) FROM provider_endpoint WHERE id='ep-x'", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(n, 1, "pre-existing data survives the upgrade");
-}
-
-/// A crash mid-migration (DDL applied, stamp not yet) must converge on the
-/// next launch — the version row still says v1, so migrate re-runs the
-/// idempotent rebuild and completes. No third state exists.
-#[test]
-fn interrupted_v2_migration_converges_on_relaunch() {
-    let conn = Connection::open_in_memory().unwrap();
-    build_v1(&conn).unwrap();
-    rewind_to_v1(&conn);
-    // Simulate the crash window: the v2 table was created, but the version
-    // stamp never landed.
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS usage_daily (
-           day TEXT NOT NULL, agent_id TEXT NOT NULL, endpoint_id TEXT NOT NULL,
-           model_id TEXT NOT NULL, requests INTEGER NOT NULL, usage_input INTEGER NOT NULL,
-           usage_output INTEGER NOT NULL, cache_creation INTEGER NOT NULL,
-           cache_read INTEGER NOT NULL,
-           PRIMARY KEY (day, agent_id, endpoint_id, model_id));",
+    conn.execute(
+        "INSERT INTO session (provider, id, title, summary, started_at, updated_at,
+                                  message_count, source_path, resume_command)
+         VALUES ('pi-cli','s-1','t','',1,2,3,'x','')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO session_message (provider, session_id, seq, role, content_text)
+         VALUES ('pi-cli','s-1',0,'user','hello')",
+        [],
     )
     .unwrap();
 
     migrate(&conn).unwrap();
 
+    assert!(!table_exists(&conn, "session_message"), "transcript mirror dropped");
+    assert!(!table_exists(&conn, "session_part"), "transcript mirror dropped");
+    let n: i64 = conn
+        .query_row("SELECT count(*) FROM provider_endpoint WHERE id='ep-x'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1, "pre-existing data survives the upgrade");
+    let (count, sources): (i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM session WHERE id='s-1'),
+                    (SELECT count(*) FROM session_source)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "session index rows survive");
+    assert_eq!(sources, 0, "session_source cleared — next reconcile re-walks all providers");
     let v: i64 = conn
         .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 2, "relaunch completes the interrupted migration");
-    assert!(table_exists(&conn, "usage_daily"));
+    assert_eq!(v, 3, "stamped at v3");
+    let auto_vacuum: i64 = conn
+        .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(auto_vacuum, 2, "incremental auto_vacuum enabled (2 = INCREMENTAL)");
+}
+
+/// A crash mid-upgrade (mirror dropped, stamp not yet) must converge on the
+/// next launch — the version row still says v2, so migrate re-runs the
+/// idempotent upgrade and completes. No third state exists.
+#[test]
+fn interrupted_v3_migration_converges_on_relaunch() {
+    let conn = Connection::open_in_memory().unwrap();
+    build_v1(&conn).unwrap();
+    rewind_to_v2(&conn);
+    // Simulate the crash window: the mirror table was dropped, but the
+    // version stamp never landed.
+    conn.execute_batch("DROP TABLE session_message;").unwrap();
+
+    migrate(&conn).unwrap();
+
+    let v: i64 = conn
+        .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, 3, "relaunch completes the interrupted migration");
+    assert!(!table_exists(&conn, "session_part"));
+}
+
+/// A genuine v1 database rides the same path: v1 → v3 directly.
+#[test]
+fn v1_database_upgrades_to_v3_in_place() {
+    let conn = Connection::open_in_memory().unwrap();
+    build_v1(&conn).unwrap();
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS usage_daily;
+         DROP INDEX IF EXISTS idx_route_request_agent_started;
+         DELETE FROM schema_version WHERE version >= 2;
+         INSERT INTO schema_version (version, applied_at) VALUES (1, 0);",
+    )
+    .unwrap();
+
+    migrate(&conn).unwrap();
+
+    assert!(table_exists(&conn, "usage_daily"), "v2 rollup table created");
+    assert!(!table_exists(&conn, "session_message"), "mirror dropped on the v1 path too");
+    let v: i64 = conn
+        .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, 3);
 }
 
 /// The per-agent live-usage aggregation (store::usage_summary_rows' live

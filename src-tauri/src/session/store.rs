@@ -1,9 +1,12 @@
 //! SQLite persistence for the universal session model.
 //!
-//! The store is the single source of truth the UI reads from. Raw per-provider
-//! logs are normalized (see `mod.rs`) and upserted here by `reconcile`, which
-//! only reparses a provider when its on-disk file snapshot changed. All queries
-//! return the provider-neutral `Session` / `Message` types from `model.rs`.
+//! The store is the session INDEX: `session` rows carry identity, location
+//! (`source_files`), and small reconcile-time rollups. Transcript bodies are
+//! NOT mirrored — they are parsed on demand from the agents' own logs (see
+//! `read_session_parts` in `mod.rs`). Raw per-provider logs are walked by
+//! `reconcile`, which only reparses a provider when its on-disk file
+//! snapshot changed. All queries return the provider-neutral `Session` /
+//! `Message` types from `model.rs`.
 
 use crate::error::{AppError, AppResult};
 use rusqlite::{params, Connection};
@@ -29,7 +32,7 @@ pub fn reconcile_all(conn: &Connection) -> AppResult<()> {
 /// list is the authority.
 fn prune_unknown_providers(conn: &Connection) -> AppResult<()> {
     let known: Vec<String> = all_providers().iter().map(|p| p.to_string()).collect();
-    for table in ["session", "session_message", "session_part", "session_source"] {
+    for table in ["session", "session_source"] {
         let placeholders = std::iter::repeat("?").take(known.len()).collect::<Vec<_>>().join(",");
         conn.execute(
             &format!("DELETE FROM {table} WHERE provider NOT IN ({placeholders})"),
@@ -40,10 +43,12 @@ fn prune_unknown_providers(conn: &Connection) -> AppResult<()> {
 }
 
 /// Reparse `provider` only when its `(path, mtime)` snapshot differs from what
-/// is stored in `session_source`. On change: assemble semantic parts once,
-/// persist them as the source of truth (`session_part`), project each part to a
-/// flat `Message` row into the `session_message` table (so the existing
-/// read path keeps its byte-compatible contract), then recompute child_counts.
+/// is stored in `session_source`. On change: assemble once and persist ONLY
+/// the index rows (`session`) — the transcript mirror (`session_message` /
+/// `session_part`) was removed in schema v3; bodies are read on demand via
+/// [`super::read_session_parts`]. The reconcile also refreshes the small
+/// rollups (`message_count`, `est_tokens`, `top_consumer`, `last_model`) that
+/// the context-pressure header reads O(1).
 pub fn reconcile_provider(conn: &Connection, provider: &str) -> AppResult<()> {
     // Sort BOTH sides: `stored_snapshot` is ORDER BY path, but the disk side
     // comes from per-importer iteration order (not guaranteed sorted). An
@@ -57,21 +62,12 @@ pub fn reconcile_provider(conn: &Connection, provider: &str) -> AppResult<()> {
         return Ok(()); // nothing changed
     }
 
-    // Assemble once: parts are the source of truth; messages are projected.
+    // Assemble once: parts feed the rollups, then are discarded — nothing
+    // body-shaped is persisted.
     let assembled = normalize_with_parts(provider)?;
-    let built: Vec<(Session, Vec<Message>)> = assembled
-        .iter()
-        .map(|a| {
-            let messages: Vec<Message> = a.parts.iter().map(|p| p.to_message()).collect();
-            let mut session = a.session.clone();
-            session.message_count = messages.len() as u32;
-            (session, messages)
-        })
-        .collect();
 
     let tx = conn.unchecked_transaction()?;
-    replace_provider_rows(&tx, provider, &built)?;
-    replace_provider_parts(&tx, provider, &assembled)?;
+    replace_provider_rows(&tx, provider, &assembled)?;
     replace_sources(&tx, provider, &disk)?;
     recompute_child_counts(&tx, provider)?;
     tx.commit()?;
@@ -93,14 +89,21 @@ fn stored_snapshot(conn: &Connection, provider: &str) -> AppResult<Vec<(String, 
     Ok(out)
 }
 
+/// Rewrite the provider's index rows. One small `session` row per
+/// conversation (identity, location, rollups) — the transcript mirror tables
+/// are gone (schema v3).
 fn replace_provider_rows(
     tx: &Connection,
     provider: &str,
-    built: &[(Session, Vec<Message>)],
+    assembled: &[AssembledSession],
 ) -> AppResult<()> {
     tx.execute("DELETE FROM session WHERE provider = ?1", [provider])?;
-    tx.execute("DELETE FROM session_message WHERE provider = ?1", [provider])?;
-    for (s, msgs) in built {
+    for a in assembled {
+        let s = &a.session;
+        // Rollups from the in-memory parts (single formula source: the same
+        // width walk the pressure header ran over `session_part` rows).
+        let pressure = super::handoff::context_pressure(&a.parts, None);
+        let last_model = super::handoff::last_model(&a.parts);
         let source_files_json = serde_json::to_string(&s.source_files).unwrap_or_else(|_| "[]".into());
         let session_meta = if s.provider_metadata_json.is_empty() {
             "{}".to_string()
@@ -112,8 +115,8 @@ fn replace_provider_rows(
                provider, id, title, summary, project, cwd, started_at, updated_at,
                ended_at, message_count, source_path, parent_session_id, agent_id,
                is_subagent, resume_command, child_count, source_files_json,
-               provider_metadata_json
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+               provider_metadata_json, est_tokens, top_consumer, last_model
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
             params![
                 s.provider,
                 s.id,
@@ -124,7 +127,7 @@ fn replace_provider_rows(
                 s.started_at,
                 s.updated_at,
                 s.ended_at,
-                s.message_count as i64,
+                a.parts.len() as i64,
                 s.source_path,
                 s.parent_session_id,
                 s.agent_id,
@@ -133,38 +136,11 @@ fn replace_provider_rows(
                 s.child_count as i64,
                 source_files_json,
                 session_meta,
+                pressure.est_tokens,
+                pressure.top_consumer,
+                last_model,
             ],
         )?;
-        for m in msgs {
-            let msg_meta = if m.provider_metadata_json.is_empty() {
-                "{}".to_string()
-            } else {
-                m.provider_metadata_json.clone()
-            };
-            tx.execute(
-                "INSERT INTO session_message (
-                   provider, session_id, seq, role, content_text, tool_name,
-                   tool_input, tool_output, tool_call_id, thinking,
-                   parent_message_id, message_id, timestamp, provider_metadata_json
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-                params![
-                    s.provider,
-                    s.id,
-                    m.seq as i64,
-                    m.role,
-                    m.content_text,
-                    m.tool_name,
-                    m.tool_input,
-                    m.tool_output,
-                    m.tool_call_id,
-                    m.thinking,
-                    m.parent_message_id,
-                    m.message_id,
-                    m.timestamp,
-                    msg_meta,
-                ],
-            )?;
-        }
     }
     Ok(())
 }
@@ -183,47 +159,6 @@ fn replace_sources(
             "INSERT INTO session_source (provider, path, file_mtime) VALUES (?1, ?2, ?3)",
             params![provider, path, mtime],
         )?;
-    }
-    Ok(())
-}
-
-/// Persist the typed semantic parts. One row per part, carrying the typed
-/// `payload_json`, the stable `kind` tag, and the denormalized `tool_call_id`.
-/// (`raw_json` is intentionally NOT persisted — it bloated the DB ~10× with
-/// verbatim records that no live code path reads back. The typed payload is
-/// the source of truth; `Unknown` payloads keep their raw JSON in-memory only.)
-fn replace_provider_parts(
-    tx: &Connection,
-    provider: &str,
-    assembled: &[AssembledSession],
-) -> AppResult<()> {
-    tx.execute("DELETE FROM session_part WHERE provider = ?1", [provider])?;
-    for a in assembled {
-        for p in &a.parts {
-            let meta = if p.provider_metadata_json.is_empty() {
-                "{}".to_string()
-            } else {
-                p.provider_metadata_json.clone()
-            };
-            tx.execute(
-                "INSERT INTO session_part (
-                   provider, session_id, seq, part_idx, kind, payload_json,
-                   tool_call_id, ts, raw_json, provider_metadata_json
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                params![
-                    provider,
-                    a.session.id,
-                    p.seq as i64,
-                    0i64,
-                    p.kind_tag(),
-                    p.payload_json(),
-                    p.tool_call_id,
-                    p.ts,
-                    "", // raw_json: see semantic::SemanticEvent — persisted as "" by design
-                    meta,
-                ],
-            )?;
-        }
     }
     Ok(())
 }
@@ -345,7 +280,9 @@ pub fn get_session(conn: &Connection, provider: &str, id: &str) -> AppResult<Opt
     }
 }
 
-/// Windowed message read from the store, ordered by `seq`.
+/// Windowed message read, ordered by `seq`. The index-only store parses the
+/// session's source files on demand (no `session_message` mirror); `total` is
+/// the live parsed count, not the reconcile-time `message_count`.
 pub fn read_messages(
     conn: &Connection,
     provider: &str,
@@ -353,101 +290,74 @@ pub fn read_messages(
     offset: u32,
     limit: u32,
 ) -> AppResult<MessageWindow> {
-    let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM session_message WHERE provider = ?1 AND session_id = ?2",
-        params![provider, id],
-        |r| r.get(0),
-    )?;
-    let mut stmt = conn.prepare(
-        "SELECT seq, role, content_text, tool_name, tool_input, tool_output,
-                tool_call_id, thinking, parent_message_id, message_id, timestamp,
-                provider_metadata_json
-         FROM session_message WHERE provider = ?1 AND session_id = ?2
-         ORDER BY seq LIMIT ?3 OFFSET ?4",
-    )?;
-    let end = offset.saturating_add(limit);
-    let take = if limit == 0 { -1i64 } else { (end - offset) as i64 };
-    let rows = stmt.query_map(params![provider, id, take, offset as i64], |r| {
-        Ok(Message {
-            seq: r.get::<_, i64>("seq")? as u32,
-            role: r.get("role")?,
-            content_text: r.get("content_text")?,
-            tool_name: r.get("tool_name")?,
-            tool_input: r.get("tool_input")?,
-            tool_output: r.get("tool_output")?,
-            tool_call_id: r.get("tool_call_id")?,
-            thinking: r.get("thinking")?,
-            parent_message_id: r.get("parent_message_id")?,
-            message_id: r.get("message_id")?,
-            timestamp: r.get("timestamp")?,
-            provider_metadata_json: r
-                .get::<_, Option<String>>("provider_metadata_json")?
-                .unwrap_or_else(|| "{}".into()),
-        })
+    let session = get_session(conn, provider, id)?.ok_or_else(|| {
+        AppError::NotFound(format!("session {provider}/{id} not found"))
     })?;
-    let mut messages = Vec::new();
-    for r in rows {
-        messages.push(r?);
-    }
+    let children = agent_to_child_map(conn, provider, id)?;
+    let parts = super::read_session_parts(&session, &children)?;
+    let total = parts.len() as u32;
+    let messages: Vec<Message> = parts.iter().map(|p| p.to_message()).collect();
+    let start = (offset as usize).min(messages.len());
+    let end = if limit == 0 {
+        messages.len()
+    } else {
+        start.saturating_add(limit as usize).min(messages.len())
+    };
     Ok(MessageWindow {
-        messages,
-        total: total as u32,
+        messages: messages[start..end].to_vec(),
+        total,
     })
 }
 
-/// Full-text-ish search across sessions (title/summary/project) plus a capped
-/// scan of message bodies. Returns deduped sessions newest first.
-pub fn search_sessions(conn: &Connection, query: &str, limit: u32) -> AppResult<Vec<Session>> {
-    let q = query.trim();
-    if q.is_empty() {
-        return list_sessions(conn, None, None, limit);
-    }
-    let pat = format!("%{}%", escape_like(q));
-
-    // Sessions whose title/summary/project match.
+/// Subagent-child lookup for on-demand reads: child id → itself, plus
+/// `agent_id` → id when the provider records a spawn name distinct from the
+/// child's canonical id. Mirrors the assembler's in-memory map — it links a
+/// parent's Task-tool invocation to the child conversation.
+pub(crate) fn agent_to_child_map(
+    conn: &Connection,
+    provider: &str,
+    parent_id: &str,
+) -> AppResult<std::collections::BTreeMap<String, String>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT s.provider, s.id, s.title, s.summary, s.project, s.cwd,
-                s.started_at, s.updated_at, s.ended_at, s.message_count, s.source_path,
-                s.parent_session_id, s.agent_id, s.is_subagent, s.resume_command,
-                s.child_count, s.source_files_json, s.provider_metadata_json
-         FROM session s
-         LEFT JOIN session_message m ON m.provider = s.provider AND m.session_id = s.id
-         WHERE s.title LIKE ?1 ESCAPE '\\'
-            OR s.summary LIKE ?1 ESCAPE '\\'
-            OR s.project LIKE ?1 ESCAPE '\\'
-            OR m.content_text LIKE ?1 ESCAPE '\\'
-         ORDER BY s.updated_at DESC LIMIT ?2",
+        "SELECT id, agent_id FROM session
+         WHERE provider = ?1 AND parent_session_id = ?2 AND is_subagent = 1",
     )?;
-    let rows = stmt.query_map(params![pat, limit as i64], row_to_session)?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
+    let rows = stmt.query_map(params![provider, parent_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+    })?;
+    let mut out = std::collections::BTreeMap::new();
+    for row in rows {
+        let (id, agent_id) = row?;
+        out.insert(id.clone(), id.clone());
+        if let Some(a) = agent_id {
+            out.insert(a, id);
+        }
     }
     Ok(out)
+}
+
+/// The reconcile-time rollups the context-pressure header reads O(1):
+/// `(est_tokens, top_consumer, last_model)`, `None` when the session is gone.
+pub(crate) fn session_rollups(
+    conn: &Connection,
+    provider: &str,
+    id: &str,
+) -> AppResult<Option<(Option<i64>, Option<String>, Option<String>)>> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT est_tokens, top_consumer, last_model
+             FROM session WHERE provider = ?1 AND id = ?2",
+            params![provider, id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?)
 }
 
 /// Total session row count (for diagnostics).
 pub fn count_sessions(conn: &Connection) -> AppResult<u32> {
     let n: i64 = conn.query_row("SELECT COUNT(*) FROM session", [], |r| r.get(0))?;
     Ok(n as u32)
-}
-
-/// Emit a session + its full message stream as the universal interchange JSON.
-pub fn export_session(conn: &Connection, provider: &str, id: &str) -> AppResult<String> {
-    let session = get_session(conn, provider, id)?.ok_or_else(|| {
-        AppError::NotFound(format!("session {provider}/{id} not found"))
-    })?;
-    let window = read_messages(conn, provider, id, 0, 0)?; // limit 0 → all
-    #[derive(serde::Serialize)]
-    struct Export<'a> {
-        session: &'a Session,
-        messages: &'a [Message],
-    }
-    let export = Export {
-        session: &session,
-        messages: &window.messages,
-    };
-    Ok(serde_json::to_string_pretty(&export)?)
 }
 
 /// Escape a user search fragment for `LIKE ? ESCAPE '\'`. Escapes the escape
@@ -467,16 +377,7 @@ fn escape_like(s: &str) -> String {
 
 /// Delete one session from the DB and remove its source files from disk.
 /// Returns the list of file paths that were removed (skipping any that
-/// didn't exist). The DB delete cascades to `session_message` and
-/// `session_part` via the table-level `DELETE` (no FK in the schema, but
-/// the `session_message` rows are matched on `(provider, session_id)` so
-/// a plain `DELETE FROM session_message WHERE provider=?1 AND session_id=?2`
-/// covers them; `session_part` shares the same composite key and is deleted
-/// the same way before the session row goes away).
-///
-/// ponytail: we delete parts/messages by their (provider, session_id) keys
-/// explicitly because the schema has no FK cascade — silently relying on a
-/// future FK to clean them up would leak rows on every delete.
+/// didn't exist).
 ///
 /// Disk files are removed only AFTER the DB transaction commits, and only
 /// when no OTHER session references the same path. This matters for
@@ -496,14 +397,6 @@ pub fn delete_session(conn: &Connection, provider: &str, id: &str) -> AppResult<
         removed.push(path.clone());
     }
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "DELETE FROM session_part WHERE provider = ?1 AND session_id = ?2",
-        params![provider, id],
-    )?;
-    tx.execute(
-        "DELETE FROM session_message WHERE provider = ?1 AND session_id = ?2",
-        params![provider, id],
-    )?;
     tx.execute(
         "DELETE FROM session_source
             WHERE provider = ?1 AND path IN (

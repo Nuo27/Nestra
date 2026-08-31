@@ -9,8 +9,9 @@
 //! ## Version policy
 //!
 //! Nestra builds the database from `SCHEMA_V1` on first launch. A database
-//! at an OLDER known version (v1) is upgraded in place by the idempotent
-//! canonical rebuild, after `db::pre_migration_backup` snapshots the file.
+//! at an OLDER known version (v1, v2) is upgraded in place (v2→v3 drops the
+//! session transcript mirror — see [`upgrade_to_v3`]), after
+//! `db::pre_migration_backup` snapshots the file.
 //! A database at an UNKNOWN version — a pre-release build, or one newer
 //! than this app — is refused: [`migrate`] returns a clear error and the
 //! caller exits safely without modifying the database, starting workers,
@@ -33,9 +34,13 @@ use crate::error::{AppError, AppResult};
 use rusqlite::Connection;
 
 /// The one canonical schema version. v2 added the `usage_daily` lifetime
-/// rollup + `idx_route_request_agent_started` (usage dashboard); the
-/// idempotent canonical rebuild carries older installs forward.
-pub const SCHEMA_VERSION: i32 = 2;
+/// rollup + `idx_route_request_agent_started` (usage dashboard). v3 turned
+/// sessions into an INDEX: the `session_message`/`session_part` transcript
+/// mirror was dropped (bodies are read on demand from the agents' own logs —
+/// the mirror had grown to ~600 MB of triple-stored tool bodies on heavy
+/// installs) and `session` gained reconcile-time rollups; the idempotent
+/// canonical rebuild carries older installs forward.
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// The full canonical schema as one DDL string. Every table Nestra owns is
 /// declared here exactly once — there is no per-version ALTER history.
@@ -147,7 +152,7 @@ CREATE TABLE IF NOT EXISTS mcp_server_env (
   PRIMARY KEY (server_id, agent_id, env_key)
 );
 
--- ---- sessions (derived cache, regenerated from agent logs) ---------------
+-- ---- sessions (INDEX into the agents' own logs; bodies read on demand) ----
 CREATE TABLE IF NOT EXISTS session (
   provider               TEXT NOT NULL,
   id                     TEXT NOT NULL,
@@ -167,6 +172,11 @@ CREATE TABLE IF NOT EXISTS session (
   child_count            INTEGER NOT NULL DEFAULT 0,
   source_files_json      TEXT NOT NULL DEFAULT '[]',
   provider_metadata_json TEXT NOT NULL DEFAULT '{}',
+  -- v3 rollups, computed at reconcile from the parsed parts, read O(1) by the
+  -- context-pressure header. NULL until a reconcile (re)walks the session.
+  est_tokens             INTEGER,
+  top_consumer           TEXT,
+  last_model             TEXT,
   PRIMARY KEY (provider, id)
 );
 CREATE INDEX IF NOT EXISTS idx_session_parent ON session(parent_session_id);
@@ -182,42 +192,6 @@ CREATE TABLE IF NOT EXISTS session_source (
   file_mtime INTEGER NOT NULL,
   PRIMARY KEY (provider, path)
 );
-
-CREATE TABLE IF NOT EXISTS session_message (
-  provider               TEXT NOT NULL,
-  session_id             TEXT NOT NULL,
-  seq                    INTEGER NOT NULL,
-  role                   TEXT NOT NULL,
-  content_text           TEXT NOT NULL,
-  tool_name              TEXT,
-  tool_input             TEXT,
-  tool_output            TEXT,
-  parent_message_id      TEXT,
-  message_id             TEXT,
-  timestamp              INTEGER,
-  tool_call_id           TEXT,
-  thinking               TEXT,
-  provider_metadata_json TEXT NOT NULL DEFAULT '{}',
-  PRIMARY KEY (provider, session_id, seq)
-);
--- idx_session_message(provider, session_id, seq) was identical to this PK —
--- dropped (it doubled write cost on every session reconcile for no gain).
-
-CREATE TABLE IF NOT EXISTS session_part (
-  provider               TEXT NOT NULL,
-  session_id             TEXT NOT NULL,
-  seq                    INTEGER NOT NULL,
-  part_idx               INTEGER NOT NULL DEFAULT 0,
-  kind                   TEXT NOT NULL,
-  payload_json           TEXT NOT NULL,
-  tool_call_id           TEXT,
-  ts                     INTEGER,
-  raw_json               TEXT NOT NULL,
-  provider_metadata_json TEXT NOT NULL DEFAULT '{}',
-  PRIMARY KEY (provider, session_id, seq, part_idx)
-);
--- idx_session_part(provider, session_id, seq) was a strict prefix of this PK
--- — dropped (redundant; doubled reconcile write cost).
 
 -- =========================================================================
 -- orchestration control plane
@@ -417,9 +391,14 @@ pub fn build_v1(conn: &Connection) -> AppResult<()> {
     // P1-1 tool-usage stats: per-tool-name invocation counts (observed on the
     // SSE relay AND the buffered path).
     ensure_column(conn, "route_request", "tool_names", "TEXT")?;
+    // v3 session rollups (index-only store): `CREATE TABLE IF NOT EXISTS`
+    // never backfills a column onto a pre-v3 `session` table.
+    ensure_column(conn, "session", "est_tokens", "INTEGER")?;
+    ensure_column(conn, "session", "top_consumer", "TEXT")?;
+    ensure_column(conn, "session", "last_model", "TEXT")?;
     // The `ProviderKind::Openrouter` variant was removed — OpenRouter now
     // binds through anthropic/openai rows like any OpenAI-compatible provider.
-    // Normalize any legacy `openrouter` protocol rows to `openai` (they were
+    // Normalize any legacy `openrouter` protocol rows to `openai-comp` (they were
     // wire-equivalent: same `/v1/chat/completions` path, Bearer auth).
     conn.execute_batch(
         "UPDATE endpoint_protocol SET protocol = 'openai-comp' WHERE protocol = 'openrouter';",
@@ -614,9 +593,8 @@ pub(crate) fn on_disk_version(conn: &Connection) -> AppResult<Option<i32>> {
 
 /// Schema migrator. Logic:
 ///   - empty DB (no `schema_version` table) → [`build_v1`].
-///   - v1 or current → idempotent canonical rebuild: upgrades older KNOWN
-///     versions in place (every statement is `IF NOT EXISTS`) and backfills
-///     tables added in a patch release without bumping the version.
+///   - v1 / v2 → [`upgrade_to_v3`] then the idempotent canonical rebuild.
+///   - current → idempotent canonical rebuild (a no-op on a current db).
 ///   - any other version → error. Either a pre-release build's data
 ///     directory or a database written by a newer app; the caller must
 ///     surface this as a clear message and exit without modifying the
@@ -624,12 +602,16 @@ pub(crate) fn on_disk_version(conn: &Connection) -> AppResult<Option<i32>> {
 pub fn migrate(conn: &Connection) -> AppResult<()> {
     match on_disk_version(conn)? {
         None => build_v1(conn),
-        Some(1) | Some(SCHEMA_VERSION) => {
-            // Idempotent: re-running the canonical DDL upgrades v1 → v2
-            // (additions only) and is a no-op on a current database. The
-            // stamp is upserted last-ish; a crash before it leaves the old
-            // version, and the next launch simply re-runs to convergence —
-            // `db::pre_migration_backup` snapshotted the file beforehand.
+        Some(1) | Some(2) => {
+            upgrade_to_v3(conn)?;
+            build_v1(conn)
+        }
+        Some(SCHEMA_VERSION) => {
+            // Idempotent: re-running the canonical DDL is a no-op on a
+            // current database. The stamp is upserted last-ish; a crash
+            // before it leaves the old version, and the next launch simply
+            // re-runs to convergence — `db::pre_migration_backup` snapshotted
+            // the file beforehand.
             build_v1(conn)
         }
         // A pre-release or unrecognized database. Refuse to guess: do NOT
@@ -643,6 +625,31 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
                 .unwrap_or_else(|_| "<Nestra data dir>".into())
         ))),
     }
+}
+
+/// v2 → v3 in-place upgrade: sessions became an INDEX (location + rollups) —
+/// the transcript mirror (`session_message` / `session_part`) is gone and
+/// bodies are read on demand from the agents' own logs. Every step is
+/// idempotent, so a crash mid-upgrade converges on the next launch (the
+/// version stamp lands only in `build_v1`, after this returns):
+///
+/// 1. drop the mirror tables (~600 MB of triple-stored tool bodies on a
+///    heavy install — the reason v3 exists),
+/// 2. clear `session_source` so the next reconcile re-walks every provider
+///    (the rollups were only materialized inside the dropped tables),
+/// 3. enable incremental auto_vacuum and VACUUM once — the only thing that
+///    hands the freed pages back to the filesystem. INCREMENTAL (not FULL)
+///    so daily writes stay cheap; later prunes shrink the file via
+///    `PRAGMA incremental_vacuum` instead of a full rewrite.
+fn upgrade_to_v3(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS session_message;
+         DROP TABLE IF EXISTS session_part;
+         DELETE FROM session_source;
+         PRAGMA auto_vacuum=INCREMENTAL;
+         VACUUM;",
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

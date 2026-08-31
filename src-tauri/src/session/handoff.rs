@@ -6,13 +6,15 @@
 //! already reads natively (`.pi/` context files). No black-box memory store.
 //!
 //! Pieces:
-//!   - [`parts_for_session`] — the FIRST reader of the `session_part` table
-//!     (until now it was write-only; the UI reads the projected
-//!     `session_message` table instead).
+//!   - on-demand parts — [`crate::session::read_session_parts`] over the
+//!     indexed session's own source files (the v3 index-only store has no
+//!     transcript mirror to read).
 //!   - [`build_sections`] / [`render_markdown`] — pure structural extraction
 //!     (no LLM call; a condensed-decisions pass is a later option).
 //!   - [`context_pressure`] — two numbers on read (estimated context use +
-//!     top consumer); a nudge, not a subsystem.
+//!     top consumer); a nudge, not a subsystem. The SessionDetail header
+//!     reads the reconcile-time rollups O(1); the char-width formula below
+//!     is the single source both paths share.
 //!   - persistence — markdown on disk (the artifact) + a `handoff` index row.
 //!     The file is user-editable after creation; Nestra never rewrites an
 //!     existing artifact (fresh uuid per handoff) and deleting a row leaves
@@ -31,7 +33,7 @@ use rusqlite::Connection;
 
 use crate::error::{AppError, AppResult};
 
-use super::semantic::{Part, PartPayload, parse_payload};
+use super::semantic::{Part, PartPayload};
 
 /// How many trailing assistant turns feed the "Decisions" section.
 const DECISION_TURNS: usize = 5;
@@ -52,49 +54,21 @@ const CHARS_PER_TOKEN: usize = 4;
 /// an importer starts promoting the model into parts.
 pub const DEFAULT_CONTEXT_WINDOW: i64 = 200_000;
 
-// ---- read side: the first session_part reader ------------------------------
+// ---- read side: on-demand parts ---------------------------------------------
 
-/// All parts of one session, ordered. Undecodable payloads are skipped (the
-/// typed payload is the source of truth; `raw_json` is persisted blank).
+/// All parts of one session, parsed from its indexed source files. The
+/// SessionDetail / handoff / review body reads all funnel through here —
+/// the index-only store keeps no transcript mirror.
 pub fn parts_for_session(
     conn: &Connection,
     provider: &str,
     session_id: &str,
 ) -> AppResult<Vec<Part>> {
-    let mut stmt = conn.prepare(
-        "SELECT seq, payload_json, tool_call_id, ts, provider_metadata_json
-         FROM session_part
-         WHERE provider = ?1 AND session_id = ?2
-         ORDER BY seq, part_idx",
-    )?;
-    let rows = stmt.query_map(rusqlite::params![provider, session_id], |r| {
-        Ok((
-            r.get::<_, u32>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, Option<String>>(2)?,
-            r.get::<_, Option<i64>>(3)?,
-            r.get::<_, String>(4)?,
-        ))
+    let session = super::store::get_session(conn, provider, session_id)?.ok_or_else(|| {
+        AppError::Validation(format!("session {provider}/{session_id} not found"))
     })?;
-    let mut parts = Vec::new();
-    for row in rows {
-        let (seq, payload_json, tool_call_id, ts, provider_metadata_json) = row?;
-        if let Some(payload) = parse_payload(&payload_json) {
-            parts.push(Part {
-                seq,
-                payload,
-                tool_call_id,
-                // `message_id`/`parent_message_id` are not persisted columns —
-                // branch-targeted handoffs are a later option.
-                message_id: None,
-                parent_message_id: None,
-                ts,
-                raw_json: String::new(),
-                provider_metadata_json,
-            });
-        }
-    }
-    Ok(parts)
+    let children = super::store::agent_to_child_map(conn, provider, session_id)?;
+    super::read_session_parts(&session, &children)
 }
 
 // ---- structural extraction --------------------------------------------------

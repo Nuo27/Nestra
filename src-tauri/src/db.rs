@@ -65,6 +65,11 @@ pub fn open(data_dir: &std::path::Path) -> AppResult<Connection> {
     //     SQLITE_BUSY the moment the write lock is held.
     //   • temp_store=MEMORY + a larger cache + mmap speed the read-heavy UI
     //     (session lists, route history) without meaningful RAM cost.
+    //   • journal_size_limit caps nestra.db-wal on disk: autocheckpoint
+    //     RECYCLES frames but never shrinks the file, so without a limit a
+    //     burst of writes (or a blocked checkpoint) leaves the WAL at its
+    //     high-water mark forever. TRUNCATE checkpoints (launch reconcile +
+    //     app exit) do the actual shrinking.
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;\
          PRAGMA synchronous=NORMAL;\
@@ -73,7 +78,8 @@ pub fn open(data_dir: &std::path::Path) -> AppResult<Connection> {
          PRAGMA temp_store=MEMORY;\
          PRAGMA cache_size=-20000;\
          PRAGMA mmap_size=268435456;\
-         PRAGMA wal_autocheckpoint=1000;",
+         PRAGMA wal_autocheckpoint=1000;\
+         PRAGMA journal_size_limit=67108864;",
     )?;
     Ok(conn)
 }
@@ -1147,6 +1153,12 @@ pub fn prune_observability_data(conn: &Connection) -> AppResult<u64> {
 
     if tasks > 0 {
         tracing::info!(days, tasks, "pruned observability data older than retention window");
+        // Hand the freed pages back to the filesystem (best-effort): the db
+        // runs incremental auto_vacuum since v3, so trimming is cheap —
+        // without this the file would sit at its high-water mark forever.
+        if let Err(e) = conn.execute_batch("PRAGMA incremental_vacuum(1024);") {
+            tracing::warn!(error = %e, "incremental_vacuum after prune failed");
+        }
     }
     Ok(tasks)
 }

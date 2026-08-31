@@ -132,6 +132,28 @@ fn missing_db_returns_empty() {
     assert!(collect(&dir.path().join("none.sqlite")).unwrap().is_empty());
 }
 
+/// The on-demand single-session read (index-only store): returns exactly the
+/// named session's events — same interpretation as the full collect — and
+/// `None` for a missing id or an empty shell.
+#[test]
+fn collect_one_reads_a_single_session() {
+    let dir = tempfile::Builder::new().prefix("").tempdir().unwrap();
+    let db = fixture_db(dir.path());
+
+    let parent = collect_one(&db, "sess-parent").unwrap().expect("parent present");
+    assert_eq!(parent.canonical_id, "sess-parent");
+    assert_eq!(parent.title, "Parent session");
+    // Same event set as the full collect's parent (synthetic skipped).
+    let full = collect(&db).unwrap();
+    let full_parent = full.iter().find(|r| r.canonical_id == "sess-parent").unwrap();
+    assert_eq!(parent.events.len(), full_parent.events.len());
+
+    let child = collect_one(&db, "sess-child").unwrap().expect("child present");
+    assert!(child.is_sidechain);
+
+    assert!(collect_one(&db, "sess-gone").unwrap().is_none(), "unknown id → None");
+}
+
 #[test]
 fn wrong_schema_returns_empty() {
     let dir = tempfile::Builder::new().prefix("").tempdir().unwrap();

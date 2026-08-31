@@ -280,26 +280,34 @@ fn save_list_inject_remove_knowledge_round_trip() {
 
     let conn = Connection::open_in_memory().unwrap();
     crate::schema::build_v1(&conn).unwrap();
-    conn.execute(
-        "INSERT INTO session (provider, id, title, summary, started_at, updated_at,
-                                  message_count, source_path, resume_command, cwd)
-             VALUES ('pi-cli','s-1','Fix login','',0,0,2,'x','pi resume',?1)",
-        rusqlite::params![repo.path().to_string_lossy()],
+    // Index row + the REAL source file (index-only store: parts come from
+    // an on-demand parse, not from a mirror table).
+    let src = repo.path().join("s-1.jsonl");
+    std::fs::write(
+        &src,
+        concat!(
+            r#"{"type":"session","id":"s-1","timestamp":"2026-08-05T02:25:28.916Z","cwd":"C:\\x"}"#,
+            "\n",
+            r#"{"type":"message","id":"a","message":{"role":"user","content":[{"type":"text","text":"goal text"}]},"timestamp":"2026-08-05T02:25:30.000Z"}"#,
+            "\n",
+        ),
     )
     .unwrap();
+    let source_files = format!(r#"["{}"]"#, src.to_string_lossy().replace('\\', "\\\\"));
     conn.execute(
-        "INSERT INTO session_part (provider, session_id, seq, part_idx, kind, payload_json,
-                                       tool_call_id, raw_json, provider_metadata_json)
-             VALUES ('pi-cli','s-1',0,0,'user_message',?1,NULL,'','{}')",
+        "INSERT INTO session (provider, id, title, summary, started_at, updated_at,
+                                  message_count, source_path, resume_command, cwd,
+                                  source_files_json)
+             VALUES ('pi-cli','s-1','Fix login','',0,0,1,'x','pi resume',?1,?2)",
         rusqlite::params![
-            serde_json::to_string(&PartPayload::UserMessage { text: "goal text".into() })
-                .unwrap()
+            repo.path().to_string_lossy(),
+            source_files,
         ],
     )
     .unwrap();
 
     let parts = parts_for_session(&conn, "pi-cli", "s-1").unwrap();
-    assert_eq!(parts.len(), 1, "the first session_part reader returns the seeded part");
+    assert_eq!(parts.len(), 1, "on-demand read parses the indexed source file");
     let md = render_markdown("Fix login", &build_sections(&parts));
 
     let info = save_handoff(&conn, "pi-cli", "s-1", &md).unwrap();

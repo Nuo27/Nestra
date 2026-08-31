@@ -127,6 +127,14 @@ pub fn run_launch_reconcile(
                 if let Err(e) = crate::db::prune_observability_data(&conn) {
                     tracing::warn!(error = %e, "observability prune failed");
                 }
+                // Fold the launch writes into the main db and TRUNCATE the
+                // WAL file — autocheckpoint only recycles frames, it never
+                // shrinks nestra.db-wal on disk. Best-effort: a concurrent
+                // reader can hold the truncate back (busy_timeout waits, a
+                // real conflict just skips it this launch).
+                if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+                    tracing::warn!(error = %e, "launch wal checkpoint failed");
+                }
                 if let Ok(mut g) = flag.lock() {
                     *g = true;
                 }

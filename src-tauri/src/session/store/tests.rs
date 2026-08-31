@@ -159,19 +159,6 @@ fn list_sessions_search_matches_title_and_respects_limit() {
 }
 
 #[test]
-fn search_sessions_matches_title_and_content() {
-    let (home, _home_g) = seed_tree();
-    let (_reconcile_g, _db, conn) = reconcile(&home);
-    let hits = search_sessions(&conn, "alpha", 100).unwrap();
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].id, OTHER);
-    // Message content is searched too.
-    let body = search_sessions(&conn, "one-line answer", 100).unwrap();
-    assert_eq!(body.len(), 1);
-    assert_eq!(body[0].id, PARENT);
-}
-
-#[test]
 fn list_children_returns_subagent_ordered_by_started_at() {
     let (home, _home_g) = seed_tree();
     let (_reconcile_g, _db, conn) = reconcile(&home);
@@ -211,19 +198,41 @@ fn read_messages_offsets_and_limits_window() {
     let past = read_messages(&conn, "claude-code-cli", PARENT, 10, 5).unwrap();
     assert!(past.messages.is_empty());
     assert_eq!(past.total, 3);
+    // Unknown session -> NotFound (no silent empty window).
+    let err = read_messages(&conn, "claude-code-cli", "nope", 0, 0).unwrap_err();
+    assert!(matches!(err, AppError::NotFound(_)));
 }
 
+/// The index-only reconcile persists rollups (message_count, est_tokens,
+/// top_consumer, last_model) computed from the parsed parts — the pressure
+/// header reads them O(1). No `session_message`/`session_part` rows exist.
 #[test]
-fn export_session_yields_parseable_json_with_messages() {
+fn reconcile_persists_index_rollups_only() {
     let (home, _home_g) = seed_tree();
     let (_reconcile_g, _db, conn) = reconcile(&home);
-    let out = export_session(&conn, "claude-code-cli", PARENT).unwrap();
-    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v["session"]["id"], PARENT);
-    assert_eq!(v["messages"].as_array().unwrap().len(), 3);
-    // Unknown session -> specific NotFound.
-    let err = export_session(&conn, "claude-code-cli", "nope").unwrap_err();
-    assert!(matches!(err, AppError::NotFound(_)));
+    let (est, top, model, count): (Option<i64>, Option<String>, Option<String>, i64) = conn
+        .query_row(
+            "SELECT est_tokens, top_consumer, last_model, message_count
+             FROM session WHERE provider='claude-code-cli' AND id=?1",
+            params![PARENT],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(count, 3);
+    // Seed texts: "what is the prime goal" (22) + "a one-line answer" (17)
+    // + "and the second question" (23) = 62 chars / 4.
+    assert_eq!(est, Some(15), "char-based estimate (62 chars / 4)");
+    assert_eq!(top.as_deref(), Some("message text"));
+    assert_eq!(model, None, "seeded lines carry no model metadata");
+    let mirror: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master
+             WHERE type='table' AND name IN ('session_part','session_message')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(mirror, 0, "no mirror tables — dropped by the v3 migration");
 }
 
 #[test]
@@ -266,29 +275,4 @@ fn delete_session_when_source_file_already_deleted() {
     let removed = delete_session(&conn, "claude-code-cli", OTHER).unwrap();
     assert!(removed.contains(&s.source_path));
     assert!(get_session(&conn, "claude-code-cli", OTHER).unwrap().is_none());
-}
-
-/// Pin the `session_part.raw_json` regression: parts persist with a blank
-/// raw_json (NOT NULL) while payload/all fields land intact.
-#[test]
-fn session_part_rows_persist_with_blank_raw_json() {
-    let (home, _home_g) = seed_tree();
-    let (_reconcile_g, _db, conn) = reconcile(&home);
-    let spec = get_session(&conn, "claude-code-cli", PARENT).unwrap().unwrap();
-    let parts: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM session_part WHERE provider=?1 AND session_id=?2",
-            params!["claude-code-cli", spec.id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(parts, spec.message_count as i64);
-    let raw: String = conn
-        .query_row(
-            "SELECT raw_json FROM session_part WHERE provider=?1 AND session_id=?2 LIMIT 1",
-            params!["claude-code-cli", spec.id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(raw.is_empty(), "raw_json must be stored as blank (\"\"), got {raw:?}");
 }

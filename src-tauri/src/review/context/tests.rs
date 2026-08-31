@@ -143,23 +143,25 @@ fn gather_extracts_session_and_diff_degrades_without_git() {
     let dir = tempfile::Builder::new().prefix("").tempdir().unwrap();
     let conn = Connection::open_in_memory().unwrap();
     crate::schema::build_v1(&conn).unwrap();
-    conn.execute(
-        "INSERT INTO session (provider, id, title, summary, started_at, updated_at,
-                                  message_count, source_path, resume_command, cwd)
-             VALUES ('pi-cli','s-1','Fix login','',0,0,1,'x','pi --session s-1',?1)",
-        rusqlite::params![dir.path().to_string_lossy()],
+    // Index row + the REAL source file (index-only store — no part mirror).
+    let src = dir.path().join("s-1.jsonl");
+    std::fs::write(
+        &src,
+        concat!(
+            r#"{"type":"session","id":"s-1","timestamp":"2026-08-05T02:25:28.916Z","cwd":"C:\\x"}"#,
+            "\n",
+            r#"{"type":"message","id":"a","message":{"role":"user","content":[{"type":"text","text":"goal text"}]},"timestamp":"2026-08-05T02:25:30.000Z"}"#,
+            "\n",
+        ),
     )
     .unwrap();
+    let source_files = format!(r#"["{}"]"#, src.to_string_lossy().replace('\\', "\\\\"));
     conn.execute(
-        "INSERT INTO session_part (provider, session_id, seq, part_idx, kind, payload_json,
-                                       tool_call_id, raw_json, provider_metadata_json)
-             VALUES ('pi-cli','s-1',0,0,'user_message',?1,NULL,'','{}')",
-        rusqlite::params![
-            serde_json::to_string(&crate::session::PartPayload::UserMessage {
-                text: "goal text".into()
-            })
-            .unwrap()
-        ],
+        "INSERT INTO session (provider, id, title, summary, started_at, updated_at,
+                                  message_count, source_path, resume_command, cwd,
+                                  source_files_json)
+             VALUES ('pi-cli','s-1','Fix login','',0,0,1,'x','pi --session s-1',?1,?2)",
+        rusqlite::params![dir.path().to_string_lossy(), source_files],
     )
     .unwrap();
     let (pack, cwd) = gather(&conn, "pi-cli", "s-1").unwrap();

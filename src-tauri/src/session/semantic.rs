@@ -10,9 +10,11 @@
 //!   events into conversations, pairs tool invocations with their results,
 //!   links sub-agents to their parent, sequences everything, and emits the
 //!   canonical [`Part`] list stored per session.
-//! - The **store/UI** read [`Part`]s. A [`Part`] projects losslessly to the
-//!   flat [`Message`](super::Message) row so the existing IPC contract
-//!   is unchanged, but the typed payload is the source of truth.
+//! - The **store/UI** read [`Part`]s — on demand, parsed straight from the
+//!   agents' own logs (the v3 index-only session store mirrors nothing). A
+//!   [`Part`] projects losslessly to the flat [`Message`](super::Message) row
+//!   so the existing IPC contract is unchanged; the typed payload is the
+//!   source of truth.
 //!
 //! ## The losslessness invariant
 //!
@@ -25,8 +27,8 @@
 //! - Every [`Part`] also carries `provider_metadata_json`: provider fields
 //!   the typed payload doesn't model (token usage, model name) are PROMOTED
 //!   there via [`provider_meta`] as normalized `usage` + `model` keys.
-//!   (`raw_json` is persisted blank by the store — a deliberate size
-//!   decision; the typed payload + metadata are the source of truth.)
+//!   (`raw_json` is kept in-memory only — the on-demand parse holds it for
+//!   the lifetime of the read; nothing body-shaped is persisted.)
 //!
 //! Adding a new provider = implement one importer (emit [`SemanticEvent`]s) +
 //! register it. No changes to the assembler, store, or UI.
@@ -66,10 +68,10 @@ pub struct Attachment {
     pub title: Option<String>,
 }
 
-/// Stable string tags for each part kind, used as the denormalized `kind`
-/// column in `session_part` so SQL can filter without parsing JSON.
+/// Stable string tags for each part kind — the shared vocabulary for
+/// renderer dispatch and consumer-side filtering.
 ///
-/// Keep these strings stable: they are persisted and read back.
+/// Keep these strings stable: part kinds are compared across the codebase.
 pub mod kind {
     pub const USER_MESSAGE: &str = "user_message";
     pub const ASSISTANT_MESSAGE: &str = "assistant_message";
@@ -225,8 +227,9 @@ impl SemanticEvent {
 // Part — the canonical, stored, sequenced unit
 // ---------------------------------------------------------------------------
 
-/// One canonical conversation unit, post-assembly. This is what the store
-/// persists (as `session_part`) and what the UI ultimately renders. It is an
+/// One canonical conversation unit, post-assembly. This is what the on-demand
+/// body reads produce (parsed straight from the agent's own logs) and what
+/// the UI ultimately renders. It is an
 /// assembler-sequenced [`SemanticEvent`] with pairing/subagent links resolved.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Part {
@@ -243,17 +246,6 @@ pub struct Part {
 }
 
 impl Part {
-    /// Stable kind tag (delegates to the payload).
-    pub fn kind_tag(&self) -> &'static str {
-        self.payload.kind_tag()
-    }
-
-    /// Serialize the typed payload to a JSON string for storage. Uses the
-    /// internally-tagged representation so `kind` is recoverable on read.
-    pub fn payload_json(&self) -> String {
-        serde_json::to_string(&self.payload).unwrap_or_else(|_| "{}".to_string())
-    }
-
     /// Project this part onto the flat [`Message`] row, so the existing
     /// `session_read` IPC contract (`MessageWindow`) stays byte-compatible
     /// while the typed payload remains the source of truth.
@@ -388,15 +380,6 @@ impl Part {
             provider_metadata_json: serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".into()),
         }
     }
-}
-
-/// Deserialize a [`PartPayload`] from its stored JSON (the internally-tagged
-/// representation produced by [`Part::payload_json`]). Used when reading parts
-/// back from SQLite into the typed model (e.g. by the handoff builder).
-/// Best-effort: `None` on malformed JSON — an undecodable part is treated as
-/// absent rather than fatal.
-pub fn parse_payload(json: &str) -> Option<PartPayload> {
-    serde_json::from_str::<PartPayload>(json).ok()
 }
 
 /// Normalize a raw provider record/message object into canonical part
