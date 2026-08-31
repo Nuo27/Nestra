@@ -69,8 +69,8 @@ fn opencode_desktop_dirs() -> Vec<PathBuf> {
     // differs. Derived from `local_app_data` (the XDG_DATA_HOME equivalent)
     // so Linux (`~/.local/share/opencode/sessions`), macOS
     // (`~/Library/Application Support/opencode/sessions`) and Windows all
-    // resolve correctly — the old hardcoded `~/.local/share/...` ignored
-    // XDG_DATA_HOME entirely.
+    // resolve correctly — a hardcoded `~/.local/share/...` would miss
+    // XDG_DATA_HOME overrides.
     if let Some(local) = &dirs.local_app_data {
         out.push(local.join("opencode").join("sessions"));
     }

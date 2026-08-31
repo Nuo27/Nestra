@@ -75,8 +75,8 @@ export function SyncIndicator({
 function signature(data: unknown): string {
   if (data == null) return "∅";
   if (Array.isArray(data)) {
-    // Fingerprint a list from (length, head, mid, tail) — the old (length,
-    // first, slice(1,4)) sample missed a change at index ≥ 4 entirely.
+    // Fingerprint a list from (length, head, mid, tail) — a shallower sample
+    // misses changes inside the middle span.
     const n = data.length;
     const head = JSON.stringify(data[0]);
     const mid = JSON.stringify(data[Math.floor(n / 2)]);

@@ -315,9 +315,8 @@ async fn dispatch(
     Ok(match handled {
         Ok(resp) => resp,
         Err(e) => {
-            // A handler error used to tear the connection down with no
-            // response — the agent saw a bare ECONNRESET. Surface a 500 +
-            // a log line instead so failures are diagnosable.
+            // Surface a handler error as a 500 + a log line — never tear the
+            // connection down silently (the agent would only see ECONNRESET).
             tracing::error!("gateway: handler error: {e:?}");
             internal_error()
         }

@@ -37,9 +37,9 @@ use rusqlite::Connection;
 /// rollup + `idx_route_request_agent_started` (usage dashboard). v3 turned
 /// sessions into an INDEX: the `session_message`/`session_part` transcript
 /// mirror was dropped (bodies are read on demand from the agents' own logs —
-/// the mirror had grown to ~600 MB of triple-stored tool bodies on heavy
-/// installs) and `session` gained reconcile-time rollups; the idempotent
-/// canonical rebuild carries older installs forward.
+/// the mirror triple-stored every tool body) and `session` gained
+/// reconcile-time rollups; the idempotent canonical rebuild carries older
+/// installs forward.
 pub const SCHEMA_VERSION: i32 = 3;
 
 /// The full canonical schema as one DDL string. Every table Nestra owns is
@@ -383,12 +383,12 @@ pub fn build_v1(conn: &Connection) -> AppResult<()> {
     // the canonical DDL after an install was created. Close that gap
     // idempotently for the one column that has drifted (see the test below).
     ensure_column(conn, "mcp_server", "disabled_agents", "TEXT NOT NULL DEFAULT '[]'")?;
-    // Per-binding Direct-wire override added with the protocol picker.
+    // Per-binding Direct-wire protocol override.
     ensure_column(conn, "agent_provider_binding", "protocol", "TEXT")?;
-    // Streaming-usage capture (Smart Gateway fix 1): tool-call count observed
+    // Streaming-usage capture: tool-call count observed
     // on the SSE relay, backfilled after the stream ends.
     ensure_column(conn, "route_request", "tool_calls", "INTEGER")?;
-    // P1-1 tool-usage stats: per-tool-name invocation counts (observed on the
+    // Tool-usage stats: per-tool-name invocation counts (observed on the
     // SSE relay AND the buffered path).
     ensure_column(conn, "route_request", "tool_names", "TEXT")?;
     // v3 session rollups (index-only store): `CREATE TABLE IF NOT EXISTS`
@@ -633,8 +633,8 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
 /// idempotent, so a crash mid-upgrade converges on the next launch (the
 /// version stamp lands only in `build_v1`, after this returns):
 ///
-/// 1. drop the mirror tables (~600 MB of triple-stored tool bodies on a
-///    heavy install — the reason v3 exists),
+/// 1. drop the mirror tables (they triple-stored every tool body — the
+///    reason v3 exists),
 /// 2. clear `session_source` so the next reconcile re-walks every provider
 ///    (the rollups were only materialized inside the dropped tables),
 /// 3. enable incremental auto_vacuum and VACUUM once — the only thing that

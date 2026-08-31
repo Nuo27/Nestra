@@ -159,8 +159,8 @@ export function ProvidersPage() {
         id: finalId,
         displayName: input.display_name,
       });
-      // Parallel protocol adds — the old serial await loop wasted a
-      // round-trip per protocol.
+      // Protocol adds run in parallel — one round-trip instead of one
+      // per protocol.
       const results = await Promise.allSettled(
         input.protocols.map((proto) =>
           endpointAddProtocol(created.id, proto.protocol, proto.base_url),

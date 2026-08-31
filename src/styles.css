@@ -334,12 +334,10 @@ a:focus-visible,
  * data-active — i.e. the chosen/hovered/selected state. Default state is
  * plain text everywhere else.
  * The slot is reserved in ALL states: content and margins never change, so
- * revealing the bracket costs ZERO layout. The old content-swap approach
- * (empty content idle → `[` `]` + margins on hover) grew the control
- * ~1.5em on hover and reflowed neighbouring rows (the quota keep-alive
- * header jumped height). The cost is that bracketed controls carry the
- * bracket width even when idle — reads as slightly more internal padding,
- * accepted in exchange for no hover shift.
+ * revealing the bracket costs ZERO layout — a hover content-swap would
+ * reflow neighbouring rows (header height jump). The cost is that bracketed
+ * controls carry the bracket width even when idle — reads as slightly more
+ * internal padding, accepted in exchange for no hover shift.
  * ────────────────────────────────────────────────────────────────────── */
 .brackets-state::before {
   content: "[";

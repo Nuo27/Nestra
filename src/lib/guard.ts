@@ -8,7 +8,7 @@ import { useEffect, useRef } from "react";
 /// TanStack Query already dedupes + serializes per-key useQuery paths — do
 /// NOT wrap those. This is only for fire-and-await sequences that write local
 /// component state, where a newer call (or unmount) must invalidate an
-/// in-flight older one (decision #5: old requests must not overwrite new).
+/// in-flight older one: an older request must never overwrite a newer result.
 export function makeGuard() {
   let gen = 0;
   return {
@@ -43,8 +43,7 @@ export async function cancellableInvoke<T>(
     if (guard.isCurrent(g)) return { stale: false, value };
   } catch (e) {
     // Distinguish a genuine failure from a superseded call: both return
-    // "no result", but a real error is worth a debug log (the old code
-    // collapsed them silently, making failures undiagnosable).
+    // "no result", but a real error is logged so failures stay diagnosable.
     if (guard.isCurrent(g)) {
       console.debug("[guard] cancellable invoke failed:", e);
       return { stale: true, error: e };

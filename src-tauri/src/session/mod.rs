@@ -150,8 +150,8 @@ fn blocks_to_text(arr: &[Value]) -> String {
     out
 }
 
-/// Interpret a Claude/Pi content-block array as `(payload, call_id)` pairs.
-/// This is the semantic replacement for the old `extract_blocks`: each
+/// Interpret a Claude/Pi content-block array as `(payload, call_id)` pairs:
+/// each
 /// recognized block becomes a typed [`PartPayload`]; unrecognized blocks become
 /// `Unknown` with the verbatim JSON (never silently dropped). The `call_id` is
 /// set on `tool_use`/`tool_result` payloads so the importer can stamp the
@@ -328,10 +328,9 @@ fn interpret_content_blocks(arr: &[Value], role: &str) -> Vec<(PartPayload, Opti
     out
 }
 
-/// Flush accumulated text as a message payload. Called before every non-text
-/// block: the old code pushed text after the WHOLE array, so a `text`
-/// followed by `tool_use` rendered the tool call first and the text last
-/// (reversed order), and separated text blocks merged into one message.
+/// Flush accumulated text as a message payload before every non-text
+/// block, so text keeps its source position relative to tool calls and
+/// separated text blocks stay separate messages.
 fn flush_text_buf(
     text_buf: &mut String,
     role: &str,
@@ -350,8 +349,8 @@ fn flush_text_buf(
 
 /// Claude records MCP-served tool calls as `mcp__<server>__<tool>`; split that
 /// into provenance. Returns `None` for ordinary (non-MCP) tool names.
-/// `pub(crate)`: also the attribution rule for the MCP usage aggregation
-/// (P1-1) — one source of truth for the namespace.
+/// `pub(crate)`: also the attribution rule for the MCP usage aggregation —
+/// one source of truth for the namespace.
 pub(crate) fn parse_mcp_tool_name(name: &str) -> Option<McpProvenance> {
     let rest = name.strip_prefix("mcp__")?;
     let mut it = rest.splitn(2, "__");
@@ -369,7 +368,7 @@ pub(crate) fn parse_mcp_tool_name(name: &str) -> Option<McpProvenance> {
 // All share a JSONL-on-disk shape; only canonical-id extraction and a
 // couple of envelope quirks differ. `parse_jsonl_events` does one forward pass
 // producing semantic events; `canonical_id_and_events` resolves identity per
-// provider. This replaces the old `parse_jsonl_raw` + `extract_blocks`.
+// provider.
 // ============================================================================
 
 /// Result of one JSONL pass: identity + scalar metadata + semantic events.
@@ -501,7 +500,7 @@ pub(crate) fn parse_jsonl_events(path: &Path) -> AppResult<JsonlParse> {
                         title: &mut Option<String>,
                         summary: &mut Option<String>| {
             // Capture title (first user) / summary (last assistant) as a side
-            // effect, mirroring the old behavior for parity.
+            // effect of the walk.
             match &payload {
                 PartPayload::UserMessage { text } if title.is_none() => {
                     *title = Some(text.chars().take(80).collect());
@@ -906,11 +905,11 @@ pub fn read_session_parts(
 // ============================================================================
 // Shared, provider-agnostic assembler
 //
-// Replaces the old normalize + group_messages double-parse. One parse per
-// reconcile. Groups RawFiles by canonical id, splits sidechains, pairs
+// One parse per reconcile. Groups RawFiles by canonical id, splits sidechains,
+// pairs
 // ToolInvocation↔ToolResult by call_id, links SubAgent events to child
-// sessions (filling child_session_id on the parent ToolInvocation — previously
-// lost), derives title/summary/cwd/timestamps, and re-sequences.
+// sessions (filling child_session_id on the parent ToolInvocation), derives
+// title/summary/cwd/timestamps, and re-sequences.
 // ============================================================================
 
 /// One assembled conversation: the session header plus its sequenced parts.
@@ -922,10 +921,9 @@ pub struct AssembledSession {
 /// Resume command for one session id. Inline so the persisted
 /// `resume_command` field and `build_resume_command` stay consistent — these
 /// must match the templates in `provider.rs::default_provider_registry`.
-/// (Pi/OpenCode use `--session`, not the older `--resume`/`--resume-id`.)
+/// (Pi/OpenCode use `--session`, not `--resume`/`--resume-id`.)
 /// Single source: the `SessionRef.resume_command` template in the agent
-/// registry (previously a second hardcoded map here that had to be kept in
-/// sync with it).
+/// registry.
 fn resume_for(provider: &str, id: &str) -> String {
     resume_command_for(provider)
         .map(|t| t.replace("{id}", id))
@@ -1202,10 +1200,9 @@ fn derive_header(
 /// Resume command template for a provider. Inline so the persisted
 /// `resume_command` field and `build_resume_command` stay consistent — these
 /// must match the templates in `provider.rs::default_provider_registry`.
-/// (Pi/OpenCode use `--session`, not the older `--resume`/`--resume-id`.)
+/// (Pi/OpenCode use `--session`, not `--resume`/`--resume-id`.)
 /// Single source: the `SessionRef.resume_command` template in the agent
-/// registry (previously a second hardcoded map here that had to be kept in
-/// sync with it).
+/// registry.
 fn resume_command_for(provider: &str) -> Option<&'static str> {
     crate::agents::agent_spec(provider)
         .and_then(|a| a.session)

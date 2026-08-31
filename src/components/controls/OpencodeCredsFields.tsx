@@ -26,9 +26,9 @@ export function OpencodeCredsFields({ endpointId }: { endpointId: string }) {
     queryFn: () => opencodeGetCreds(endpointId),
     // This is an editor: once the user types, a silent background refetch
     // (window focus / reconnect — the cookie workflow requires alt-tabbing
-    // to the browser) used to reset the workspace field to the stored value
-    // and re-lock the Save button with no error anywhere. Keep refetches
-    // explicit (invalidation after save) only.
+    // to the browser) would clobber the edited field and re-lock Save with
+    // no error anywhere. Keep refetches explicit (invalidation after save)
+    // only.
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
@@ -89,8 +89,7 @@ export function OpencodeCredsFields({ endpointId }: { endpointId: string }) {
       await qc.invalidateQueries({ queryKey: qk.quotaRefresh() });
       await qc.invalidateQueries({ queryKey: qk.endpointQuota(endpointId) });
     } catch (e) {
-      // The old try/finally had no catch: a rejected save was swallowed
-      // with zero user feedback.
+      // A rejected save must surface as user feedback, never be swallowed.
       setSaveError(extractError(e) ?? String(e));
     } finally {
       setSaving(false);

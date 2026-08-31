@@ -92,7 +92,7 @@ fn join_models_paths() {
 #[test]
 fn join_models_path_v1_base_does_not_double() {
     // opencode-go's base already ends in /v1 — the anthropic model list
-    // must not become /v1/v1/models (this used to 404 during validation).
+    // must not become /v1/v1/models.
     assert_eq!(
         join_models_path("https://opencode.ai/zen/go/v1", ProviderKind::Anthropic),
         "https://opencode.ai/zen/go/v1/models"

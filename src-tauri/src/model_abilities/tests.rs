@@ -17,8 +17,8 @@ fn ab(reasoning: bool, tool_call: bool, attachment: bool) -> ModelAbilities {
 fn normalize_strips_prefix_markers_and_date() {
     assert_eq!(normalize("models/gpt-4o"), "gpt-4o");
     assert_eq!(normalize(" GPT-4o "), "gpt-4o");
-    // Bracket content is DROPPED, not kept: the old behavior produced
-    // "claude-sonnet-4-51m" which never matched the generated id.
+    // Bracket content is DROPPED, not kept: keeping it yields
+    // "claude-sonnet-4-51m", which never matches the generated id.
     assert_eq!(normalize("claude-sonnet-4-5[1M]"), "claude-sonnet-4-5");
     assert_eq!(normalize("minimax-m3[1m]"), "minimax-m3");
     assert_eq!(normalize("grok-4(beta)"), "grok-4");
@@ -50,8 +50,7 @@ fn bracket_marker_ids_match_generated_ids() {
 #[test]
 fn partial_limit_overlap_merges_not_conflicts() {
     // Same context/output, but `input` reported by only ONE source —
-    // the old whole-struct `!=` treated the None-vs-Some as a conflict
-    // and dropped the mergeable data.
+    // a None-vs-Some must merge, not conflict.
     let a = ModelAbilities {
         limit: Some(ModelLimit { context: 128000, output: 16384, input: Some(100000) }),
         ..Default::default()

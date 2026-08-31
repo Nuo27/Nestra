@@ -310,7 +310,7 @@ fn write_gateway_models(config_path: &Path, alias: &crate::config_writer::Gatewa
     // `max_tokens` field name): pi's defaults for an unknown provider are
     // the newer OpenAI conventions (`developer` role, `store`,
     // `max_completion_tokens`) which MiniMax-style backends reject with
-    // "[1214] Incorrect role information" — observed via opencode-go. The
+    // "[1214] Incorrect role information". The
     // gateway bridges whatever dialect the upstream actually speaks.
     let mut model = serde_json::Map::new();
     model.insert("id".into(), serde_json::Value::String(alias.model_alias.id.clone()));

@@ -16,8 +16,8 @@ export function InfoButton({
   tooltip?: string
 }) {
   const { t } = useTranslation()
-  // Default is LOCALIZED ("How this works"): the old hardcoded English
-  // default reached every non-English user's screen reader.
+  // Default is LOCALIZED ("How this works") so screen-reader labels stay
+  // localized for non-English users.
   const label = tooltip ?? t("common.howItWorks")
   return (
     <Tip content={content}>

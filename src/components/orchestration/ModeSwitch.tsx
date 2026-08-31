@@ -69,7 +69,7 @@ export function useAgentModeToggle(agentId: string, supported: boolean) {
 ///           config (the agent talks straight to the bound provider).
 ///   Routed — Nestra writes a stable gateway alias instead; the gateway
 ///           resolves provider/model per task, observes quota, migrates on
-///           failure. Provider switching no longer rewrites the config.
+///           failure. Provider switching never rewrites the config.
 ///
 /// Rendered on the shared `SegmentedControl` (the one sanctioned boxed
 /// single-select, see DESIGN.md §5). State comes from

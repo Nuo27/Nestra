@@ -4,7 +4,7 @@
 //! A `ConfigWriter` knows how to express "use this Provider" in its CLI's
 //! global config file, and how to revert the change.
 //!
-//! Semantics (see PLAN.md §Provider switching):
+//! Semantics:
 //! - First `apply` copies the current config to `<config>.nestra-backup`.
 //!   The backup is taken once and never overwritten by later switches.
 //! - `apply` rewrites only the block Nestra owns; the rest of the file is
@@ -450,7 +450,7 @@ pub fn capture_factory(config_path: &Path, force: bool) -> AppResult<()> {
 /// observed half-written — a crash either completes the swap or leaves the
 /// previous bytes intact (the temp is removed on failure). `std::fs::rename`
 /// atomically replaces a same-directory file on both Unix and Windows, so no
-/// extra platform crate is needed. Mirrors cc-switch's atomic-write guarantee.
+/// extra platform crate is needed.
 ///
 /// The temp name embeds a process-unique sequence so concurrent in-process
 /// writers to the same path cannot truncate each other's temp file. On Unix

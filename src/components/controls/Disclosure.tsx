@@ -10,8 +10,8 @@ import { ChevronRight } from "lucide-react"
 ///
 /// Controlledness is decided by `open !== undefined` (NOT by the presence of
 /// `onOpenChange`): `onOpenChange` without `open` is the common
-/// "parent wants to know, child owns the state" pattern, which the old check
-/// broke (the panel could never open). Either way, the callback fires.
+/// "parent wants to know, child owns the state" pattern. Either way, the
+/// callback fires.
 export function Disclosure({
   header,
   children,

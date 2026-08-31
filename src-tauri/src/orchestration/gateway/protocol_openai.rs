@@ -129,7 +129,7 @@ pub async fn handle_bytes(
     }
 
     // Capability requirements derived from the body activate the router's
-    // capability stage (tool/vision; Smart Gateway fix 2). Conservative:
+    // capability stage (tool/vision). Conservative:
     // absent signals stay false → no filtering.
     ctx.required_capabilities =
         crate::orchestration::capability_registry::derive_capability_req(

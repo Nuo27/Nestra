@@ -167,8 +167,8 @@ export function KeepAliveEditor({ endpointId }: { endpointId: string }) {
       await qc.invalidateQueries({ queryKey: qk.keepaliveStatus(endpointId) });
       await qc.invalidateQueries({ queryKey: qk.quotaRefresh() });
     } catch (e) {
-      // The old try/finally had no catch: a rejected ping was an unhandled
-      // rejection with zero user feedback.
+      // A rejected ping must surface as user feedback, not an unhandled
+      // rejection.
       setTestError(extractError(e) ?? String(e));
     } finally {
       setTesting(false);
@@ -205,8 +205,8 @@ export function KeepAliveEditor({ endpointId }: { endpointId: string }) {
 }
 
 function buildCurl(p: PingPreview): string {
-  // Headers are single-quoted (like the body): the old double-quote form
-  // left `$`, backticks and backslashes live for the shell — a key/URL
+  // Headers are single-quoted (like the body): double quotes leave `$`,
+  // backticks and backslashes live for the shell — a key/URL
   // containing them would expand variables or inject commands when the user
   // pastes the curl. `'` inside a single-quoted shell string is escaped as
   // `'\''`.

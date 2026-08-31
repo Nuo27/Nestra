@@ -7,8 +7,8 @@
 //! input. A broken conversion never fails a request, it relays the body
 //! untouched.
 //!
-//! Fidelity is deliberately pragmatic (field mapping follows the
-//! cc-switch proxy's battle-tested tables):
+//! Fidelity is deliberately pragmatic (field mapping follows what the
+//! Responses API actually accepts):
 //!   - `system` → `instructions`; `max_tokens` → `max_output_tokens`;
 //!     `stop_sequences`/`stop` are dropped (Responses has no stop list).
 //!   - Anthropic `tool_use`/`tool_result` blocks become top-level
@@ -142,9 +142,8 @@ fn anthropic_tool_to_responses(tool: &Value) -> Option<Value> {
 ///   `"any"` → `"required"`;
 ///   `{type:"tool",name}` → `{type:"function",name}`;
 ///   `{type:"auto"}` / `{type:"none"}` → the bare strings "auto"/"none"
-///     (Responses accepts only strings or `{type:"function",…}` objects —
-///     the old pass-through sent Anthropic's object form verbatim, which the
-///     Responses API rejects);
+///     (Responses accepts only strings or `{type:"function",…}` objects,
+///     not Anthropic's object form);
 ///   everything else verbatim.
 fn map_anthropic_tool_choice(tc: &Value) -> Value {
     match tc {

@@ -2,9 +2,8 @@
 //! same open model database OpenCode itself reads.
 //!
 //! OpenCode's per-model config accepts capability booleans (`reasoning`,
-//! `tool_call`, `attachment`, `temperature`) and a `limit` object. Nestra
-//! used to emit only `{ "name": "<id>" }`, so OpenCode never learned a
-//! model could reason. This module gathers the authoritative abilities
+//! `tool_call`, `attachment`, `temperature`) and a `limit` object. This
+//! module gathers the authoritative abilities
 //! from `https://models.dev/models.json`, caches them in `setting_kv`
 //! (7-day TTL), and exposes lookups the OpenCode adapter turns into
 //! per-model entry fields.
@@ -117,8 +116,7 @@ pub enum Modality {
 
 /// Normalize a model id for matching: lowercase, trim whitespace + a
 /// leading `models/` prefix, drop bracket/paren markers (`[1M]`, `(beta)`)
-/// and a trailing `-YYYYMMDD` snapshot date. Mirrors cc-switch's
-/// `resolve_image_input_capability` normalizer.
+/// and a trailing `-YYYYMMDD` snapshot date.
 pub(crate) fn normalize(id: &str) -> String {
     let mut s = id.trim().to_lowercase();
     if let Some(rest) = s.strip_prefix("models/") {
@@ -126,9 +124,9 @@ pub(crate) fn normalize(id: &str) -> String {
     }
     // Cut at the FIRST bracket/paren: the marker content is a suffix
     // (`claude-sonnet-4-5[1M]`, `MiniMax-M3[1m]`, `grok-4(beta)`) and must
-    // be DROPPED, not kept — the old filter removed only the bracket chars,
-    // leaving `claude-sonnet-4-51m`, which never matched the generated id
-    // and silently disabled ability routing for every bracketed model.
+    // be DROPPED, not just the bracket chars — keeping the inner text yields
+    // ids like `claude-sonnet-4-51m`, which never match the generated id
+    // and silently disable ability routing for every bracketed model.
     if let Some(idx) = s.find(['[', '(']) {
         s.truncate(idx);
     }
@@ -445,7 +443,6 @@ pub fn to_model_entry_fields(a: &ModelAbilities) -> Vec<(String, serde_json::Val
 /// window". Appended to model ids written into `ANTHROPIC_*_MODEL` env vars so
 /// Claude Code stops defaulting to 200k for models it doesn't natively know
 /// (third-party Anthropic-protocol endpoints like z.ai / MiniMax / GLM-4.5+).
-/// Matches cc-switch's `claude_desktop_config::ONE_M_CONTEXT_MARKER`.
 pub const ONE_M_CONTEXT_MARKER: &str = "[1m]";
 /// Token count at and above which the [`ONE_M_CONTEXT_MARKER`] gets appended.
 /// Mirrors Claude Code's own threshold — anything below is treated as 200k.

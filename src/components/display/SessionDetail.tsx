@@ -450,8 +450,8 @@ export function SessionDetail({ id, provider }: { id: string; provider: string }
 }
 
 /// Secondary-action overflow menu for the detail header: reveal, copy path,
-/// review, delete — the low-frequency tail that used to crowd the header as
-/// four more icon buttons. Same outside-click/Escape close pattern as
+/// review, delete — the low-frequency tail, kept out of the header's icon
+/// row. Same outside-click/Escape close pattern as
 /// KeepAlivePopover; no portal (the header is in normal document flow).
 function DetailOverflow({
   onReveal,

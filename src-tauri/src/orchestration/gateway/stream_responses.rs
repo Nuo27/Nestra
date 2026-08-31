@@ -194,9 +194,6 @@ impl Utf8Accum {
                     // multi-byte char (error_len() == None — wait for more
                     // bytes) from DEFINITELY INVALID bytes (error_len() ==
                     // Some(n) — replace exactly that run with U+FFFD).
-                    // The old lead-byte heuristic stalled forever on a lead
-                    // byte followed by an invalid continuation (e.g. 0xE4 0x28):
-                    // a malformed upstream chunk then hung the whole stream.
                     match e.error_len() {
                         None => return, // truncated — wait for continuation
                         Some(n) => {

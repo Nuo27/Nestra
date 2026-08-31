@@ -316,8 +316,8 @@ pub async fn agent_detect(state: State<'_, crate::AppState>) -> AppResult<Vec<Ag
 ///   that row is used (how a dual-protocol endpoint like OpenRouter is steered
 ///   to anthropic vs openai per agent).
 /// - `None`, or a name that is no longer accepted / no longer present → fall
-///   back to the first accepted protocol row (the historical default, so a
-///   NULL override reproduces the pre-picker result).
+///   back to the first accepted protocol row (deterministic fallback for a
+///   NULL override).
 fn build_switch_context(
     parts: &AppParts,
     agent_id: &str,
@@ -338,7 +338,7 @@ fn build_switch_context(
 
     let accepted = adapter.accepts();
     // A stored override wins only when it still names an accepted protocol the
-    // endpoint carries; otherwise the first accepted row (historical default).
+    // endpoint carries; otherwise the first accepted row.
     let chosen_row = protocol
         .filter(|name| accepted.iter().any(|k| k.as_str() == *name))
         .and_then(|name| endpoint.protocols.iter().find(|p| p.protocol == name));
@@ -637,8 +637,8 @@ pub(crate) fn do_switch_provider(
             db::set_active_binding(&conn, &agent_id, &provider_id)?;
         } else {
             // Single-slot: the binding set is exactly the active provider.
-            // replace wipes any stale extras older builds accumulated
-            // (switch used to upsert without clearing), keeping the DB honest.
+            // replace wipes any stale extras older builds accumulated,
+            // keeping the DB honest.
             // Preserve the stored protocol override across the delete+re-insert.
             db::replace_bindings(
                 &conn,

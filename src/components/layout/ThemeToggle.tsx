@@ -67,9 +67,8 @@ export function ThemeToggle() {
   }, [theme]);
 
   // The topbar toggle only switches between the two concrete themes, using
-  // the *effective* theme as the anchor — so a click always visibly flips
-  // (the old 3-state cycle had a no-op hop through `system`). "Follow the
-  // system" lives on the Settings page instead.
+  // the *effective* theme as the anchor — so a click always visibly flips.
+  // "Follow the system" lives on the Settings page instead.
   const effective =
     theme === "system" ? (prefersLight ? "light" : "dark") : theme;
   const next = effective === "dark" ? "light" : "dark";

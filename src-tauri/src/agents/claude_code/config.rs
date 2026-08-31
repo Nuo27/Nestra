@@ -133,7 +133,7 @@ impl ConfigAdapter for ClaudeCode {
     /// Gateway mode: write the stable gateway alias as `ANTHROPIC_BASE_URL`
     /// + the loopback token + per-tier model aliases. The agent then talks
     /// to the Nestra gateway, which resolves the real upstream per-task.
-    /// Switching the resolved route no longer rewrites this file (only
+    /// Switching the resolved route does not rewrite this file (only
     /// policy/endpoint edits refresh it — see `refresh_alias_if_routed`).
     fn apply_gateway_set(
         &self,

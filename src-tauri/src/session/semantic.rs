@@ -18,9 +18,9 @@
 //!
 //! ## The losslessness invariant
 //!
-//! `extract_blocks` in the old pipeline had a `_ => {}` catch-all that silently
-//! dropped MCP identity, attachments, images, file blocks, usage, model name,
-//! and the parent→child Task-tool link. That cannot happen here:
+//! Nothing may be silently dropped: MCP identity, attachments, images, file
+//! blocks, usage, model name, and the parent→child Task-tool link must all
+//! survive the parse:
 //!
 //! - Any content block an importer does not explicitly recognize becomes a
 //!   [`PartPayload::Unknown`] carrying the verbatim JSON, never dropped.
@@ -135,7 +135,7 @@ pub enum PartPayload {
     /// A sub-agent was spawned. `agent_id` is the provider's id for the spawned
     /// agent (Claude `agentId`); `child_session_id` is filled by the assembler
     /// once the child's own session is known. This is what links a parent's
-    /// `Task` tool call to the child conversation — previously lost.
+    /// `Task` tool call to the child conversation.
     SubAgent {
         agent_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

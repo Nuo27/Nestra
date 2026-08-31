@@ -16,9 +16,9 @@ export function Field({
   required?: boolean
   children: ReactNode
 }) {
-  // `<div>` not `<label>`: the old wrapper made invalid HTML for children
+  // `<div>` not `<label>`: a label wrapper is invalid HTML around children
   // like Tabs or div-wrapped Input+Button clusters, and the implicit
-  // label association only worked for a single form control anyway. Error
+  // label association only covers a single form control anyway. Error
   // and hint carry ids so callers can wire `aria-describedby` on the input.
   const hintId = useId()
   const errorId = useId()

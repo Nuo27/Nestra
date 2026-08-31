@@ -78,8 +78,8 @@ mod tests;
 /// Reveal `path` in the OS file manager.
 ///
 /// Windows-only: spawns `explorer.exe`. A FILE is passed with `/select,` so
-/// Explorer opens the parent and selects it (the old form opened the file
-/// with its associated app instead of locating it); a directory opens
+/// Explorer opens the parent and selects it instead of opening the file
+/// with its associated app; a directory opens
 /// directly. Non-Windows builds get a stub that errors — the caller should
 /// degrade (the reveal feature is inherently Windows Explorer-based).
 #[cfg(target_os = "windows")]

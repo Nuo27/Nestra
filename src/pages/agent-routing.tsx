@@ -10,8 +10,7 @@ import { RoutingPolicyEditor } from "../components/orchestration/RoutingPolicyEd
 /// /agents/$id/routing — the focused (agent, role) → endpoint-chain policy
 /// editor. Policy data is mode-independent, so the page stays fully
 /// editable while the agent is Direct — a Note explains when it takes
-/// effect (the old hard gate hid a view the user had every right to see).
-/// The route overview lives on the detail page's cockpit.
+/// effect. The route overview lives on the detail page's cockpit.
 export function AgentRoutingPage({ id }: { id: string }) {
   const { t } = useTranslation();
   return (

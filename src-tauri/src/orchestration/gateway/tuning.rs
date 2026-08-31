@@ -3,7 +3,7 @@
 //!
 //! Two families live here:
 //!
-//! * **Timeouts** (cc-switch's three-part cover, plus a total deadline):
+//! * **Timeouts** (three-part cover, plus a total deadline):
 //!   `headers_timeout_secs` bounds the upstream dial until response headers,
 //!   `first_event_timeout_secs` bounds the first complete SSE event (the
 //!   in-band error probe window), `stream_silence_timeout_secs` bounds the
@@ -108,7 +108,6 @@ impl GatewayTuning {
     /// Force every field into its legal range. Applied on load AND on save —
     /// the Settings UI validates, but the gateway must never trust stored
     /// JSON (hand-edited, or written by an older build) to be sane.
-    /// Ranges mirror cc-switch's legal domains.
     pub fn clamped(mut self) -> Self {
         self.headers_timeout_secs = clamp(self.headers_timeout_secs, 1, 300);
         self.first_event_timeout_secs = clamp(self.first_event_timeout_secs, 1, 300);

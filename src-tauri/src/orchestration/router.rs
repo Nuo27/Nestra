@@ -126,9 +126,9 @@ impl RouteAffinity {
 
     /// Record the route chosen for a task so the next request in the same
     /// task reuses it (affinity). `conn` is the caller's already-held gateway
-    /// connection — used for the debounced session-grain snapshot (Smart
-    /// Gateway fix 3: a restart otherwise loses the session's provider pin
-    /// and the prompt-cache prefix with it).
+    /// connection — used for the debounced session-grain snapshot: a restart
+    /// otherwise loses the session's provider pin and the prompt-cache
+    /// prefix with it.
     pub fn record(
         &self,
         conn: &rusqlite::Connection,
@@ -514,8 +514,8 @@ fn build_route(
     // request needs the endpoint's OpenAI-compatible base (e.g. z-ai's
     // `/api/paas/v4`), an Anthropic request the Anthropic row. Fall back to
     // the first row when the direction has no match — mock endpoints often
-    // declare a single row that serves both shapes. `None` hint keeps the
-    // historical first-row behavior. Default to Custom when no rows exist
+    // declare a single row that serves both shapes. A `None` hint falls back
+    // to the first row. Default to Custom when no rows exist
     // (the gateway can still dial a bare base_url, but routing is degraded
     // until a protocol is set).
     //
@@ -582,8 +582,8 @@ fn build_route(
     // for a responses-class model (grok) must be converted to the Responses
     // API, an openai-class model (kimi) to Chat Completions, an
     // anthropic-class model (deepseek) dials Messages directly (native
-    // caching). `None` api follows the row protocol — the historical
-    // behavior. Chat inbounds keep Chat for anthropic-class models (they
+    // caching). `None` api follows the row protocol. Chat inbounds keep Chat
+    // for anthropic-class models (they
     // empirically accept the chat wire too) and only switch to Responses
     // for responses-class models.
     let wire = wire_for_model(ctx, inputs.conn, endpoint_id, model, protocol)?;
@@ -630,7 +630,7 @@ fn parse_kind(s: &str) -> ProviderKind {
 ///
 /// The model's `api` (from the catalog's merged abilities — models.dev +
 /// corrections + user overrides) states which wire it is officially served
-/// on. `None` means "unknown, follow the endpoint" (historical behavior).
+/// on. `None` means "unknown, follow the endpoint".
 /// The match table:
 ///   - `responses`-class models (grok-4.5, gpt-5.6-luna) ALWAYS go to the
 ///     Responses API — the chat wire is broken for them upstream (503).
@@ -640,7 +640,7 @@ fn parse_kind(s: &str) -> ProviderKind {
 ///     (native caching, no conversion); on a Chat inbound they stay on Chat
 ///     (they empirically accept both); on a Responses inbound they convert
 ///     to Messages.
-///   - `None` → the row protocol (historical behavior).
+///   - `None` → the row protocol.
 fn wire_for_model(
     ctx: &TaskContext,
     conn: &rusqlite::Connection,

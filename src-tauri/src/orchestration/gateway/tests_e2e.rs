@@ -377,7 +377,7 @@ async fn chat_inbound_to_responses_upstream() {
 /// (single-row custom endpoint, e.g. MiniMax-M3 on `…/anthropic`): the chat
 /// request is converted to Messages, dialed on `/v1/messages` with
 /// `x-api-key` auth, and the anthropic response converted back to a chat
-/// completion. This is the case that used to 404 "page not found".
+/// completion.
 #[tokio::test]
 async fn chat_inbound_to_anthropic_upstream() {
     let payload = r#"{"id":"msg_1","type":"message","role":"assistant","model":"MiniMax-M3","content":[{"type":"text","text":"hi from m3"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}"#;
@@ -507,8 +507,8 @@ async fn streaming_sse_backfills_usage_and_tool_calls() {
 
     // Consume the stream to drive the observing body to its terminal poll —
     // that is where the backfill task spawns. Under the tokio test runtime,
-    // so a panic inside poll_frame (the old blocking_lock failure mode)
-    // would fail the test here.
+    // so a panic inside poll_frame (e.g. a blocking lock on the worker
+    // thread) would fail the test here.
     use http_body_util::BodyExt as _;
     let relayed = resp.into_body().collect().await.unwrap().to_bytes();
     let relayed = String::from_utf8_lossy(&relayed);

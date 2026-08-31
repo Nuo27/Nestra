@@ -14,9 +14,9 @@ export function ResizeHandle({
   min?: number
   max?: number
 }) {
-  // The window listeners are removed on unmount too — the old code cleaned
-  // them only on mouseup, so an unmount mid-drag leaked the listeners and
-  // left `.no-transition` stuck on <html>.
+  // Window listeners are removed on unmount as well as mouseup — an
+  // unmount mid-drag must not leak listeners or leave `.no-transition`
+  // stuck on <html>.
   const dragging = useRef(false)
   useEffect(
     () => () => {

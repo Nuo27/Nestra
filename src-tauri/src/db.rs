@@ -125,8 +125,7 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
 /// same-version or brand-new launch is a no-op. The snapshot lands next to
 /// the db file in `db_backups/v<from>-to-v<to>-<ts>/nestra.db` and the
 /// newest 3 are kept. A failed snapshot FAILS the migration: migrating
-/// without a safety copy is exactly the scenario this exists to prevent
-/// (mirrors cc-switch's pre_migration_backup guarantee).
+/// without a safety copy is exactly the scenario this exists to prevent.
 fn pre_migration_backup(conn: &Connection) -> AppResult<()> {
     use rusqlite::OptionalExtension;
     // PRAGMA database_list's first row is "main"; its file column is empty
@@ -266,7 +265,7 @@ fn row_to_endpoint(r: &rusqlite::Row<'_>) -> rusqlite::Result<EndpointRow> {
         models_fetched_at: r.get("models_fetched_at")?,
         advanced_env_json: r.get("advanced_env_json")?,
         // Propagate read failures (a corrupt row must not silently lose its
-        // ability overrides — the old `.ok()` did exactly that).
+        // ability overrides).
         model_abilities_json: r.get("model_abilities_json")?,
         protocols: Vec::new(),
     })
@@ -858,8 +857,8 @@ pub fn list_bindings(conn: &Connection, agent_id: &str) -> AppResult<Vec<Binding
 /// Resolve `(protocol, base_url)` for a binding: a stored per-binding
 /// override wins when it is still valid (in the adapter's `accepts()` AND the
 /// endpoint still carries that protocol row); otherwise the first accepted
-/// protocol row (alphabetical — the historical behavior, so a NULL override
-/// reproduces the pre-picker result exactly). `accepted` is the agent
+/// protocol row (first accepted row alphabetically — deterministic when no
+/// override is stored). `accepted` is the agent
 /// adapter's `accepts()` list; `protos` is the endpoint's protocol rows.
 fn resolve_binding_wire(
     stored: &Option<String>,
@@ -1088,9 +1087,8 @@ pub fn clear_active_binding(
 /// Deletes `task` rows — and their cascaded children `route_request`,
 /// `route_migration` (all `ON DELETE CASCADE` in the v1 schema) — whose
 /// timestamps predate the `log_retention_days` setting (default 30). This is
-/// the backing implementation for the "log retention" UI setting, which
-/// promises "older entries are pruned automatically" but was previously
-/// orphaned — the backend never read it.
+/// the backing implementation for the "log retention" UI setting: entries
+/// older than the configured days are pruned automatically on every launch.
 ///
 /// Called once per launch from [`crate::commands::run_launch_reconcile`] on
 /// the dedicated `reconcile_db` connection (off the UI locks). SQLite reuses

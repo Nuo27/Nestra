@@ -34,7 +34,7 @@ const BREAKER_FIELDS: TuningField[] = [
 ];
 
 /// Gateway tuning section — the Settings surface for the gateway's timeouts
-/// and circuit-breaker parameters (cc-switch-style operational knobs). Saves
+/// and circuit-breaker parameters. Saves
 /// hot-apply to the next request (no gateway restart): the backend persists
 /// to `setting_kv` and writes the shared in-memory slot in one command.
 export function GatewayTuningSection() {

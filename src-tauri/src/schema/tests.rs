@@ -127,7 +127,7 @@ fn build_v1_backfills_route_request_tool_calls_on_drifted_db() {
     build_v1(&conn).unwrap();
 }
 
-/// P1-1 dual-path verification: `tool_names` round-trips on a FRESH db
+/// Dual-path verification: `tool_names` round-trips on a FRESH db
 /// (full canonical schema) and on an EXISTING db upgraded through
 /// `ensure_column` — insert + read back in both cases.
 #[test]
@@ -135,7 +135,7 @@ fn tool_names_round_trips_on_fresh_and_upgraded_dbs() {
     for upgraded in [false, true] {
         let conn = Connection::open_in_memory().unwrap();
         if upgraded {
-            // Existing install: the v1 table WITHOUT the P1-1 columns,
+            // Existing install: the v1 table WITHOUT the tool-usage columns,
             // then build_v1's ensure_column upgrades it in place.
             conn.execute_batch(
                 "CREATE TABLE route_request (

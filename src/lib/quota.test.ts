@@ -26,11 +26,9 @@ const FULL: RefreshEndpointConfig = {
 
 describe("composeEndpointConfig", () => {
   it("carries opencode_workspace_id through a full-blob write", () => {
-    // Regression: `quota_refresh_set_settings` replaces the WHOLE blob, so a
-    // field omitted here is silently erased server-side (serde default). The
-    // workspace ID used to get wiped by any unrelated settings write (keep-
-    // alive toggle, plan change, preview windows) — the cookie survived in
-    // the keychain but the field in the blob died with no error anywhere.
+    // `quota_refresh_set_settings` replaces the WHOLE blob, so a field
+    // omitted here is silently erased server-side (serde default) —
+    // including the opencode workspace id.
     const next = composeEndpointConfig({ ...FULL, enabled: false });
     expect(next.opencode_workspace_id).toBe("ws_abc-123");
     expect(next.enabled).toBe(false);
@@ -64,8 +62,8 @@ describe("planToSelectValue / planFromSelectValue", () => {
 describe("shouldCatchUpRefresh", () => {
   // The single refresh authority for the Quota card. Fires when the absolute
   // deadline has passed, no fetch is in flight, and the last attempt is older
-  // than one interval. These tests pin the no-hammer / no-stuck / catch-up-on-
-  // resume semantics that replaced the old TanStack refetchInterval.
+  // than one interval. These tests pin the no-hammer / no-stuck /
+  // catch-up-on-resume semantics.
   const base = {
     auto: true,
     isFetching: false,

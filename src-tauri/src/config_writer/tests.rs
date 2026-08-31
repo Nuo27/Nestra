@@ -263,9 +263,8 @@ fn apply_set_atomic_success_writes_through_without_rollback() {
 }
 
 /// Returns `(path, guard)`: the guard deletes the directory when it
-/// drops (end of the test fn, including panics). The old hand-rolled
-/// dirs leaked thousands of `nestra-cfg-test-*` folders in the system
-/// temp dir (process-exit cleanup doesn't run under `cargo test`).
+/// drops (end of the test fn, including panics) — process-exit cleanup
+/// doesn't run under `cargo test`, so cleanup must be scoped.
 fn tempfile_dir() -> (PathBuf, tempfile::TempDir) {
     let dir = tempfile::Builder::new()
         .prefix("nestra-cfg-test-")

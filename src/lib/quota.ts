@@ -136,9 +136,8 @@ export function planFromSelectValue(
 /// Build the persisted per-endpoint config for a full-blob settings write.
 /// `quota_refresh_set_settings` replaces the whole blob server-side, so every
 /// persisted field must be carried from the incoming config — a field omitted
-/// here is silently erased (serde `#[serde(default)]` fills `null`). This is
-/// exactly how `opencode_workspace_id` used to get wiped by any unrelated
-/// quota-settings write; keep this list in lock-step with the Rust
+/// here is silently erased (serde `#[serde(default)]` fills `null`), including
+/// `opencode_workspace_id`. Keep this list in lock-step with the Rust
 /// `StoredEndpointConfig` struct.
 export function composeEndpointConfig(
   patch: RefreshEndpointConfig,

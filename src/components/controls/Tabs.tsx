@@ -7,7 +7,7 @@ interface TabItem {
 
 type Variant = "segmented" | "underline"
 
-/// Tab strip. Two real variants (no longer a flat row for both):
+/// Tab strip. Two variants:
 ///   • `segmented` — a shared bordered row; the active tab fills with
 ///     `accent-soft` and lifts to accent text. Reads as a control.
 ///   • `underline` — flat text row with a 2px accent underline on the active

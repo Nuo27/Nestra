@@ -404,8 +404,8 @@ pub struct CreateWithPresetResult {
 }
 
 /// Create an endpoint from a preset, add every preset protocol, and validate
-/// the supplied API key in one atomic flow. The common case ("pick a preset,
-/// paste a key") no longer requires a visit to the edit page. The protocols
+/// the supplied API key in one atomic flow — the common case ("pick a preset,
+/// paste a key") without a visit to the edit page. The protocols
 /// are always persisted; on key-validation failure the endpoint is left in
 /// `unvalidated` state so the edit page can pick up where this left off.
 ///

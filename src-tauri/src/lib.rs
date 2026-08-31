@@ -107,8 +107,8 @@ pub fn run() {
     ));
     let orch_quota = Arc::new(orchestration::quota_state::QuotaState::new());
     let orch_affinity = Arc::new(orchestration::router::RouteAffinity::new());
-    // Restore the restart-persistent routing state (Smart Gateway fix 3):
-    // session-grain affinity keeps a session on its prior provider (prompt-
+    // Restore the restart-persistent routing state: session-grain affinity
+    // keeps a session on its prior provider (prompt-
     // cache locality across a Nestra restart), and the degraded-endpoint
     // circuit keeps a known-dead endpoint out of rotation. Both loads are
     // TTL/best-effort and touch only non-secret routing ids. `conn` is still

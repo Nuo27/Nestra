@@ -14,9 +14,8 @@ type CapabilityKey = keyof AgentCapability;
 
 /**
  * Lookup of display name by agent id, built from the agent list the backend
- * already returns. Replaces the old per-page hardcoded label maps that had to
- * be kept in sync with the backend by hand. Unknown ids fall back to the id
- * itself so a stale reference never renders blank.
+ * already returns. Unknown ids fall back to the id itself so a stale
+ * reference never renders blank.
  */
 export function useAgentLabels() {
   const agentQ = useQuery({ queryKey: qk.agents(), queryFn: agentList });

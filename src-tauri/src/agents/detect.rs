@@ -87,8 +87,7 @@ pub fn probe(
                 capture_version(&found)
             };
             // A PATH hit is a real binary — infer config_path from the
-            // config-relative rule exactly like the install-dir branch does
-            // (the old code left it None, so the UI showed no config).
+            // config-relative rule exactly like the install-dir branch does.
             let config_path = config_path_override
                 .map(Path::to_path_buf)
                 .or_else(|| detect.config_relative.map(|r| dirs.home.join(r)));

@@ -163,7 +163,7 @@ export function RoutingPolicyEditor({ agentId }: { agentId: string }) {
 
   if (policies.length === 0) {
     // No rows persisted yet — routing FAILS CLOSED for this agent until a
-    // `*` row with targets exists (the router no longer synthesizes a
+    // `*` row with targets exists (the router does not synthesize a
     // routing default from bindings). Render the empty catch-all as an
     // editable draft so the user can configure it in place.
     const defaultRow: RoutingPolicyRow = {

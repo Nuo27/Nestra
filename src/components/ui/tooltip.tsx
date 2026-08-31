@@ -39,10 +39,7 @@ export function Tip({
   disabled?: boolean
 }) {
   return (
-    // `open={disabled ? false : undefined}` — the old `disableHoverableContent`
-    // prop has unrelated semantics (it disables hover-triggered state changes
-    // on the content, not the tooltip itself) and left the open state
-    // lingering/flashing on disabled triggers.
+    // Force-close the tooltip on disabled triggers via controlled `open`.
     <Tooltip delayDuration={200} open={disabled ? false : undefined}>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
       {!disabled && (

@@ -22,12 +22,9 @@ import { FieldRow } from "./Field";
 import { Switch } from "../ui/switch";
 import { useUI } from "../../stores/ui";
 
-/// Diagnostics block — rendered as the last section of the Settings page
-/// (no longer a top-level route). System card (app / OS / data location with
-/// open-in-explorer) + Updates card (GitHub Release check) + log export +
-/// About. The former Health card was removed — its status dot was fed by a
-/// hardcoded `ok: true` and isn't a real health check; `diag_health` still
-/// backs the System card's rows.
+/// Diagnostics block — rendered as the last section of the Settings page.
+/// System card (app / OS / data location with open-in-explorer, backed by
+/// `diag_health`) + Updates card (GitHub Release check) + log export + About.
 export function DiagnosticsSection() {
   const { t, i18n } = useTranslation();
   const qc = useQueryClient();

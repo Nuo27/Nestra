@@ -929,11 +929,10 @@ fn run_loop(
         if SHOULD_EXIT.load(Ordering::SeqCst) {
             return;
         }
-        // Supervise each tick: a panic inside `tick` used to permanently
-        // and silently kill the worker thread (the JoinHandle is detached,
-        // so nothing observed the death). Wrapping in `catch_unwind` turns
-        // a panic into a logged error + a clean continuation — the next
-        // tick re-observes and the worker self-heals. `AssertUnwindSafe`
+        // Supervise each tick: a panic inside `tick` must not silently kill
+        // the detached worker thread (nothing observes the JoinHandle).
+        // `catch_unwind` logs the panic and lets the next tick continue —
+        // the worker self-heals. `AssertUnwindSafe`
         // is sound here: `tick` touches only its own locals + the shared
         // stores (`KEEPALIVE_STATE`, `LAST_*` statics, the DB connection
         // guarded by its `Mutex`), all of which leave their own invariants

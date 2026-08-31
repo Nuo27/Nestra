@@ -96,8 +96,8 @@ struct GatewayInner {
     retired: Vec<super::GatewayHandle>,
 }
 
-/// Process-wide gateway control handle. Stored in [`AppState`](crate::AppState)
-/// (replacing the old `Option<GatewayHandle>` slot). Cloneable — all fields are
+/// Process-wide gateway control handle. Stored in [`AppState`](crate::AppState).
+/// Cloneable — all fields are
 /// `Arc`, so cheap to clone into commands and the spawn task.
 #[derive(Clone)]
 pub struct GatewayControl {

@@ -12,11 +12,10 @@ import { isPlanActive, resolvePlan, shouldCatchUpRefresh } from "../../lib/quota
 
 /// App-level quota auto-refresh driver — the ONE refresh authority. Mounted
 /// once in RootShell so armed endpoints keep refreshing on every page, not
-/// just while the Quota page is open (provider cards used to freeze the
-/// moment the user navigated away). Invisible leaf component: renders null,
+/// just while the Quota page is open. Invisible leaf component: renders null,
 /// re-renders nothing else.
 ///
-/// Semantics (hoisted verbatim from the old Quota-page effect):
+/// Semantics:
 /// - deadline = the shared `qk.endpointQuota(id)` cache's `dataUpdatedAt` +
 ///   `quotaIntervalSec` — an ABSOLUTE deadline, so a hidden/throttled timer
 ///   degrades to a catch-up fetch on the next visible tick, never a drift.

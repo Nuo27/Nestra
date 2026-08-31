@@ -42,7 +42,7 @@ fn validate_protocol_kind_accepts_canonical_and_rejects_typos() {
     for ok in ["anthropic", "openai-comp", "response-api", "custom"] {
         assert!(validate_protocol_kind(ok).is_ok(), "{ok} should be accepted");
     }
-    // `openrouter` is no longer a stored protocol kind — OpenRouter binds
+    // `openrouter` is not a stored protocol kind — OpenRouter binds
     // through `anthropic`/`openai` rows like any OpenAI-compatible provider.
     assert!(validate_protocol_kind("openrouter").is_err());
     // the exact typo that caused minimax to show only claude code:

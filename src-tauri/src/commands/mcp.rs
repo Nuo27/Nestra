@@ -167,7 +167,7 @@ pub async fn mcp_probe_draft(
     run_blocking(move || mcp::probe_transport(&transport)).await
 }
 
-/// Per-server tool-usage summary (P1-1). `total_calls` counts gateway-
+/// Per-server tool-usage summary. `total_calls` counts gateway-
 /// OBSERVED invocations attributed to this managed server (via the shared
 /// `mcp__<server>__<tool>` namespace); zero means none were observed —
 /// attribution currently covers that namespace only.

@@ -853,8 +853,8 @@ pub fn sync_all(db: &std::sync::Arc<std::sync::Mutex<Connection>>) -> AppResult<
         let raw_rows = db::list_mcp_servers(&conn)?;
         (servers, registry_prune(&raw_rows))
     };
-    // One whole-agent projection per provider (the old per-row loop called
-    // sync_agent N times per agent — each pass re-reading the whole DB).
+    // One whole-agent projection per provider, not one write pass per server
+    // row (each pass would re-read the whole DB).
     for p in providers::all() {
         let agent = p.agent_id();
         // Same runtime-gate semantics as `sync_agent`: a closed gate
@@ -931,10 +931,9 @@ pub fn delete(conn: &Connection, id: &str) -> AppResult<()> {
     let Some(r) = r else { return Ok(()) };
     let server = row_to_server(conn, r)?;
     crate::db::delete_mcp_server(conn, id)?;
-    // Explicit per-agent removal. The old `sync_agent`-based loop left the
-    // entry behind because once the DB row is gone the name has no remaining
-    // enabled match, so the rebuild step neither writes nor names it for
-    // removal.
+    // Removal must be explicit per agent: once the DB row is gone the name
+    // has no remaining enabled match, so the rebuild step neither writes nor
+    // names it for removal.
     for agent in server
         .enabled_agents
         .iter()

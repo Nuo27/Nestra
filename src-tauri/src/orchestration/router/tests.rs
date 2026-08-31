@@ -359,7 +359,7 @@ fn protocol_hint_picks_matching_endpoint_row() {
         "https://api.z.ai/api/anthropic"
     );
 
-    // No hint → historical first-row behavior.
+    // No hint → first-row fallback.
     let bare_ctx = TaskContext::new_task("claude-code-cli", None);
     assert_eq!(
         resolve(&bare_ctx, &env.inputs()).unwrap().base_url,
@@ -499,9 +499,8 @@ fn wire_openai_class_routes_to_chat() {
     assert_eq!(route.protocol, ProviderKind::Openai);
 }
 
-/// Explicit targets are the user's intent — capability gating no longer
-/// overrides them (the vision/text-only capability filter was abolished
-/// with the route-target model; abilities are display data now).
+/// Explicit targets are the user's intent and bypass capability gating;
+/// abilities are display data.
 #[test]
 fn explicit_target_bypasses_capability_gating() {
     let env = TestEnv::new();

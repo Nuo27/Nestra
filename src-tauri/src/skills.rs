@@ -117,9 +117,9 @@ fn unique_id(conn: &Connection, base: &str) -> String {
     if !id_exists(conn, &id) {
         return id;
     }
-    // Loop until a FREE id is found: the old `{id}-x` fallback was never
-    // existence-checked, so a colliding fallback failed the INSERT (PK
-    // conflict) and aborted the whole install.
+    // Loop until a FREE id is found — the suffix fallback must be
+    // existence-checked, or a colliding id fails the INSERT (PK
+    // conflict) and aborts the whole install.
     for i in 2..10_000 {
         let c = format!("{id}-{i}");
         if !id_exists(conn, &c) {

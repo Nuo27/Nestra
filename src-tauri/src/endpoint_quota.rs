@@ -125,8 +125,7 @@ pub enum BuiltinKind {
     Openrouter,
     /// OpenCode Go plan usage. No API-key endpoint exists — usage is scraped
     /// from the authenticated dashboard HTML using a browser session cookie
-    /// + workspace ID (same method as the community tools opencode-bar and
-    /// opencode-quota). See `fetch_opencode_go`.
+    /// + workspace ID. See `fetch_opencode_go`.
     OpencodeGo,
     /// A local mock upstream (127.0.0.1 / localhost) serving `GET /v1/quota`
     /// — used by scripts/mock-upstream.cjs so the Quota page + keep-alive
@@ -443,8 +442,7 @@ fn fetch_minimax(key: &str) -> EndpointQuota {
                     name: "5h-token".into(),
                     // USED percentage — every other branch (and the frontend
                     // autoTone) treats pct as "consumed so far" (0 = fresh,
-                    // 100 = exhausted). The old remaining-percentage here
-                    // inverted the bars and spurious-exhaustion fallbacks.
+                    // 100 = exhausted).
                     pct: 100.0 * used / total,
                     used: Some(used),
                     total: Some(total),
@@ -645,9 +643,9 @@ fn parse_custom_payload(
 /// Balance-based: `usage` is all-time spend, `limit` / `limit_remaining` are
 /// the key's credit cap and what's left — both **nullable** (unlimited keys
 /// return null), which is exactly why balance items carry no percentage:
-/// there is no window to fill and no ratio to report. cc-switch models
-/// third-party balances the same way — show the remaining amount + unit,
-/// never a reset countdown or a usage bar.
+/// there is no window to fill and no ratio to report. Balance items
+/// therefore show the remaining amount + unit only — never a reset countdown
+/// or a usage bar.
 fn fetch_openrouter(key: &str) -> EndpointQuota {
     let mut h = bearer_headers(key);
     // App attribution (matches the gateway forward path). Optional, but
@@ -696,8 +694,7 @@ fn err(msg: String) -> EndpointQuota {
 // OpenCode Go exposes no API-key usage endpoint — usage is rendered only on
 // the authenticated web dashboard at `https://opencode.ai/workspace/{id}/go`.
 // We fetch that HTML with the user's browser session cookie (`Cookie:
-// auth=<cookie>`, same as the community tools opencode-bar and
-// opencode-quota) and scrape the rolling/weekly/monthly windows out of two
+// auth=<cookie>`) and scrape the rolling/weekly/monthly windows out of two
 // possible markup shapes the dashboard has shipped:
 //   1. SolidJS SSR hydration: `rollingUsage:$R[N]={...usagePercent:X...resetInSec:Y...}`
 //      (key order varies, so both fields are located independently).
@@ -918,9 +915,8 @@ fn safe_workspace_segment(ws: &str) -> Option<&str> {
 }
 
 /// Fetch the OpenCode Go dashboard HTML with the user's session cookie and
-/// scrape the usage windows. Mirrors the community tools (opencode-bar,
-/// opencode-quota): there is no API-key usage endpoint, only the authenticated
-/// dashboard page.
+/// scrape the usage windows — there is no API-key usage endpoint, only the
+/// authenticated dashboard page.
 fn fetch_opencode_go(cookie: &str, workspace_id: &str) -> EndpointQuota {
     let ws = match safe_workspace_segment(workspace_id) {
         Some(w) => w,

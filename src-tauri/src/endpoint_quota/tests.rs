@@ -257,8 +257,8 @@ fn fetch_custom_tolerates_missing_fields() {
         fields: ExtractorFields::default(),
     };
     // Empty fields → every value None: the payload shape doesn't match
-    // the extractor — fail loudly (the old code returned a 0% "balance"
-    // that masked real API errors).
+    // the extractor — fail loudly rather than report a 0% "balance" that
+    // masks real API errors.
     let q = parse_custom_payload(&endpoint, &cfg, &serde_json::json!({ "data": {} }));
     assert!(!q.ok, "missing fields must not report ok");
     assert!(q.error.is_some());

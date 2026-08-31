@@ -87,7 +87,7 @@ function AgentCockpit({ agent }: { agent: AgentInfo }) {
 }
 
 /// The Direct-mode primary card: the provider binding editor in a proper
-/// section (it used to render bare with no chapter identity of its own).
+/// section.
 function DirectCard({ agent, endpoints }: { agent: AgentInfo; endpoints: EndpointInfo[] }) {
   const { t } = useTranslation();
   return (

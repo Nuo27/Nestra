@@ -36,7 +36,7 @@ export function McpServerList({
   onEdit,
 }: {
   servers: McpServer[];
-  /** Per-server gateway-observed usage (P1-1); servers absent from the map
+  /** Per-server gateway-observed usage; servers absent from the map
    *  simply render no badge. */
   usage: Record<string, McpUsageStat>;
   agents: McpAgentOption[];

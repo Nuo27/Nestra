@@ -601,9 +601,8 @@ pub fn count_sessions(conn: &Connection) -> AppResult<u32> {
 }
 
 /// Escape a user search fragment for `LIKE ? ESCAPE '\'`. Escapes the escape
-/// character first, then `%` and `_` — the old code escaped only `%`, so
-/// `_` still wildcarded (`user_id` matched `userXid`) and a literal
-/// backslash confused the ESCAPE clause itself.
+/// character first, then `%` and `_`, so every metacharacter is neutralized
+/// exactly once and a literal backslash cannot confuse the ESCAPE clause.
 fn escape_like(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

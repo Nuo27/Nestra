@@ -222,9 +222,9 @@ export function App() {
   );
   // Persistence is opt-in (Settings → Data). When on, the last data shows
   // instantly on relaunch and refreshes in the background; when off the
-  // cache stays in-memory exactly as before. ONE provider tree either way —
-  // the old two-root switch remounted ErrorBoundary + RouterProvider (lost
-  // form state/scroll) on every toggle.
+  // cache stays in-memory. ONE provider tree either way — remounting
+  // ErrorBoundary + RouterProvider on a persistence toggle would lose
+  // form state and scroll.
   const persistQueryCache = useUI((s) => s.persistQueryCache);
   const persistOptions = persistOptionsFor(persistQueryCache);
   return (

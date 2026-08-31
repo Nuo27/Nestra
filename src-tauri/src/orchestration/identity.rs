@@ -400,7 +400,7 @@ pub struct TaskContext {
     pub required_capabilities: CapabilityReq,
     /// Inbound protocol direction (set by the gateway handler: Anthropic vs
     /// OpenAI). The router picks the matching `endpoint_protocol` row for the
-    /// upstream base_url; `None` keeps the historical first-row behavior.
+    /// upstream base_url; `None` falls back to the first matching row.
     pub protocol_hint: Option<ProviderKind>,
     /// Endpoints that already failed on THIS request (set by the migration
     /// loop before a re-resolve so the next attempt walks past them in the

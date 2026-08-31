@@ -80,9 +80,8 @@ fn rebuild_one(
     ep: &db::EndpointRow,
 ) -> AppResult<usize> {
     // Parse BEFORE deleting: an unparseable `models_json` must error out, not
-    // wipe the endpoint's catalog rows. (The old order deleted-then-parsed,
-    // so a parse failure committed an EMPTY catalog — routing silently lost
-    // every model for that endpoint.)
+    // wipe the endpoint's catalog rows — a parse failure must never commit an
+    // EMPTY catalog, which would silently lose every model for the endpoint.
     if let Some(json) = ep.models_json.as_deref() {
         if serde_json::from_str::<serde_json::Value>(json).is_err() {
             return Err(AppError::Internal(format!(
@@ -103,9 +102,7 @@ fn rebuild_one(
     }
 
     // Wipe this endpoint's stale catalog rows, then re-insert fresh ones —
-    // all in ONE transaction. Previously each delete + upsert was its own
-    // auto-commit (N+1 fsyncs under synchronous=FULL); now it's a single
-    // commit regardless of model count.
+    // all in ONE transaction: a single commit regardless of model count.
     let tx = conn.unchecked_transaction()?;
     store::delete_model_catalog_for_endpoint(&tx, &ep.id)?;
 
@@ -230,9 +227,8 @@ fn kind_from_protocols(protocols: &[db::ProtocolEntry]) -> ProviderKind {
 // ---- capability matching (consumed by the router) ------------------------
 
 /// Derive the request's capability requirements from its JSON body, keyed to
-/// the inbound wire (Smart Gateway fix 2 — the capability routing stage
-/// existed and filtered nothing because no handler ever set
-/// `TaskContext::required_capabilities`).
+/// the inbound wire so the router's capability stage can filter endpoints
+/// (absent signals stay false).
 ///
 /// Conservative by design: a flag flips to `true` only on a PRESENT
 /// structural signal (non-empty `tools`/`functions`, an image block, a
