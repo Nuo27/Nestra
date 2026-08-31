@@ -132,6 +132,26 @@ fn missing_db_returns_empty() {
     assert!(collect(&dir.path().join("none.sqlite")).unwrap().is_empty());
 }
 
+/// The incremental reconcile's change key: every session row's
+/// (id, time_updated) straight off the source's own `session` table — no
+/// `part` scan.
+#[test]
+fn session_index_lists_ids_and_times() {
+    let dir = tempfile::Builder::new().prefix("").tempdir().unwrap();
+    let db = fixture_db(dir.path());
+    let mut idx = session_index(&db);
+    idx.sort();
+    assert_eq!(
+        idx,
+        vec![
+            ("sess-child".to_string(), Some(400)),
+            ("sess-parent".to_string(), Some(500)),
+        ]
+    );
+    // Missing db → empty (the caller reads that as "everything gone").
+    assert!(session_index(&dir.path().join("none.sqlite")).is_empty());
+}
+
 /// The on-demand single-session read (index-only store): returns exactly the
 /// named session's events — same interpretation as the full collect — and
 /// `None` for a missing id or an empty shell.

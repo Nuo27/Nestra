@@ -71,6 +71,29 @@ pub(crate) fn collect_one(db: &Path, session_id: &str) -> AppResult<Option<RawFi
     Ok(raw_file_for(s, evs, &agent_names, db, mtime_millis(db)))
 }
 
+/// Cheap per-session change key for the incremental reconcile: the source
+/// db's own `session` table as `(id, time_updated)` — a few hundred small
+/// rows, no `part` scan. Diffing THIS against the stored index means one new
+/// message in a 100k-part db only re-parses the ONE session it belongs to.
+/// Empty when the db is missing / lacks the layout — the caller reads that
+/// as "every session in it is gone" (same open-failure semantics as
+/// `collect`).
+pub(crate) fn session_index(db: &Path) -> Vec<(String, Option<i64>)> {
+    let Some(conn) = open_part_db(db) else {
+        return vec![];
+    };
+    let Ok(mut stmt) = conn.prepare("SELECT id, time_updated FROM session") else {
+        return vec![];
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1).ok().flatten()))
+    });
+    match rows {
+        Ok(rows) => rows.flatten().collect(),
+        Err(_) => vec![],
+    }
+}
+
 /// Open the db read-only and verify the shared layout. `None` (not an error)
 /// when the file can't open or the tables aren't there — a wrong/older layout
 /// means nothing to import.

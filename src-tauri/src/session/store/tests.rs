@@ -276,3 +276,134 @@ fn delete_session_when_source_file_already_deleted() {
     assert!(removed.contains(&s.source_path));
     assert!(get_session(&conn, "claude-code-cli", OTHER).unwrap().is_none());
 }
+
+// ---- incremental reconcile ---------------------------------------------------
+
+/// The sentinel trick: stamp a rollup only a full-provider rewrite would
+/// overwrite, then touch ONE session's source. If the incremental path works,
+/// untouched sessions keep the sentinel; the touched session gets refreshed.
+fn stamp_sentinel(conn: &Connection, provider: &str, id: &str) {
+    conn.execute(
+        "UPDATE session SET est_tokens = 987654 WHERE provider = ?1 AND id = ?2",
+        params![provider, id],
+    )
+    .unwrap();
+}
+
+fn est_of(conn: &Connection, id: &str) -> Option<i64> {
+    conn.query_row(
+        "SELECT est_tokens FROM session WHERE provider='claude-code-cli' AND id = ?1",
+        params![id],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+/// One JSONL file changes → only that session's row is rewritten; every other
+/// row (sentinel-stamped) is left byte-identical.
+#[test]
+fn incremental_reconcile_leaves_untouched_sessions_alone() {
+    let (home, _home_g) = seed_tree();
+    let (_reconcile_g, _db, conn) = reconcile(&home);
+    stamp_sentinel(&conn, "claude-code-cli", PARENT);
+    stamp_sentinel(&conn, "claude-code-cli", SUB);
+
+    let other = get_session(&conn, "claude-code-cli", OTHER).unwrap().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20)); // distinct mtime
+    write_lines(
+        std::path::Path::new(&other.source_path),
+        &[
+            &claude_user_line(OTHER, "unrelated searchable alpha", "2026-08-06T09:00:00.000Z", "C:\\\\zeta"),
+            &claude_assistant_line(OTHER, "zeta answer", "2026-08-06T09:00:05.000Z"),
+            &claude_assistant_line(OTHER, "a later reply", "2026-08-06T09:00:09.000Z"),
+        ],
+    );
+    with_home(&home, || reconcile_provider(&conn, "claude-code-cli").unwrap());
+
+    // OTHER was refreshed: 3 messages, recomputed (non-sentinel) rollup.
+    let refreshed = get_session(&conn, "claude-code-cli", OTHER).unwrap().unwrap();
+    assert_eq!(refreshed.message_count, 3);
+    assert_ne!(est_of(&conn, OTHER), Some(987654));
+    // PARENT + SUB untouched.
+    assert_eq!(est_of(&conn, PARENT), Some(987654), "untouched session must not be rewritten");
+    assert_eq!(est_of(&conn, SUB), Some(987654), "untouched subagent must not be rewritten");
+}
+
+/// A removed source file drops exactly its session; the rest survive.
+#[test]
+fn incremental_reconcile_drops_session_whose_files_vanished() {
+    let (home, _home_g) = seed_tree();
+    let (_reconcile_g, _db, conn) = reconcile(&home);
+    let other = get_session(&conn, "claude-code-cli", OTHER).unwrap().unwrap();
+    std::fs::remove_file(&other.source_path).unwrap();
+    with_home(&home, || reconcile_provider(&conn, "claude-code-cli").unwrap());
+    assert!(get_session(&conn, "claude-code-cli", OTHER).unwrap().is_none());
+    assert!(get_session(&conn, "claude-code-cli", PARENT).unwrap().is_some());
+    assert!(get_session(&conn, "claude-code-cli", SUB).unwrap().is_some());
+}
+
+/// zcode/opencode: the whole provider lives in ONE db file, so its mtime
+/// changes on every write. The incremental path must diff the source's own
+/// `session` table instead — one new + one deleted session in the db touches
+/// exactly those rows; the unchanged session keeps its sentinel.
+#[test]
+fn incremental_reconcile_zcode_diffs_by_session_not_db_mtime() {
+    let (home, _home_g) = temp_home();
+    let db = home.join(".zcode").join("cli").join("db").join("db.sqlite");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    {
+        let fconn = Connection::open(&db).unwrap();
+        fconn.execute_batch(
+            "CREATE TABLE session (id TEXT, parent_id TEXT, directory TEXT, title TEXT,
+                                  time_created INTEGER, time_updated INTEGER);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
+                                  time_updated INTEGER, data TEXT, sequence INTEGER);
+             CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER,
+                               time_updated INTEGER, data TEXT, sequence INTEGER);",
+        )
+        .unwrap();
+        for (sid, title) in [("sess-a", "A"), ("sess-b", "B")] {
+            fconn.execute("INSERT INTO session VALUES (?1, NULL, 'C:/w', ?2, 100, 500)", params![sid, title]).unwrap();
+            fconn.execute("INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                params![format!("m-{sid}"), sid, r#"{"role":"user"}"#]).unwrap();
+            fconn.execute("INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?1, ?2, ?3, 110, ?4)",
+                params![format!("p-{sid}"), format!("m-{sid}"), sid,
+                        format!(r#"{{"type":"text","text":"hello {title}"}}"#)]).unwrap();
+        }
+    }
+
+    let (db_dir, _db_g) = temp_home();
+    let conn = crate::db::open(&db_dir).unwrap();
+    crate::db::migrate(&conn).unwrap();
+    with_home(&home, || reconcile_provider(&conn, "zcode-desktop").unwrap());
+    assert_eq!(count_sessions(&conn).unwrap(), 2);
+    stamp_sentinel(&conn, "zcode-desktop", "sess-a");
+    let _ = db_dir; // keep the temp db alive
+
+    // Mutate the source: add sess-c, delete sess-b. sess-a's time_updated
+    // stays 500 — its row must not be rewritten.
+    {
+        let fconn = Connection::open(&db).unwrap();
+        for table in ["part", "message"] {
+            fconn.execute(&format!("DELETE FROM {table} WHERE session_id = 'sess-b'"), []).unwrap();
+        }
+        fconn.execute("DELETE FROM session WHERE id = 'sess-b'", []).unwrap();
+        fconn.execute("INSERT INTO session VALUES ('sess-c', NULL, 'C:/w', 'C', 600, 700)", []).unwrap();
+        fconn.execute("INSERT INTO message (id, session_id, data) VALUES ('m-c', 'sess-c', ?1)",
+            params![r#"{"role":"assistant"}"#]).unwrap();
+        fconn.execute("INSERT INTO part (id, message_id, session_id, time_created, data) VALUES ('p-c', 'm-c', 'sess-c', 610, ?1)",
+            params![r#"{"type":"text","text":"hello C"}"#]).unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(20)); // db mtime moves
+    with_home(&home, || reconcile_provider(&conn, "zcode-desktop").unwrap());
+
+    assert!(get_session(&conn, "zcode-desktop", "sess-c").unwrap().is_some(), "new session indexed");
+    assert!(get_session(&conn, "zcode-desktop", "sess-b").unwrap().is_none(), "deleted session dropped");
+    let a = get_session(&conn, "zcode-desktop", "sess-a").unwrap().unwrap();
+    assert_eq!(a.message_count, 1, "sess-a refreshed? no — it must keep its sentinel");
+    let est: Option<i64> = conn.query_row(
+        "SELECT est_tokens FROM session WHERE provider='zcode-desktop' AND id='sess-a'",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(est, Some(987654), "db mtime changed, but sess-a's time_updated did not — no rewrite");
+}

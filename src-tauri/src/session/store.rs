@@ -43,12 +43,12 @@ fn prune_unknown_providers(conn: &Connection) -> AppResult<()> {
 }
 
 /// Reparse `provider` only when its `(path, mtime)` snapshot differs from what
-/// is stored in `session_source`. On change: assemble once and persist ONLY
-/// the index rows (`session`) — the transcript mirror (`session_message` /
-/// `session_part`) was removed in schema v3; bodies are read on demand via
-/// [`super::read_session_parts`]. The reconcile also refreshes the small
-/// rollups (`message_count`, `est_tokens`, `top_consumer`, `last_model`) that
-/// the context-pressure header reads O(1).
+/// is stored in `session_source`. The FIRST import (empty snapshot) takes the
+/// full path: assemble everything, rewrite all index rows. Later changes take
+/// the per-session incremental path (`reconcile_incremental`) — only the
+/// sessions whose source material changed are re-parsed and re-written, so a
+/// one-message update inside a 100k-part zcode/opencode db costs one
+/// `collect_one`, not a full-provider walk.
 pub fn reconcile_provider(conn: &Connection, provider: &str) -> AppResult<()> {
     // Sort BOTH sides: `stored_snapshot` is ORDER BY path, but the disk side
     // comes from per-importer iteration order (not guaranteed sorted). An
@@ -62,13 +62,218 @@ pub fn reconcile_provider(conn: &Connection, provider: &str) -> AppResult<()> {
         return Ok(()); // nothing changed
     }
 
-    // Assemble once: parts feed the rollups, then are discarded — nothing
-    // body-shaped is persisted.
+    if !db_snap.is_empty() {
+        return reconcile_incremental(conn, provider, &disk, &db_snap);
+    }
+
+    // First import: assemble once, persist the index rows (`session`) — the
+    // transcript mirror (`session_message` / `session_part`) was removed in
+    // schema v3; bodies are read on demand via [`super::read_session_parts`].
+    // The reconcile also persists the small rollups (`message_count`,
+    // `est_tokens`, `top_consumer`, `last_model`) that the context-pressure
+    // header reads O(1).
     let assembled = normalize_with_parts(provider)?;
 
     let tx = conn.unchecked_transaction()?;
     replace_provider_rows(&tx, provider, &assembled)?;
     replace_sources(&tx, provider, &disk)?;
+    recompute_child_counts(&tx, provider)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Per-session incremental reconcile. Change detection:
+/// - a changed `.jsonl` file dirties the sessions its content groups into
+///   (plus any stored session whose `source_files` include it — multi-file
+///   merges — or a removed file, which drops the session when nothing else
+///   backs it);
+/// - a changed part-style SQLite db (zcode / `opencode.db`) is diffed by its
+///   OWN `session` table (`(id, time_updated)` via [`partdb::session_index`])
+///   against the stored rows — the db's mtime alone must NOT dirty every
+///   session in it.
+///
+/// Everything lands in one transaction: upserts, deletions, the refreshed
+/// `session_source` snapshot, and a `child_count` recompute (cheap, indexed).
+fn reconcile_incremental(
+    conn: &Connection,
+    provider: &str,
+    disk: &[(String, i64)],
+    db_snap: &[(String, i64)],
+) -> AppResult<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
+
+    let disk_map: BTreeMap<&str, i64> =
+        disk.iter().map(|(p, m)| (p.as_str(), *m)).collect();
+    let snap_map: BTreeMap<&str, i64> =
+        db_snap.iter().map(|(p, m)| (p.as_str(), *m)).collect();
+    let changed: BTreeSet<&str> = disk_map
+        .iter()
+        .filter(|(p, m)| snap_map.get(*p) != Some(*m))
+        .map(|(p, _)| *p)
+        .collect();
+    let removed: BTreeSet<&str> = snap_map
+        .keys()
+        .filter(|p| !disk_map.contains_key(*p))
+        .copied()
+        .collect();
+    // JSONL files participate in the source_files intersect test below.
+    let jsonl_touched: BTreeSet<&str> = changed
+        .iter()
+        .chain(removed.iter())
+        .copied()
+        .filter(|p| Path::new(p).extension().map(|e| e == "jsonl").unwrap_or(false))
+        .collect();
+
+    // Stored index rows: id → (updated_at, source_files).
+    let mut stored: BTreeMap<String, (Option<i64>, Vec<String>)> = BTreeMap::new();
+    {
+        let mut stmt =
+            conn.prepare("SELECT id, updated_at, source_files_json FROM session WHERE provider = ?1")?;
+        let rows = stmt.query_map([provider], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for (id, updated, files_json) in rows.flatten() {
+            stored.insert(id, (updated, serde_json::from_str(&files_json).unwrap_or_default()));
+        }
+    }
+
+    // Pass 1 — what changed, per shape.
+    let mut touched: Vec<super::RawFile> = Vec::new(); // parsed changed JSONL files
+    let mut dirty: BTreeSet<String> = BTreeSet::new(); // sessions to re-upsert
+    let mut gone: BTreeSet<String> = BTreeSet::new(); // sessions to delete
+    // Dirty sessions that came out of a part-style db. A NEW session has no
+    // stored row yet, so this map (not `source_files`) is what tells the
+    // re-assembly below which db to read it from.
+    let mut partdb_of: BTreeMap<String, String> = BTreeMap::new();
+
+    for path in &changed {
+        let p = Path::new(path);
+        if p.extension().map(|e| e == "jsonl").unwrap_or(false) {
+            if let Ok(parsed) = super::parse_jsonl_events(p) {
+                touched.push(super::rawfile_from_jsonl(p, parsed));
+            }
+        } else {
+            // Part-style db: diff (id, time_updated) against the stored rows
+            // that live in this db. A NULL time_updated falls back to the db
+            // mtime — the same key `collect`/`collect_one` persist, so the
+            // comparison stays stable.
+            let mtime = super::mtime_millis(p);
+            let src_rows = super::partdb::session_index(p);
+            let src: BTreeMap<&str, i64> = src_rows
+                .iter()
+                .map(|(id, u)| (id.as_str(), u.unwrap_or(mtime)))
+                .collect();
+            // Sessions NEW to the source db (no stored row yet) are dirty too
+            // — the diff must run both directions.
+            for id in src_rows.iter().map(|(id, _)| id) {
+                if !stored.contains_key(id) {
+                    dirty.insert(id.clone());
+                    partdb_of.insert(id.clone(), path.to_string());
+                }
+            }
+            for (id, (updated, files)) in &stored {
+                if !files.iter().any(|f| f == path) {
+                    continue;
+                }
+                match src.get(id.as_str()) {
+                    Some(u) if Some(*u) == *updated => {} // unchanged
+                    Some(_) => {
+                        dirty.insert(id.clone());
+                        partdb_of.insert(id.clone(), path.to_string());
+                    }
+                    None => {
+                        gone.insert(id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Parsed JSONL files dirty the sessions they group into (new or changed)…
+    for rf in &touched {
+        dirty.insert(rf.canonical_id.clone());
+    }
+    // …and any stored session whose files include a touched/removed JSONL
+    // source (multi-file merges; a removed file drops the session when the
+    // re-assembly below finds nothing left backing it).
+    for (id, (_, files)) in &stored {
+        if files.iter().any(|f| jsonl_touched.contains(f.as_str())) {
+            dirty.insert(id.clone());
+        }
+    }
+
+    // New sidechains parsed this round feed the Task→child link map.
+    let new_children: BTreeMap<String, String> = touched
+        .iter()
+        .filter(|rf| rf.is_sidechain)
+        .map(|rf| (rf.canonical_id.clone(), rf.canonical_id.clone()))
+        .collect();
+    let touched_paths: BTreeSet<String> = touched.iter().map(|rf| rf.path.to_string_lossy().to_string()).collect();
+
+    let tx = conn.unchecked_transaction()?;
+    for id in &dirty {
+        // File set: the stored row's sources ∪ this round's parsed files ∪
+        // the part-style db the session was diffed out of (new sessions have
+        // no stored row to name it).
+        let mut files: Vec<String> = stored
+            .get(id)
+            .map(|(_, f)| f.clone())
+            .unwrap_or_default();
+        if let Some(db) = partdb_of.get(id) {
+            if !files.contains(db) {
+                files.push(db.clone());
+            }
+        }
+        for rf in touched.iter().filter(|rf| &rf.canonical_id == id) {
+            let p = rf.path.to_string_lossy().to_string();
+            if !files.contains(&p) {
+                files.push(p);
+            }
+        }
+        // Parse the file set (reusing this round's parsed JSONL), keeping
+        // only this conversation's raws.
+        let mut raws: Vec<super::RawFile> = Vec::new();
+        for f in &files {
+            if touched_paths.contains(f) {
+                continue; // already parsed above
+            }
+            let p = Path::new(f);
+            if !p.is_file() {
+                continue;
+            }
+            if p.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                if let Ok(parsed) = super::parse_jsonl_events(p) {
+                    raws.push(super::rawfile_from_jsonl(p, parsed));
+                }
+            } else if let Some(rf) = super::partdb::collect_one(p, id)? {
+                raws.push(rf);
+            }
+        }
+        raws.extend(
+            touched
+                .iter()
+                .filter(|rf| &rf.canonical_id == id)
+                .cloned(),
+        );
+        raws.retain(|rf| &rf.canonical_id == id);
+        raws.sort_by_key(|rf| (rf.started_at, rf.path.clone()));
+
+        let mut a2c = agent_to_child_map(&tx, provider, id)?;
+        a2c.extend(new_children.clone());
+        match super::assemble_session(provider, id, raws, &a2c) {
+            Some(a) => upsert_session_row(&tx, &a)?,
+            None => delete_session_row(&tx, provider, id)?,
+        }
+    }
+    for id in &gone {
+        delete_session_row(&tx, provider, id)?;
+    }
+    replace_sources(&tx, provider, disk)?;
     recompute_child_counts(&tx, provider)?;
     tx.commit()?;
     Ok(())
@@ -89,9 +294,7 @@ fn stored_snapshot(conn: &Connection, provider: &str) -> AppResult<Vec<(String, 
     Ok(out)
 }
 
-/// Rewrite the provider's index rows. One small `session` row per
-/// conversation (identity, location, rollups) — the transcript mirror tables
-/// are gone (schema v3).
+/// Rewrite ALL of the provider's index rows (the first-import path).
 fn replace_provider_rows(
     tx: &Connection,
     provider: &str,
@@ -99,49 +302,86 @@ fn replace_provider_rows(
 ) -> AppResult<()> {
     tx.execute("DELETE FROM session WHERE provider = ?1", [provider])?;
     for a in assembled {
-        let s = &a.session;
-        // Rollups from the in-memory parts (single formula source: the same
-        // width walk the pressure header ran over `session_part` rows).
-        let pressure = super::handoff::context_pressure(&a.parts, None);
-        let last_model = super::handoff::last_model(&a.parts);
-        let source_files_json = serde_json::to_string(&s.source_files).unwrap_or_else(|_| "[]".into());
-        let session_meta = if s.provider_metadata_json.is_empty() {
-            "{}".to_string()
-        } else {
-            s.provider_metadata_json.clone()
-        };
-        tx.execute(
-            "INSERT INTO session (
-               provider, id, title, summary, project, cwd, started_at, updated_at,
-               ended_at, message_count, source_path, parent_session_id, agent_id,
-               is_subagent, resume_command, child_count, source_files_json,
-               provider_metadata_json, est_tokens, top_consumer, last_model
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
-            params![
-                s.provider,
-                s.id,
-                s.title,
-                s.summary,
-                s.project,
-                s.cwd,
-                s.started_at,
-                s.updated_at,
-                s.ended_at,
-                a.parts.len() as i64,
-                s.source_path,
-                s.parent_session_id,
-                s.agent_id,
-                s.is_subagent as i64,
-                s.resume_command,
-                s.child_count as i64,
-                source_files_json,
-                session_meta,
-                pressure.est_tokens,
-                pressure.top_consumer,
-                last_model,
-            ],
-        )?;
+        upsert_session_row(tx, a)?;
     }
+    Ok(())
+}
+
+/// Upsert ONE session index row (identity, location, rollups) — shared by the
+/// first-import and incremental reconcile paths. Rollups come from the
+/// in-memory parts (single formula source: the same width walk the pressure
+/// header ran over the mirror rows pre-v3).
+fn upsert_session_row(tx: &Connection, a: &AssembledSession) -> AppResult<()> {
+    let s = &a.session;
+    let pressure = super::handoff::context_pressure(&a.parts, None);
+    let last_model = super::handoff::last_model(&a.parts);
+    let source_files_json = serde_json::to_string(&s.source_files).unwrap_or_else(|_| "[]".into());
+    let session_meta = if s.provider_metadata_json.is_empty() {
+        "{}".to_string()
+    } else {
+        s.provider_metadata_json.clone()
+    };
+    tx.execute(
+        "INSERT INTO session (
+           provider, id, title, summary, project, cwd, started_at, updated_at,
+           ended_at, message_count, source_path, parent_session_id, agent_id,
+           is_subagent, resume_command, child_count, source_files_json,
+           provider_metadata_json, est_tokens, top_consumer, last_model
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
+         ON CONFLICT(provider, id) DO UPDATE SET
+           title=excluded.title,
+           summary=excluded.summary,
+           project=excluded.project,
+           cwd=excluded.cwd,
+           started_at=excluded.started_at,
+           updated_at=excluded.updated_at,
+           ended_at=excluded.ended_at,
+           message_count=excluded.message_count,
+           source_path=excluded.source_path,
+           parent_session_id=excluded.parent_session_id,
+           agent_id=excluded.agent_id,
+           is_subagent=excluded.is_subagent,
+           resume_command=excluded.resume_command,
+           child_count=excluded.child_count,
+           source_files_json=excluded.source_files_json,
+           provider_metadata_json=excluded.provider_metadata_json,
+           est_tokens=excluded.est_tokens,
+           top_consumer=excluded.top_consumer,
+           last_model=excluded.last_model",
+        params![
+            s.provider,
+            s.id,
+            s.title,
+            s.summary,
+            s.project,
+            s.cwd,
+            s.started_at,
+            s.updated_at,
+            s.ended_at,
+            a.parts.len() as i64,
+            s.source_path,
+            s.parent_session_id,
+            s.agent_id,
+            s.is_subagent as i64,
+            s.resume_command,
+            s.child_count as i64,
+            source_files_json,
+            session_meta,
+            pressure.est_tokens,
+            pressure.top_consumer,
+            last_model,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Drop one session's index row (incremental path: source material gone or
+/// the session vanished from the source db).
+fn delete_session_row(tx: &Connection, provider: &str, id: &str) -> AppResult<()> {
+    tx.execute(
+        "DELETE FROM session WHERE provider = ?1 AND id = ?2",
+        params![provider, id],
+    )?;
     Ok(())
 }
 

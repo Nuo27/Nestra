@@ -919,6 +919,19 @@ pub struct AssembledSession {
     pub parts: Vec<Part>,
 }
 
+/// Resume command for one session id. Inline so the persisted
+/// `resume_command` field and `build_resume_command` stay consistent — these
+/// must match the templates in `provider.rs::default_provider_registry`.
+/// (Pi/OpenCode use `--session`, not the older `--resume`/`--resume-id`.)
+/// Single source: the `SessionRef.resume_command` template in the agent
+/// registry (previously a second hardcoded map here that had to be kept in
+/// sync with it).
+fn resume_for(provider: &str, id: &str) -> String {
+    resume_command_for(provider)
+        .map(|t| t.replace("{id}", id))
+        .unwrap_or_default()
+}
+
 /// Assemble `raws` into canonical `(Session, Vec<Part>)` pairs. This is the
 /// only place grouping/pairing happens; importers never touch it.
 pub fn assemble(provider: &str, raws: Vec<RawFile>) -> Vec<AssembledSession> {
@@ -949,61 +962,85 @@ pub fn assemble(provider: &str, raws: Vec<RawFile>) -> Vec<AssembledSession> {
         .map(|k| (k.clone(), k.clone()))
         .collect();
 
-    // Resume command: resolved via the provider registry's template map.
-    let resume_of = |id: &str| -> String {
-        resume_command_for(provider)
-            .map(|tmpl| tmpl.replace("{id}", id))
-            .unwrap_or_default()
-    };
+    let resume_of = |id: &str| resume_for(provider, id);
 
     let mut out: Vec<AssembledSession> = Vec::new();
 
     // Top-level conversations.
-    for (id, mut files) in groups {
-        files.sort_by_key(|f| (f.started_at, f.path.clone()));
-        let parts = assemble_parts(&files, &agent_to_child);
-        let header =
-            derive_header(provider, &id, &files, false, None, None, &child_counts, &resume_of);
-        out.push(AssembledSession {
-            session: header,
-            parts,
-        });
+    for (id, files) in groups {
+        out.push(assemble_group(provider, &id, files, false, &agent_to_child, &child_counts, &resume_of));
     }
 
-    // Sidechain (subagent) conversations. A subagent's resume command is the
-    // *parent's* — resuming the subagent directly isn't meaningful; the user
-    // resumes the parent and the agent is re-spawned.
-    for (id, mut files) in sidechains {
-        files.sort_by_key(|f| (f.started_at, f.path.clone()));
-        let parent = files.iter().rev().find_map(|f| f.parent_session_id.clone());
-        let agent_id = files.iter().rev().find_map(|f| f.agent_id.clone());
-        let parts = assemble_parts(&files, &agent_to_child);
-        let parent_for_resume = parent.clone();
-        let sidechain_resume = move |_ignored: &str| -> String {
-            parent_for_resume
-                .as_deref()
-                .map(resume_of)
-                .unwrap_or_default()
-        };
-        let header = derive_header(
-            provider,
-            &id,
-            &files,
-            true,
-            parent.clone(),
-            agent_id,
-            &std::collections::BTreeMap::new(),
-            &sidechain_resume,
-        );
-        out.push(AssembledSession {
-            session: header,
-            parts,
-        });
+    // Sidechain (subagent) conversations.
+    for (id, files) in sidechains {
+        out.push(assemble_group(provider, &id, files, true, &agent_to_child, &BTreeMap::new(), &resume_of));
     }
 
     // newest first
     out.sort_by_key(|a| std::cmp::Reverse(a.session.updated_at));
     out
+}
+
+/// One grouped conversation → its `AssembledSession`. The single-group core
+/// the full [`assemble`] and the incremental [`assemble_session`] share: sort
+/// the group's files, derive the header (sidechain conversations resume via
+/// their PARENT — resuming the subagent directly isn't meaningful; the user
+/// resumes the parent and the agent is re-spawned), sequence + link the parts.
+fn assemble_group(
+    provider: &str,
+    id: &str,
+    mut files: Vec<RawFile>,
+    is_sidechain: bool,
+    agent_to_child: &std::collections::BTreeMap<String, String>,
+    child_counts: &std::collections::BTreeMap<String, u32>,
+    resume_of: &dyn Fn(&str) -> String,
+) -> AssembledSession {
+    files.sort_by_key(|f| (f.started_at, f.path.clone()));
+    let parent = files.iter().rev().find_map(|f| f.parent_session_id.clone());
+    let agent_id = files.iter().rev().find_map(|f| f.agent_id.clone());
+    let parts = assemble_parts(&files, agent_to_child);
+    let header = if is_sidechain {
+        let parent_for_resume = parent.clone();
+        let sidechain_resume =
+            move |_ignored: &str| parent_for_resume.as_deref().map(resume_of).unwrap_or_default();
+        derive_header(
+            provider,
+            id,
+            &files,
+            true,
+            parent,
+            agent_id,
+            &std::collections::BTreeMap::new(),
+            &sidechain_resume,
+        )
+    } else {
+        derive_header(provider, id, &files, false, None, None, child_counts, resume_of)
+    };
+    AssembledSession {
+        session: header,
+        parts,
+    }
+}
+
+/// Re-assemble ONE session from its (already-parsed) files — the per-session
+/// core of the incremental reconcile. `agent_to_child` links Task spawns to
+/// child sessions (existing index rows + any NEW sidechain files among
+/// `files`). `None` when there is nothing to assemble — the caller treats
+/// that as "the session's source material is gone" and drops the index row.
+/// `child_count` starts at 0; the store's `recompute_child_counts` fixes it
+/// in the same transaction.
+pub fn assemble_session(
+    provider: &str,
+    id: &str,
+    files: Vec<RawFile>,
+    agent_to_child: &std::collections::BTreeMap<String, String>,
+) -> Option<AssembledSession> {
+    if files.is_empty() {
+        return None;
+    }
+    let is_sidechain = files.iter().any(|f| f.is_sidechain);
+    let resume_of = |sid: &str| resume_for(provider, sid);
+    Some(assemble_group(provider, id, files, is_sidechain, agent_to_child, &std::collections::BTreeMap::new(), &resume_of))
 }
 
 /// Merge events from `files` into sequenced, paired [`Part`]s.
