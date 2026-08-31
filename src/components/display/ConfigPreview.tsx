@@ -239,7 +239,10 @@ function piPreview(e: EndpointInfo, m: Models, hasAnthropic: boolean): Preview {
 /** Mirrors agents/codex/config.rs — `[model_providers.nestra-<id>]` +
  * selection keys in `~/.codex/config.toml`. Codex appends `/responses` to
  * base_url itself, so the preview shows the version root (strip the
- * `/responses` tail from the endpoint's full Responses URL). */
+ * `/responses` tail from the endpoint's full Responses URL). Shows the
+ * no-login shape: without a ChatGPT login in auth.json the table omits
+ * `requires_openai_auth` (it would make the app demand a login) and the
+ * key is also written to `~/.codex/auth.json` as `OPENAI_API_KEY`. */
 function codexPreview(e: EndpointInfo, m: Models): Preview {
   const key = `nestra-${e.id}`;
   const url = pickUrl(e, "response-api").replace(/\/+$/, "");
@@ -253,7 +256,6 @@ function codexPreview(e: EndpointInfo, m: Models): Preview {
     `name = ${JSON.stringify(`${e.display_name} (via Nestra)`)}`,
     `wire_api = "responses"`,
     `base_url = ${JSON.stringify(base)}`,
-    `requires_openai_auth = true`,
     `experimental_bearer_token = ${JSON.stringify(KEY_PLACEHOLDER)}`,
   ].join("\n");
   return {
