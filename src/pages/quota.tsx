@@ -31,7 +31,7 @@ export function QuotaPage({ id }: { id: string }) {
   return (
     <Page>
       <PageHeader
-        back={<BackLink to="/">{t("nav.providers")}</BackLink>}
+        back={<BackLink to="/providers">{t("nav.providers")}</BackLink>}
         title={endpoint?.display_name || id}
       />
       {endpoint ? (
