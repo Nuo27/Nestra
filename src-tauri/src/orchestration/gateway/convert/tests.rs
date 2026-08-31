@@ -163,6 +163,27 @@ fn chat_request_to_anthropic_messages() {
     assert!(out.get("stream_options").is_none());
 }
 
+/// OpenAI's STRING tool_choice forms must become the Anthropic OBJECT form —
+/// a bare string is a 422 "Input should be a valid dictionary" on
+/// Anthropic-compatible upstreams (z.ai returns exactly that for
+/// `"tool_choice":"auto"`). `required` maps to Anthropic's `any`.
+#[test]
+fn chat_request_tool_choice_strings_map_to_anthropic_objects() {
+    for (input, expect_type) in [("auto", "auto"), ("none", "none"), ("required", "any")] {
+        let body = serde_json::json!({
+            "model": "m",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "tool_choice": input,
+        });
+        let out: Value =
+            serde_json::from_slice(&chat_to_anthropic(body.to_string().as_bytes())).unwrap();
+        assert_eq!(
+            out["tool_choice"]["type"], expect_type,
+            "string {input:?} must map to the anthropic object form"
+        );
+    }
+}
+
 #[test]
 fn anthropic_response_to_chat_completion() {
     // Anthropic message response → chat completion (tool_use + usage).

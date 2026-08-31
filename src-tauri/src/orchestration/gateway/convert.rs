@@ -760,10 +760,19 @@ pub fn chat_to_anthropic(body: &[u8]) -> Bytes {
         obj.insert("tools".into(), Value::Array(out));
     }
 
-    // tool_choice reverse map (openai → anthropic).
+    // tool_choice reverse map (openai → anthropic). The Anthropic Messages
+    // API takes tool_choice ONLY in object form — a bare string (the OpenAI
+    // wire shape) is a 422 "Input should be a valid dictionary" on
+    // Anthropic-compatible upstreams (z.ai returns exactly that for
+    // `"tool_choice":"auto"`).
     if let Some(choice) = obj.get("tool_choice").cloned() {
         let mapped = match choice {
-            Value::String(ref s) if s == "required" => Value::String("any".into()),
+            Value::String(ref s) => match s.as_str() {
+                "auto" => serde_json::json!({ "type": "auto" }),
+                "none" => serde_json::json!({ "type": "none" }),
+                "required" => serde_json::json!({ "type": "any" }),
+                _ => Value::String(s.clone()),
+            },
             Value::Object(mut m)
                 if m.get("type").and_then(Value::as_str) == Some("function") =>
             {
