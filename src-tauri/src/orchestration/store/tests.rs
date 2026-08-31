@@ -171,6 +171,64 @@ fn seed_task_chain(conn: &Connection, task_id: &str, with_endpoint: bool) {
 }
 
 #[test]
+fn mark_aborted_flips_only_open_attempts() {
+    // A post-completion agent disconnect (hyper can drop the response body
+    // without polling its end frame) must not overwrite a terminal outcome:
+    // only a still-open (NULL status) attempt flips to 499.
+    let conn = fresh_db();
+    let task_id = uuid::Uuid::new_v4();
+    seed_task_chain(&conn, &task_id.to_string(), false);
+    let rec = |status: Option<i64>| RouteRecord {
+        request_id: uuid::Uuid::new_v4(),
+        task_id,
+        agent_id: "codex-desktop".into(),
+        logical_session: None,
+        subagent_role: Some("main".into()),
+        role_source: Some("heuristic".into()),
+        requested_model: Some("nestra".into()),
+        requested_provider: None,
+        resolved_endpoint_id: None,
+        resolved_model: None,
+        protocol: None,
+        route_reason: "policy".into(),
+        http_status: status,
+        usage_input: None,
+        usage_output: None,
+        cache_creation: None,
+        cache_read: None,
+        tool_calls: None,
+        tool_names: None,
+        generation_broken: false,
+        started_at: 100,
+        ended_at: None,
+    };
+    let open = rec(None);
+    let done = rec(Some(200));
+    insert_route_request(&conn, &open).unwrap();
+    insert_route_request(&conn, &done).unwrap();
+
+    assert!(
+        mark_route_request_aborted_if_open(&conn, &open.request_id.to_string(), 300).unwrap(),
+        "an open attempt flips to 499"
+    );
+    assert!(
+        !mark_route_request_aborted_if_open(&conn, &done.request_id.to_string(), 300).unwrap(),
+        "a terminal attempt is left alone"
+    );
+
+    let status = |rid: &str| {
+        conn.query_row(
+            "SELECT http_status FROM route_request WHERE request_id = ?1",
+            rusqlite::params![rid],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(status(&open.request_id.to_string()), Some(499));
+    assert_eq!(status(&done.request_id.to_string()), Some(200));
+}
+
+#[test]
 fn route_request_round_trip_and_history() {
     let conn = fresh_db();
     let task_id = uuid::Uuid::new_v4();

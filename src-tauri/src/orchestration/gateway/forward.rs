@@ -91,7 +91,7 @@ impl ForwardOutcome {
             // A 2xx whose buffered body read failed mid-stream is NOT a
             // success — the recorded status must reflect the failure so
             // task_summaries doesn't show a "successful" attempt that was
-            // retried (the old code stored the literal 200).
+            // retried.
             ForwardOutcome::Responded {
                 status,
                 body_error: Some(_),
@@ -650,8 +650,8 @@ fn rotate_ctx(ctx: &TaskContext, agent_id: &str) -> TaskContext {
 /// if the task already exists, nothing happens. Synchronous (all rusqlite);
 /// the caller holds the DB lock.
 /// Record the "attempt started" bookkeeping in ONE transaction: the task seed
-/// (only when missing) plus the `route_request` insert. Previously 3-4
-/// separate auto-commit transactions per proxied request; now one commit.
+/// (only when missing) plus the `route_request` insert — one commit per
+/// proxied request, not several auto-commits.
 /// Best-effort (observability data — failures are logged, never fatal), so a
 /// transaction failure skips the bookkeeping rather than erroring the request.
 fn record_attempt_start(
@@ -773,10 +773,8 @@ async fn record_attempt_outcome(
         None | Some(FailureClass::QuotaExhausted)
     );
     observability_write(state, "finalize route_request", move |conn| {
-        // Persist the quota-state change so it survives a restart — the
-        // gateway previously only mutated the in-memory store, leaving the
-        // documented `last_quota_state` persistence bridge disconnected
-        // (the column stayed stale forever).
+        // Persist the quota-state change so it survives a restart —
+        // `last_quota_state` must stay in sync with the in-memory store.
         if persist_quota {
             crate::orchestration::quota_state::persist(conn, &endpoint_id, &quota_snap)?;
         }
@@ -833,28 +831,28 @@ async fn mark_task_terminal(state: &GatewayState, task_id: &uuid::Uuid, terminal
 /// targets them by request_id, so their ordering must not float.
 /// Finalize an attempt whose AGENT vanished mid-flight as `http_status`
 /// 499 (client closed request — the nginx convention) instead of leaving a
-/// born/NULL row. Observability-grade: lock-escaped, best-effort.
+/// born/NULL row. Guarded: only an STILL-OPEN attempt flips — a disconnect
+/// after the response completed (hyper may drop the body without polling
+/// its end frame, firing the abort guard post-delivery) keeps the
+/// successful outcome and the done task. Observability-grade:
+/// lock-escaped, best-effort.
 pub(super) async fn finalize_client_aborted(
     state: &GatewayState,
     request_id: &str,
     task_id: &uuid::Uuid,
 ) {
     let request_id = request_id.to_string();
+    let request_id_log = request_id.clone();
     let task_id = *task_id;
-    observability_write(state, "finalize client-aborted attempt", move |conn| {
-        store::update_route_request_outcome(
+    let flipped = observability_write(state, "finalize client-aborted attempt", move |conn| {
+        let flipped = store::mark_route_request_aborted_if_open(
             conn,
             &request_id,
-            Some(499),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
             chrono::Utc::now().timestamp_millis(),
         )?;
+        if !flipped {
+            return Ok(false);
+        }
         // The streaming body only knows its request_id — resolve the task
         // from the attempt row when the caller couldn't supply one.
         let task = if task_id.is_nil() {
@@ -875,9 +873,23 @@ pub(super) async fn finalize_client_aborted(
                 chrono::Utc::now().timestamp_millis(),
             )?;
         }
-        Ok(())
+        Ok(true)
     })
     .await;
+    // Runs outside any span (the handler/body was dropped) — carry the id.
+    // `None` = write deferred to the background retry; the guard makes the
+    // outcome correct either way, so there is nothing decisive to log yet.
+    match flipped {
+        Some(true) => tracing::warn!(
+            request = %request_id_log,
+            "gw.abort: agent disconnected mid-stream — attempt finalized as 499"
+        ),
+        Some(false) => tracing::debug!(
+            request = %request_id_log,
+            "gw.abort: agent closed after completion — attempt already terminal"
+        ),
+        None => {}
+    }
 }
 
 /// Drop guard around one in-flight attempt: armed before `forward`, disarmed
@@ -909,11 +921,15 @@ impl Drop for AttemptGuard {
         let request_id = std::mem::take(&mut self.request_id);
         let task_id = self.task_id;
         // Runs outside any span (the handler future was dropped) — carry the
-        // correlation ids explicitly.
-        tracing::warn!(
+        // correlation ids explicitly. Debug-level: the authoritative
+        // WARN/debug pair is logged by `finalize_client_aborted`, which knows
+        // whether the attempt actually flipped to 499 (a dropped handler is
+        // usually a real abort, but a post-completion disconnect lands here
+        // too).
+        tracing::debug!(
             request = %request_id,
             task = %task_id,
-            "gw.abort: agent disconnected mid-attempt — finalizing as 499"
+            "gw.abort: agent disconnected mid-attempt"
         );
         tokio::spawn(async move {
             finalize_client_aborted(&state, &request_id, &task_id).await;
@@ -921,11 +937,11 @@ impl Drop for AttemptGuard {
     }
 }
 
-async fn observability_write(
+async fn observability_write<T: Send + Sync + 'static>(
     state: &GatewayState,
     what: &'static str,
-    write: impl Fn(&rusqlite::Connection) -> crate::error::AppResult<()> + Send + Sync + 'static,
-) {
+    write: impl Fn(&rusqlite::Connection) -> crate::error::AppResult<T> + Send + Sync + 'static,
+) -> Option<T> {
     let is_locked = |e: &crate::error::AppError| e.to_string().to_lowercase().contains("locked");
     {
         let conn = state.db.lock().await;
@@ -933,13 +949,13 @@ async fn observability_write(
         let result = write(&conn);
         let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         match result {
-            Ok(()) => return,
+            Ok(v) => return Some(v),
             Err(e) if is_locked(&e) => {
                 tracing::warn!("gateway: {what} deferred — database locked, retrying in background");
             }
             Err(e) => {
                 tracing::warn!("gateway: {what} failed: {e}");
-                return;
+                return None;
             }
         }
     }
@@ -952,7 +968,7 @@ async fn observability_write(
             tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
             let conn = state.db.lock().await;
             match write(&conn) {
-                Ok(()) => return,
+                Ok(_) => return,
                 Err(e) if is_locked(&e) => continue,
                 Err(e) => {
                     tracing::warn!("gateway: {what} retry failed: {e}");
@@ -962,6 +978,8 @@ async fn observability_write(
         }
         tracing::warn!("gateway: {what} gave up after retries");
     });
+    // The write went to the background retry — no inline result to report.
+    None
 }
 
 /// Record a migration event (the route_migration row). `from_endpoint_id` is

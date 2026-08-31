@@ -55,8 +55,7 @@ use super::GatewayState;
 /// The shared hyper client used to dial upstreams: ONE per process, created
 /// on first use and pooled from then on (hyper-util's Client reuses
 /// keep-alive connections internally, so repeat requests to the same
-/// provider skip the TLS handshake — a per-request client paid it every
-/// time, a measured 100-300ms tax on every routed call).
+/// provider skip the per-request TLS handshake).
 /// `pub(super)` so the sibling OpenAI/Responses handlers share one pool;
 /// dial sites clone it (a hyper `Client` is a cheap `Arc` handle — cloning
 /// does NOT create a new pool).
@@ -110,8 +109,7 @@ pub async fn handle_bytes(
     agent_id: &str,
 ) -> Result<Response<GatewayBody>, AppError> {
     // Build the TaskContext. Parse the body ONCE and reuse the Value for
-    // model extraction + subagent detection below (the old code parsed the
-    // whole body twice on the hot path).
+    // model extraction + subagent detection below.
     let body_json: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
     let requested_model = body_json
         .as_ref()
@@ -151,7 +149,7 @@ pub async fn handle_bytes(
     }
 
     // Capability requirements derived from the body activate the router's
-    // capability stage (tool/vision/reasoning; Smart Gateway fix 2).
+    // capability stage (tool/vision/reasoning).
     // Conservative: absent signals stay false → no filtering.
     ctx.required_capabilities =
         crate::orchestration::capability_registry::derive_capability_req(
@@ -439,13 +437,12 @@ pub(super) struct RelayOutcome {
 ///
 /// Streaming usage: the SSE body is wrapped in [`ObservingBody`], which
 /// accumulates usage + tool-call ids while the agent consumes the stream and
-/// backfills the `route_request` row when the stream ends (Smart Gateway
-/// fix 1). `RelayOutcome.usage` is still `None` on this path — at return time
+/// backfills the `route_request` row when the stream ends.
+/// `RelayOutcome.usage` is still `None` on this path — at return time
 /// the stream has not been read yet. The accumulator is a `std::sync::Mutex`
-/// held only for brief, non-`.await` sections inside `poll_frame` — the
-/// original streaming-observation code panicked because it used
-/// `tokio::sync::Mutex::blocking_lock` on the worker thread; that pattern
-/// stays out.
+/// held only for brief, non-`.await` sections inside `poll_frame` — a
+/// blocking lock on the Tokio worker thread would panic, so
+/// `blocking_lock` never appears here.
 ///
 /// `upstream_wire` is the UPSTREAM's protocol (`route.protocol`) — the body
 /// wrapper sees the raw upstream bytes, which for a bridged route (e.g.
@@ -674,7 +671,7 @@ pub(super) async fn probe_and_relay(
 }
 
 /// A streaming body wrapper that observes usage + tool calls while relaying
-/// SSE bytes verbatim to the agent (Smart Gateway fix 1).
+/// SSE bytes verbatim to the agent.
 ///
 /// ## Panic safety (the constraint this design exists to honor)
 ///
@@ -824,20 +821,25 @@ impl ObservingBody {
 }
 
 impl Drop for ObservingBody {
-    /// The agent dropped the response body mid-stream (disconnect / abort):
-    /// fire the normal finish bookkeeping (usage backfill) and finalize the
-    /// attempt honestly as 499 — without this a vanished client leaves a
-    /// NULL-status route_request row forever.
+    /// The agent dropped the response body before its clean end (disconnect /
+    /// abort): fire the normal finish bookkeeping (usage backfill) and let
+    /// `finalize_client_aborted` flip the attempt to 499 — without this a
+    /// vanished client leaves a NULL-status route_request row forever.
+    /// `finish()` takes the request id, so clone it FIRST. Debug-level here:
+    /// the authoritative WARN/debug pair
+    /// comes from the finalize, which knows whether the attempt was still
+    /// open — hyper can drop a fully-delivered body without polling its end
+    /// frame, landing here AFTER a successful completion.
     fn drop(&mut self) {
         if self.done {
             return;
         }
+        let request_id = self.request_id.clone();
         self.finish();
         let state = self.state.clone();
-        let request_id = std::mem::take(&mut self.request_id);
-        tracing::warn!(
+        tracing::debug!(
             request = %request_id,
-            "gw.abort: agent disconnected mid-stream — finalizing as 499"
+            "gw.abort: agent dropped the response body before its end"
         );
         tokio::spawn(async move {
             super::forward::finalize_client_aborted(

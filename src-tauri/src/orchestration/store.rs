@@ -312,6 +312,25 @@ pub fn insert_route_request(conn: &Connection, rec: &RouteRecord) -> AppResult<(
 /// response streams. `generation_broken` is set when the response was produced
 /// by a fresh upstream generation after a mid-stream migration (correction #2).
 #[allow(clippy::too_many_arguments)]
+/// Flip an attempt to 499 ONLY while it is still open (`http_status` NULL).
+/// A post-completion agent disconnect (hyper can drop the response body
+/// without polling its end frame, firing the abort guard AFTER the full
+/// response was delivered and the outcome finalized) must not overwrite a
+/// terminal outcome nor fail the done task. Returns whether the row flipped.
+pub fn mark_route_request_aborted_if_open(
+    conn: &Connection,
+    request_id: &str,
+    ended_at: i64,
+) -> AppResult<bool> {
+    let n = conn
+        .prepare_cached(
+            "UPDATE route_request SET http_status = 499, ended_at = ?2
+             WHERE request_id = ?1 AND http_status IS NULL",
+        )?
+        .execute(rusqlite::params![request_id, ended_at])?;
+    Ok(n > 0)
+}
+
 pub fn update_route_request_outcome(
     conn: &Connection,
     request_id: &str,
