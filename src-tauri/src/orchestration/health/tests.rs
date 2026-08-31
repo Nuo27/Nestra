@@ -259,6 +259,24 @@ fn error_rate_backstop_opens_flapping_endpoint() {
     assert!(h.is_degraded(ep, "m"));
 }
 
+/// Non-migratable 4xx (bad_request/auth) are request-shaped errors surfaced
+/// per request — the backstop must not count them, or the endpoint is exiled
+/// behind an opaque 503 that hides the real error (a z.ai `tool_choice` 422
+/// storm once opened the breaker with a "100%" error rate).
+#[test]
+fn error_rate_backstop_ignores_non_migratable_failures() {
+    let h = ProviderHealth::new();
+    for _ in 0..12 {
+        h.record("ep-1", "m", HealthOutcome::Fail(FailureClass::BadRequest), 422);
+    }
+    assert_eq!(
+        h.get("ep-1", "m").breaker,
+        BreakerState::Closed,
+        "a bad_request storm must not open the breaker"
+    );
+    assert!(!h.is_degraded("ep-1", "m"));
+}
+
 #[test]
 fn error_rate_backstop_disabled_at_zero_pct() {
     let tuning = crate::orchestration::gateway::tuning::shared_default();

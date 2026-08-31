@@ -152,8 +152,8 @@ pub enum HealthOutcome {
     Fail(FailureClass),
 }
 
-/// The circuit-breaker state machine per endpoint (cc-switch-style
-/// Closed/Open/HalfOpen). Transitions are evaluated lazily at
+/// The per-endpoint circuit-breaker state machine (Closed/Open/HalfOpen).
+/// Transitions are evaluated lazily at
 /// record/query time — there is no background prober task.
 ///
 /// * `Closed → Open`: `breaker_failure_threshold` consecutive migratable
@@ -246,8 +246,8 @@ pub struct ProviderHealth {
 /// How many recent outcomes to retain per endpoint (the error-rate
 /// backstop's sample window).
 pub const WINDOW: usize = 20;
-/// A persisted open circuit is dropped at load when older than this
-/// (Smart Gateway fix 3, the stale-circuit trap): a restart hours later
+/// A persisted open circuit is dropped at load when older than this:
+/// a restart hours later
 /// must not resurrect a long-dead exclusion. The in-memory breaker itself
 /// recovers via the (much shorter) `breaker_recovery_wait_secs`.
 pub const PERSIST_TTL_MS: i64 = 10 * 60 * 1000;
@@ -374,12 +374,21 @@ impl ProviderHealth {
         // it after an Ok would let a stale window instantly re-open a
         // circuit that half-open probes just closed (livelock: an excluded
         // endpoint gets no traffic, so its window never drains). 0 disables.
+        //
+        // The numerator counts only MIGRATABLE failures: bad_request/auth
+        // are request-shaped 4xx surfaced per request — counting them exiles
+        // the endpoint behind an opaque 503 that hides the real error, and
+        // those classes never migrate by design so opening buys nothing.
         if tuning.breaker_error_rate_pct > 0
             && matches!(outcome, HealthOutcome::Fail(_))
             && h.breaker == BreakerState::Closed
             && h.recent.len() >= tuning.breaker_min_requests as usize
         {
-            let fails = h.recent.iter().filter(|o| !o.ok).count();
+            let fails = h
+                .recent
+                .iter()
+                .filter(|o| o.class.is_some_and(|c| c.can_migrate()))
+                .count();
             let pct = fails as u64 * 100 / h.recent.len() as u64;
             if pct >= tuning.breaker_error_rate_pct {
                 h.breaker = BreakerState::Open { opened_at_ms: now };
