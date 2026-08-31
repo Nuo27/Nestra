@@ -120,6 +120,12 @@ fn db_without_threads_table_is_skipped() {
     let conn = rusqlite::Connection::open(&db).unwrap();
     conn.execute("CREATE TABLE other (x INTEGER)", []).unwrap();
     drop(conn);
-    // "no such table: threads" is warned + skipped, not propagated.
+    // A catalog DB (no `threads` table, never had one) is skipped SILENTLY —
+    // no warn, and no spurious `.nestra-backup` copy.
     sync_provider_visibility(&home.join("config.toml"), "nestra-zai");
+    assert!(
+        !db.with_extension("db.nestra-backup").exists(),
+        "a DB without a threads table must not be backed up"
+    );
+    assert!(db.exists(), "the catalog DB itself is left untouched");
 }

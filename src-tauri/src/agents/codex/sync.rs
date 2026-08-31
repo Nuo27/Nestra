@@ -3,14 +3,17 @@
 //! Codex records the active `model_provider` in TWO places per conversation:
 //! the first line (`session_meta`) of each rollout JSONL under
 //! `~/.codex/sessions/**` (and `archived_sessions/**`), and the `threads`
-//! table of the state SQLite DB (`~/.codex/sqlite/*.db`, older builds:
-//! `~/.codex/state_5.sqlite`). The Desktop app filters its conversation list
-//! by the CURRENT root `model_provider` — after a provider switch, every
-//! older conversation would vanish from the UI until its metadata is
-//! rewritten to the new provider id.
+//! table of the state SQLite DB. The `~/.codex/sqlite/` directory also holds
+//! the Desktop app's CATALOG databases (`codex-dev.db`: local_thread_catalog,
+//! automations, inbox — no `threads` table, never had one), so each candidate
+//! DB is probed for the table before touching it; a DB without it is skipped
+//! silently. Older builds keep `threads` in `~/.codex/state_5.sqlite`.
+//! The Desktop app filters its conversation list by the CURRENT root
+//! `model_provider` — after a provider switch, every older conversation would
+//! vanish from the UI until its metadata is rewritten to the new provider id.
 //!
-//! This module performs that rewrite (the same recipe CodexPlusPlus's
-//! provider-sync validated): first-line rewrite for rollouts + a single
+//! This module performs that rewrite: first-line rewrite for rollouts + a
+//! single
 //! `UPDATE threads` per DB, with a one-time `.nestra-backup` of each DB
 //! before the first write. Best-effort by design — a failure is logged and
 //! skipped, never propagated: the config write that triggered the sync has
@@ -149,13 +152,26 @@ fn update_one_db(db: &Path, new_provider: &str) -> AppResult<usize> {
     if !db.exists() {
         return Ok(0);
     }
+    let conn = rusqlite::Connection::open(db)?;
+    conn.busy_timeout(std::time::Duration::from_millis(2000))?;
+    // Probe before touching anything: `~/.codex/sqlite/` also holds the
+    // Desktop app's catalog DBs (no `threads` table, never had one) — those
+    // are skipped silently, without a spurious `.nestra-backup` copy.
+    let has_threads: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'threads')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !has_threads {
+        return Ok(0);
+    }
     // One-time safety net before the first write to this DB.
     let backup = db.with_extension("db.nestra-backup");
     if !backup.exists() {
         let _ = std::fs::copy(db, &backup);
     }
-    let conn = rusqlite::Connection::open(db)?;
-    conn.busy_timeout(std::time::Duration::from_millis(2000))?;
     let changed = conn.execute(
         "UPDATE threads SET model_provider = ?1 WHERE model_provider IS NOT NULL AND model_provider <> ?1",
         params![new_provider],
