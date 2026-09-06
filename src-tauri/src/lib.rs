@@ -156,10 +156,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
+            tray::show_main_window(app);
         }))
         .plugin(tauri_plugin_window_state::Builder::new().build())
         // Open URLs/files in the user's default handler. Used by the
@@ -177,11 +174,16 @@ pub fn run() {
         .setup(move |app| {
             // Autostart at login: start hidden in the tray instead of popping
             // a window over the user's session. Manual launches (no arg) show
-            // the window as usual.
+            // the window as usual. Plain deferred hide, NOT the minimize step
+            // of `tray::hide_main_window` (that exists to survive a prevented
+            // WM_CLOSE; here it would just flash a window at login).
             if std::env::args().any(|a| a == "--auto-launch") {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.hide();
-                }
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Some(win) = handle.get_webview_window("main") {
+                        let _ = win.hide();
+                    }
+                });
             }
 
             // Cache the live AppHandle so non-Tauri entry points (tray rebuild,
@@ -221,14 +223,14 @@ pub fn run() {
             // Close button hides to tray; Quit (tray menu) flips REALLY_QUIT
             // first so the same handler lets it through.
             if let Some(win) = app.get_webview_window("main") {
-                let win_clone = win.clone();
+                let handle = app.handle().clone();
                 win.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
                         if tray::really_quit() {
                             return;
                         }
                         api.prevent_close();
-                        let _ = win_clone.hide();
+                        tray::hide_main_window(&handle);
                     }
                 });
             }

@@ -88,12 +88,42 @@ pub fn install(app: &mut tauri::App) -> tauri::Result<TrayIcon<Wry>> {
     Ok(tray)
 }
 
-fn show_main_window(app: &AppHandle) {
+pub fn show_main_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
     }
+}
+
+/// Hide the main window into the tray, Windows-safe.
+///
+/// Close-to-tray used to leave an unclosable, click-through WHITE rectangle
+/// of the window stuck on the desktop — a DWM-level remnant with no owning
+/// HWND (Win11 26200; triggered by Windhawk's "Windows Animations" mod,
+/// so any DWM-hooking mod can reproduce it). Empirically established:
+///
+/// 1. Minimize FIRST, then hide. A plain `SW_HIDE` after the X-button's
+///    WM_CLOSE was prevented leaves the stuck frame (5/5 plain vs 0/5
+///    minimize-then-hide); the minimize animation gives DWM a proper
+///    transition before the window leaves the composition.
+/// 2. Run off the window-event dispatch (async hop): the synchronous
+///    in-handler hide is one of the ghosting shapes.
+/// 3. NEVER touch the webview's own visibility here — toggling the WebView2
+///    controller (`Webview::hide`) around the host hide also reproduced the
+///    remnant. Window-only hide leaves the controller alone and measures
+///    clean once rule 1 is in place.
+///
+/// The restore path (`show_main_window`) unminimizes to match.
+pub fn hide_main_window(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.minimize();
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let _ = win.hide();
+        }
+    });
 }
 
 /// Flip the OS autostart entry to the opposite of its current state — the
