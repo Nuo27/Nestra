@@ -55,7 +55,9 @@ fn anthropic_request_system_messages_tools_and_choice() {
     assert_eq!(out["max_output_tokens"], 32000);
     assert_eq!(out["temperature"], 0.7);
     assert_eq!(out["stream"], true);
-    assert_eq!(out["include"], serde_json::json!(["usage"]));
+    // `usage` is not a valid Responses `include` value (strict upstreams 400
+    // on it); usage always rides the response object itself.
+    assert!(out.get("include").is_none());
     assert!(out.get("stop_sequences").is_none(), "stop_sequences dropped");
     assert!(out.get("stop").is_none());
     assert!(out.get("max_tokens").is_none());
@@ -160,7 +162,7 @@ fn chat_request_converts_messages_tools_and_usage_flag() {
     let out = conv(chat_to_responses, &body);
     assert_eq!(out["instructions"], "sys");
     assert_eq!(out["max_output_tokens"], 64);
-    assert_eq!(out["include"], serde_json::json!(["usage"]));
+    assert!(out.get("include").is_none());
     assert!(out.get("stop").is_none());
     assert!(out.get("stream_options").is_none());
     assert_eq!(out["tool_choice"]["type"], "function");

@@ -101,11 +101,6 @@ pub fn anthropic_to_responses(body: &[u8]) -> Bytes {
             out.insert("input".into(), Value::Array(items));
         }
     }
-    // Streaming must ask for usage explicitly.
-    if out.get("stream").and_then(Value::as_bool) == Some(true) {
-        out.insert("include".into(), serde_json::json!(["usage"]));
-    }
-
     match serde_json::to_string(&Value::Object(out)) {
         Ok(s) => Bytes::from(s),
         Err(_) => Bytes::copy_from_slice(body),
@@ -422,9 +417,6 @@ pub fn chat_to_responses(body: &[u8]) -> Bytes {
         if let Some(v) = obj.remove(key) {
             out.insert(key.into(), v);
         }
-    }
-    if out.get("stream").and_then(Value::as_bool) == Some(true) {
-        out.insert("include".into(), serde_json::json!(["usage"]));
     }
 
     match serde_json::to_string(&Value::Object(out)) {
