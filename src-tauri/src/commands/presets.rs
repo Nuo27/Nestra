@@ -27,10 +27,43 @@ pub fn provider_presets() -> Vec<ProviderPreset> {
         ProviderPreset {
             id: "minimax".into(),
             display_name: "MiniMax".into(),
-            protocols: vec![ProtocolInfo {
-                protocol: "openai-comp".into(),
-                base_url: "https://api.minimax.io/v1".into(),
-            }],
+            // Dual rows, anthropic first. MiniMax's documented surface for
+            // coding tools (Claude Code, Codex, Cursor, OpenCode) is the
+            // Anthropic-compatible `.../anthropic` base; `/v1/models` on the
+            // OpenAI surface 401s coding keys (route exists — unknown paths
+            // 404, this is auth rejection — probe-verified), which made the
+            // openai-only preset fail key validation at create time. Claude
+            // Code binds the anthropic row natively (same shape as the
+            // zai/deepseek/moonshot presets). CN-platform keys belong to the
+            // `minimax-cn` preset — keys do not cross platforms.
+            protocols: vec![
+                ProtocolInfo {
+                    protocol: "anthropic".into(),
+                    base_url: "https://api.minimax.io/anthropic".into(),
+                },
+                ProtocolInfo {
+                    protocol: "openai-comp".into(),
+                    base_url: "https://api.minimax.io/v1".into(),
+                },
+            ],
+            default_model: None,
+            quota_query: Some(BuiltinKind::Minimax),
+        },
+        ProviderPreset {
+            // Same surfaces on the CN platform (platform.minimaxi.com) —
+            // keys do not cross platforms, so CN keys need CN hosts.
+            id: "minimax-cn".into(),
+            display_name: "MiniMax (China)".into(),
+            protocols: vec![
+                ProtocolInfo {
+                    protocol: "anthropic".into(),
+                    base_url: "https://api.minimaxi.com/anthropic".into(),
+                },
+                ProtocolInfo {
+                    protocol: "openai-comp".into(),
+                    base_url: "https://api.minimaxi.com/v1".into(),
+                },
+            ],
             default_model: None,
             quota_query: Some(BuiltinKind::Minimax),
         },

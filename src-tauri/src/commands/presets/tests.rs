@@ -22,6 +22,28 @@ fn provider_presets_sorted_alphabetically_with_custom_last() {
     assert_eq!(go.protocols[0].protocol, "openai-comp");
     assert_eq!(go.protocols[0].base_url, "https://opencode.ai/zen/go/v1");
     assert_eq!(go.default_model.as_deref(), Some("deepseek-v4-flash"));
+    // MiniMax: anthropic row FIRST — the OpenAI surface's `/v1/models`
+    // rejects coding keys, so validation must reach `/anthropic` first.
+    let minimax = presets
+        .iter()
+        .find(|p| p.id == "minimax")
+        .expect("minimax preset");
+    assert_eq!(minimax.protocols[0].protocol, "anthropic");
+    assert_eq!(
+        minimax.protocols[0].base_url,
+        "https://api.minimax.io/anthropic"
+    );
+    assert!(minimax.protocols.iter().any(|p| p.protocol == "openai-comp"));
+    // CN variant mirrors the intl rows on api.minimaxi.com.
+    let minimax_cn = presets
+        .iter()
+        .find(|p| p.id == "minimax-cn")
+        .expect("minimax-cn preset");
+    assert_eq!(minimax_cn.protocols[0].protocol, "anthropic");
+    assert_eq!(
+        minimax_cn.protocols[0].base_url,
+        "https://api.minimaxi.com/anthropic"
+    );
 }
 
 #[test]
