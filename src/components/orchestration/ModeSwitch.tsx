@@ -24,9 +24,11 @@ export function useAgentModeToggle(agentId: string, supported: boolean) {
     queryFn: () => agentGatewayEnabled(agentId),
     enabled: supported,
   });
-  // Gateway liveness — shared cache with the /gateway page. Routed is BLOCKED
-  // (disabled) while the service is down: enabling would rewrite the agent
-  // config to point at a non-listening port.
+  // Gateway liveness — shared cache with the /gateway page. The service is
+  // OFF by default, so switching an agent to Routed STARTS it on demand
+  // (the backend binds the loopback port before the agent's config is
+  // rewritten) — the segment is never dead-disabled, and the state is
+  // spelled out under the switch instead.
   const gwQ = useQuery({ queryKey: qk.gatewayStatus(), queryFn: gatewayGetStatus });
   const gatewayRunning = gwQ.data?.state === "running";
 
@@ -36,6 +38,9 @@ export function useAgentModeToggle(agentId: string, supported: boolean) {
       qc.invalidateQueries({ queryKey: ["orchestration", "gateway-flag", agentId] });
       qc.invalidateQueries({ queryKey: qk.agentConfig(agentId) });
       qc.invalidateQueries({ queryKey: ["orchestration", "tasks"] });
+      // Switching to Routed may have started the Gateway service — refresh
+      // its status so the hint under the switch clears.
+      qc.invalidateQueries({ queryKey: qk.gatewayStatus() });
       toast(
         next
           ? t("orchestration.modeRoutedToast")
@@ -53,12 +58,16 @@ export function useAgentModeToggle(agentId: string, supported: boolean) {
   const busy = enabledQ.isLoading || enabledQ.isFetching || toggleMut.isPending;
   // Effective mode: ROUTED requires both intent AND a running gateway.
   const blocked = routed && !gatewayRunning && !gwQ.isLoading;
+  // The service is off and the agent is not routed — routing it starts the
+  // service, so this is a note, not a blocker.
+  const serviceOff = !routed && !gatewayRunning && !gwQ.isLoading;
 
   return {
     routed,
     gatewayRunning,
     busy,
     blocked,
+    serviceOff,
     error: enabledQ.isError,
     toggle: toggleMut.mutate,
   };
@@ -84,7 +93,7 @@ export function ModeSwitch({
   supportsGateway: boolean;
 }) {
   const { t } = useTranslation();
-  const { routed, gatewayRunning, busy, blocked, error, toggle } =
+  const { routed, busy, blocked, serviceOff, error, toggle } =
     useAgentModeToggle(agentId, supportsGateway);
 
   if (!supportsGateway) return null;
@@ -112,17 +121,20 @@ export function ModeSwitch({
         }}
         items={[
           { value: "direct", label: t("orchestration.modeDirect"), disabled: busy },
-          {
-            value: "routed",
-            label: t("orchestration.modeRouted"),
-            disabled: busy || !gatewayRunning,
-          },
+          { value: "routed", label: t("orchestration.modeRouted"), disabled: busy },
         ]}
       />
       {blocked && (
         <Tip content={t("orchestration.modeBlockedHint")}>
           <span className="font-mono text-2xs text-warning">
             {t("orchestration.modeBlocked")}
+          </span>
+        </Tip>
+      )}
+      {serviceOff && (
+        <Tip content={t("orchestration.modeServiceOffHint")}>
+          <span className="font-mono text-2xs text-subtle">
+            {t("orchestration.modeServiceOff")}
           </span>
         </Tip>
       )}

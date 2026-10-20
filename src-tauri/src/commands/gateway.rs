@@ -2,9 +2,12 @@ use crate::error::{AppError, AppResult};
 use crate::config_writer::backup_path_for;
 use crate::db;
 use std::sync::Arc;
-use super::agents::do_switch_provider;
+use super::agents::{do_apply_provider_selection, do_switch_provider};
 use super::{run_blocking, snapshot_state, AppParts};
 use tauri::State;
+
+#[cfg(test)]
+mod tests;
 
 // ---- gateway: per-agent opt-in + status -----------------------------------
 //
@@ -43,27 +46,20 @@ pub async fn agent_set_gateway_enabled(
     agent_id: String,
     enabled: bool,
 ) -> AppResult<()> {
-    use crate::orchestration::gateway::control::GatewayRuntimeState;
-
-    // Fetch the live base URL + token BEFORE the blocking config write. Both
-    // come from the running gateway; if it isn't Running we refuse the enable
-    // (the flag is intent-only until the service is up).
+    // Fetch the live base URL + token BEFORE the blocking config write. The
+    // agent's config points at the loopback port, so the alias must never be
+    // written while nothing is bound — the service is started on demand
+    // instead of refusing the switch (see `ensure_gateway_running`).
     let (base_url, token) = if enabled {
-        let snap = state.gateway.snapshot().await;
-        if snap.state != GatewayRuntimeState::Running || snap.base_url.is_empty() {
-            return Err(AppError::Internal(
-                "gateway not running — enable the Gateway service first".into(),
-            ));
-        }
-        let token = state.gateway.token.read().await.clone();
-        (snap.base_url, token)
+        ensure_gateway_running(&state).await?
     } else {
         (String::new(), String::new())
     };
 
     let parts = snapshot_state(&state);
     let db = state.db.clone();
-    let _lock = state.switch_locks.lock_of(&agent_id).await;
+    let mutex = state.switch_locks.lock_of(&agent_id).await;
+    let _guard = mutex.lock().await;
     run_blocking(move || {
         let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
 
@@ -82,6 +78,44 @@ pub async fn agent_set_gateway_enabled(
         Ok(())
     })
     .await
+}
+
+/// Make sure the gateway service is listening, starting it when it isn't.
+/// The per-agent Routed intent points the agent's config at the loopback
+/// port, so a listener has to exist before the alias is written. Starting the
+/// service here is what makes the mode switch a single action — the service
+/// is OFF by default, and a toggle that refused to start it left the agent
+/// page with a dead "Routed" segment and no way forward. Returns the live
+/// base URL + the loopback token.
+async fn ensure_gateway_running(state: &State<'_, crate::AppState>) -> AppResult<(String, String)> {
+    use crate::orchestration::gateway::control::GatewayRuntimeState;
+    let snap = state.gateway.snapshot().await;
+    if snap.state == GatewayRuntimeState::Running && !snap.base_url.is_empty() {
+        let token = state.gateway.token.read().await.clone();
+        return Ok((snap.base_url, token));
+    }
+    // Persist the global intent so the service survives a restart and the
+    // Gateway page shows it ON — it is the same service this toggle needs.
+    {
+        let db = state.db.clone();
+        let key = crate::orchestration::gateway::control::ENABLED_KEY.to_string();
+        run_blocking(move || {
+            let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+            db::set_setting(&conn, &key, &serde_json::json!(true))
+        })
+        .await?;
+    }
+    let port = read_configured_port(state).await?;
+    let gw_state = build_gateway_state(state)?;
+    state.gateway.start(gw_state, port).await?;
+    let snap = state.gateway.snapshot().await;
+    if snap.state != GatewayRuntimeState::Running || snap.base_url.is_empty() {
+        return Err(AppError::Internal(
+            "gateway failed to start — see the Gateway page for the error".into(),
+        ));
+    }
+    let token = state.gateway.token.read().await.clone();
+    Ok((snap.base_url, token))
 }
 
 /// Write the stable gateway alias into the agent's config (`base_url` + the
@@ -220,13 +254,15 @@ pub(crate) async fn refresh_alias_if_routed(state: &State<'_, crate::AppState>, 
     let db = state.db.clone();
     let aid = agent_id.to_string();
     let base_url = snap.base_url;
-    let lock = state.switch_locks.lock_of(agent_id).await;
+    let mutex = state.switch_locks.lock_of(agent_id).await;
+    let guard = mutex.lock().await;
     let res = run_blocking(move || {
         let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
         write_gateway_alias_blocking(&conn, &aid, &base_url, &token)
     })
     .await;
-    drop(lock);
+    drop(guard);
+    drop(mutex);
     if let Err(e) = res {
         tracing::warn!("alias refresh failed for agent '{agent_id}': {e}");
     }
@@ -254,10 +290,48 @@ fn apply_direct_config_blocking(
         .into_iter()
         .find(|a| a.id == agent_id)
         .ok_or_else(|| AppError::NotFound(format!("agent '{agent_id}' not in DB")))?;
+    // Every provider the agent is bound to, with its stored protocol
+    // override — a multi-provider agent's config holds ALL of them, so
+    // restoring only the active one would silently drop the others from the
+    // file (the bindings themselves stay in the DB).
+    let bound: Vec<(String, Option<String>)> = db::list_bindings(&conn, agent_id)?
+        .iter()
+        .map(|b| {
+            let proto = db::binding_protocol(&conn, agent_id, &b.endpoint_id).unwrap_or(None);
+            (b.endpoint_id.clone(), proto)
+        })
+        .collect();
+    let multi = crate::agents::agent_spec(agent_id)
+        .map(|s| s.capability.supports_multiple_providers)
+        .unwrap_or(false);
     drop(conn);
     match agent.active_provider_id {
         Some(ep_id) => {
             let ep_id_log = ep_id.clone();
+            if multi && bound.len() > 1 {
+                // Re-apply the whole selection (the same write the provider
+                // picker does), so every bound provider lands in the config.
+                let selected: Vec<super::agents::ProviderSelection> = bound
+                    .iter()
+                    .map(|(p, proto)| super::agents::ProviderSelection {
+                        provider_id: p.clone(),
+                        protocol: proto.clone(),
+                    })
+                    .collect();
+                match do_apply_provider_selection(parts, agent_id.to_string(), selected, ep_id_log.clone())
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            "agent '{agent_id}' restored to direct-config ({} providers, default {ep_id_log})",
+                            bound.len()
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => tracing::warn!(
+                        "full binding restore failed for '{agent_id}' ({e}) — restoring the active provider only"
+                    ),
+                }
+            }
             // Re-run the single-slot switch to write the real upstream back.
             do_switch_provider(parts, agent_id.to_string(), ep_id)?;
             tracing::info!("agent '{agent_id}' restored to direct-config (endpoint {ep_id_log})");

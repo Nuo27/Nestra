@@ -719,6 +719,8 @@
     "migrations": "迁移（{{count}}）",
     "modeBlocked": "已阻断",
     "modeBlockedHint": "请在网关页面启用网关服务，然后再为此 agent 启用路由。",
+    "modeServiceOff": "网关服务未开启",
+    "modeServiceOffHint": "切换到 Routed 会自动启动网关服务。",
     "modeLoadFailed": "模式设置加载失败，请重试。",
     "gatewayStatusFailed": "网关状态不可用",
     "viewLogs": "在网关日志中查看此任务"

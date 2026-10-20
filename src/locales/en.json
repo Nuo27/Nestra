@@ -726,6 +726,8 @@
     "migrations": "migrations ({{count}})",
     "modeBlocked": "Blocked",
     "modeBlockedHint": "Enable the Gateway service on the Gateway page to route this agent.",
+    "modeServiceOff": "Gateway service off",
+    "modeServiceOffHint": "Switching to Routed starts the Gateway service.",
     "modeLoadFailed": "Mode setting failed to load — retry.",
     "gatewayStatusFailed": "Gateway status unavailable",
     "viewLogs": "View this task in the gateway log"

@@ -688,7 +688,7 @@ pub struct ProviderSelection {
     pub protocol: Option<String>,
 }
 
-fn do_apply_provider_selection(
+pub(crate) fn do_apply_provider_selection(
     parts: &AppParts,
     agent_id: String,
     selected: Vec<ProviderSelection>,
@@ -775,14 +775,17 @@ pub async fn agent_apply_provider_selection(
     selected: Vec<ProviderSelection>,
     default_provider_id: String,
 ) -> AppResult<()> {
-    let lock = state.switch_locks.lock_of(&agent_id).await;
+    let mutex = state.switch_locks.lock_of(&agent_id).await;
+    let guard = mutex.lock().await;
     let parts = snapshot_state(&state);
     let refresh_id = agent_id.clone();
-    run_blocking(move || do_apply_provider_selection(&parts, agent_id, selected, default_provider_id)).await?;
+    let res = run_blocking(move || do_apply_provider_selection(&parts, agent_id, selected, default_provider_id)).await;
     // Release before the refresh — it takes the same per-agent lock (the
     // mutex is not reentrant), and the alias it writes is derived from
     // CURRENT db state anyway, so an interleaved switch is never torn.
-    drop(lock);
+    drop(guard);
+    drop(mutex);
+    res?;
     // A binding change moves the router's candidate list (and with it the
     // steady-state model a routed alias advertises) — refresh it. In Direct
     // mode this is a no-op (the flag is off).
@@ -797,7 +800,8 @@ pub async fn agent_apply_provider_selection(
 /// config" radio row.
 #[tauri::command]
 pub async fn agent_clear_provider(state: State<'_, crate::AppState>, agent_id: String) -> AppResult<()> {
-    let _lock = state.switch_locks.lock_of(&agent_id).await;
+    let mutex = state.switch_locks.lock_of(&agent_id).await;
+    let _guard = mutex.lock().await;
     let parts = snapshot_state(&state);
     run_blocking(move || {
         let spec = crate::agents::agent_spec(&agent_id)
