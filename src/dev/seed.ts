@@ -286,7 +286,7 @@ function agents() {
     status_detail: null,
   };
   return [
-    { ...base, id: "pi-cli", kind: "cli", display_name: "Pi CLI", status: "ok", active_provider_id: "anthropic", capability: capability({ supports_mcp: false, supports_mcp_enabled: false }), supported_protocols: ["anthropic"], model_selection: "free_form", providers: [] },
+    { ...base, id: "pi-cli", kind: "cli", display_name: "Pi CLI", status: "ok", active_provider_id: "anthropic", capability: capability({ supports_mcp_enabled: true }), supported_protocols: ["anthropic"], model_selection: "free_form", providers: [] },
     { ...base, id: "zcode-desktop", kind: "desktop", display_name: "ZCode Desktop", status: "ok", active_provider_id: "zai-glm", capability: capability({ supports_mcp_enabled: true }), supported_protocols: ["anthropic", "openai"], model_selection: "free_form", providers: [] },
   ];
 }

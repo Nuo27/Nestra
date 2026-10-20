@@ -451,8 +451,9 @@ pub fn set_state(
         }
         AgentMcpState::Disabled => {
             // Only formats with a per-server `enabled` field can express
-            // "written but disabled". For everyone else (claude-code-cli, pi-cli) the
-            // flag would be silently DROPPED by to_native — the DB would say
+            // "written but disabled". For everyone else (claude-code-cli,
+            // codex-desktop) the flag would be silently DROPPED by to_native
+            // — the DB would say
             // disabled while the agent loads the server enabled. Degrade to
             // absent instead: the entry leaves the agent's file entirely.
             let supports = providers::for_agent(agent)
@@ -500,13 +501,10 @@ pub fn set_state(
 /// config).
 pub fn sync_agent(conn: &Connection, agent: &str) -> AppResult<()> {
     let Some(p) = providers::for_agent(agent) else {
-        // Unknown id OR a registry runtime gate that's closed (pi without
-        // the pi-mcp-adapter package). Skip rather than error: sync loops
-        // over DB-bound agents, and a stale binding on a gated agent must
-        // not fail another agent's toggle. Same semantics as
-        // `remove_server`. Direct `mcp_sync_agent` calls only ever target
-        // agents the UI listed as MCP-capable, so the gate is closed for
-        // those too — nothing to write.
+        // Unknown id (or an agent that doesn't support MCP). Skip rather
+        // than error: sync loops over DB-bound agents, and a stale binding
+        // must not fail another agent's toggle. Same semantics as
+        // `remove_server`.
         return Ok(());
     };
     let (enabled, disabled, remove): (Vec<McpServer>, Vec<McpServer>, Vec<String>) = {
@@ -857,8 +855,8 @@ pub fn sync_all(db: &std::sync::Arc<std::sync::Mutex<Connection>>) -> AppResult<
     // row (each pass would re-read the whole DB).
     for p in providers::all() {
         let agent = p.agent_id();
-        // Same runtime-gate semantics as `sync_agent`: a closed gate
-        // (pi without its adapter package) writes nothing.
+        // Same semantics as `sync_agent`: an agent without an MCP provider
+        // writes nothing.
         if providers::for_agent(agent).is_none() {
             continue;
         }

@@ -1,18 +1,5 @@
 use super::*;
 use crate::testutil::temp_home;
-use std::path::Path;
-
-/// Mark `pi-mcp-adapter` as installed inside a fake home (the npm-dir
-/// fallback of `adapter_installed_at`), so pi's `mcp_available` runtime
-/// gate passes. Tests that exercise pi's provider must arrange the
-/// precondition the gate checks — without it pi is silently gated out of
-/// the provider registry and its file never syncs.
-fn install_pi_adapter(home: &Path) {
-    std::fs::create_dir_all(
-        home.join(".pi").join("agent").join("npm").join("pi-mcp-adapter"),
-    )
-    .unwrap();
-}
 
 #[test]
 fn semantic_parses_command_variants() {
@@ -84,7 +71,6 @@ fn cross_cli_dedup_merges_into_one_row() {
     let _lock = crate::HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (home, _home_g) = temp_home();
     std::env::set_var("NESTRA_HOME_DIR", &home);
-    install_pi_adapter(&home);
 
     // claude: codegraph as stdio
     let claude = home.join(".claude.json");
@@ -133,7 +119,6 @@ fn kind_conflict_splits_into_two_rows() {
     let _lock = crate::HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (home, _home_g) = temp_home();
     std::env::set_var("NESTRA_HOME_DIR", &home);
-    install_pi_adapter(&home);
 
     let claude = home.join(".claude.json");
     std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
@@ -171,7 +156,6 @@ fn import_scan_aggregates_cross_cli() {
     let _lock = crate::HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (home, _home_g) = temp_home();
     std::env::set_var("NESTRA_HOME_DIR", &home);
-    install_pi_adapter(&home);
 
     let claude = home.join(".claude.json");
     std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
@@ -242,7 +226,6 @@ fn per_cli_env_override_merges_on_sync() {
     let _lock = crate::HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (home, _home_g) = temp_home();
     std::env::set_var("NESTRA_HOME_DIR", &home);
-    install_pi_adapter(&home);
 
     let claude = home.join(".claude.json");
     std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
@@ -507,6 +490,111 @@ fn set_state_cycles_tri_states_on_opencode() {
     assert!(s.enabled_agents.is_empty() && s.disabled_agents.is_empty());
     let text = std::fs::read_to_string(oc_dir.join("opencode.json")).unwrap();
     assert!(!text.contains("playwright"), "entry must be dropped, got: {text}");
+}
+
+/// Pi reads MCP servers natively: a server bound to pi lands in
+/// `~/.pi/agent/mcp.json` under `mcpServers`, and the tri-state works —
+/// "disabled" stays written with pi's native `enabled: false` flag.
+#[test]
+fn pi_syncs_into_mcp_json_with_native_enabled_flag() {
+    let _lock = crate::HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (home, _home_g) = temp_home();
+    std::env::set_var("NESTRA_HOME_DIR", &home);
+
+    let pi_dir = home.join(".pi").join("agent");
+    std::fs::create_dir_all(&pi_dir).unwrap();
+    let mcp_file = pi_dir.join("mcp.json");
+
+    let conn = Connection::open_in_memory().unwrap();
+    crate::db::migrate(&conn).unwrap();
+
+    let srv = McpServer {
+        id: "filesystem".into(),
+        name: "filesystem".into(),
+        transport: McpTransport {
+            kind: McpKind::Stdio,
+            command: Some("npx".into()),
+            args: vec!["-y".into(), "@modelcontextprotocol/server-filesystem".into()],
+            env: BTreeMap::new(),
+            url: None,
+        },
+        enabled_agents: vec!["pi-cli".into()],
+        disabled_agents: vec![],
+        managed: true,
+        env_overrides: BTreeMap::new(),
+    };
+    save(&conn, &srv).unwrap();
+
+    let text = std::fs::read_to_string(&mcp_file).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    // The command itself is wrapped on Windows (`cmd /d /c npx …`), so
+    // assert on the shape both platforms share: the args and the flag.
+    let args: Vec<String> = serde_json::from_value(v["mcpServers"]["filesystem"]["args"].clone())
+        .unwrap();
+    assert!(
+        args.contains(&"@modelcontextprotocol/server-filesystem".to_string()),
+        "args, got: {args:?}"
+    );
+    assert_eq!(v["mcpServers"]["filesystem"]["enabled"], serde_json::json!(true));
+
+    // Disabled → the entry stays written with the native flag off.
+    let s = set_state(&conn, "filesystem", "pi-cli", AgentMcpState::Disabled).unwrap();
+    assert!(s.enabled_agents.is_empty());
+    assert_eq!(s.disabled_agents, vec!["pi-cli"]);
+    let text = std::fs::read_to_string(&mcp_file).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["mcpServers"]["filesystem"]["enabled"], serde_json::json!(false));
+
+    // Absent → the entry leaves pi's file entirely.
+    set_state(&conn, "filesystem", "pi-cli", AgentMcpState::Absent).unwrap();
+    let text = std::fs::read_to_string(&mcp_file).unwrap();
+    assert!(!text.contains("filesystem"), "entry must be dropped, got: {text}");
+}
+
+/// A server whose name is not a legal pi server name ("My Server") is
+/// written under a legal key ("My-Server") — pi skips entries with illegal
+/// names, so the unsanitized name would leave the server dead in pi.
+#[test]
+fn pi_writes_servers_under_legal_keys() {
+    let _lock = crate::HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (home, _home_g) = temp_home();
+    std::env::set_var("NESTRA_HOME_DIR", &home);
+
+    let pi_dir = home.join(".pi").join("agent");
+    std::fs::create_dir_all(&pi_dir).unwrap();
+    let mcp_file = pi_dir.join("mcp.json");
+
+    let conn = Connection::open_in_memory().unwrap();
+    crate::db::migrate(&conn).unwrap();
+
+    let srv = McpServer {
+        id: "my-server".into(),
+        name: "My Server".into(),
+        transport: McpTransport {
+            kind: McpKind::Stdio,
+            command: Some("npx".into()),
+            args: vec![],
+            env: BTreeMap::new(),
+            url: None,
+        },
+        enabled_agents: vec!["pi-cli".into()],
+        disabled_agents: vec![],
+        managed: true,
+        env_overrides: BTreeMap::new(),
+    };
+    save(&conn, &srv).unwrap();
+
+    let text = std::fs::read_to_string(&mcp_file).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let servers = v["mcpServers"].as_object().unwrap();
+    assert_eq!(servers.len(), 1, "one entry, got: {servers:?}");
+    assert!(servers.contains_key("My-Server"), "got: {servers:?}");
+
+    // Removing the server takes the legal key with it.
+    delete(&conn, "my-server").unwrap();
+    let text = std::fs::read_to_string(&mcp_file).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(v["mcpServers"].as_object().unwrap().is_empty(), "got: {v}");
 }
 
 /// A server enabled on claude and written-but-disabled on opencode syncs
