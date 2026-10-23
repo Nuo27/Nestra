@@ -6,6 +6,19 @@ use std::fs;
 use std::path::PathBuf;
 
 const FIXTURE: &str = include_str!("../../../fixtures/zcode/config.json");
+const STORE_FIXTURE: &str = include_str!("../../../fixtures/zcode/provider_config.json");
+
+/// Config dir with the legacy `config.json` and the runtime store.
+fn tmp_with_store() -> (PathBuf, tempfile::TempDir) {
+    let (dir, guard) = tmp();
+    fs::write(dir.join("config.json"), FIXTURE).unwrap();
+    fs::write(dir.join("provider_config.json"), STORE_FIXTURE).unwrap();
+    (dir, guard)
+}
+
+fn read_store(dir: &Path) -> serde_json::Value {
+    serde_json::from_str(&fs::read_to_string(dir.join("provider_config.json")).unwrap()).unwrap()
+}
 
 fn tmp() -> (PathBuf, tempfile::TempDir) {
     let dir = tempfile::Builder::new()
@@ -235,4 +248,121 @@ fn inspect_lists_unmanaged_and_remove_deletes() {
     let written: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&cfg).unwrap()).unwrap();
     assert!(written["provider"]["nestra-zai"].is_object());
+}
+// ---- runtime store (provider_config.json) ---------------------------------
+
+#[test]
+fn gateway_write_refreshes_the_stale_credential_in_the_store() {
+    // ZCode sends the credential from its runtime store, not from
+    // config.json — a stale key there is what made the gateway answer 401.
+    let (dir, _dir_g) = tmp_with_store();
+    let cfg = dir.join("config.json");
+    ZCode
+        .apply_gateway_set(
+            &cfg,
+            &GatewayAlias::simple(
+                "http://127.0.0.1:18777/zcode-desktop",
+                "nestra",
+                "gw-token",
+            ),
+        )
+        .unwrap();
+
+    let store = read_store(&dir);
+    let rule = store["config"]["providerConfigRules"]["providerRules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["providerId"] == "nestra-gateway")
+        .unwrap();
+    assert_eq!(rule["config"]["access"]["apiKey"], "gw-token");
+    assert_eq!(rule["config"]["access"]["type"], "api-key");
+    assert_eq!(rule["config"]["api"]["type"], "anthropic-messages");
+    assert_eq!(
+        rule["config"]["api"]["baseUrl"],
+        "http://127.0.0.1:18777/zcode-desktop"
+    );
+    assert_eq!(rule["config"]["personalModelIds"][0], "nestra");
+}
+
+#[test]
+fn store_write_keeps_other_providers_untouched() {
+    let (dir, _dir_g) = tmp_with_store();
+    ZCode
+        .apply_gateway_set(
+            &dir.join("config.json"),
+            &GatewayAlias::simple("http://127.0.0.1:18777/zcode-desktop", "nestra", "gw-token"),
+        )
+        .unwrap();
+
+    let store = read_store(&dir);
+    let other = store["config"]["providerConfigRules"]["providerRules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["providerId"] == "c02191d1-3450-40f8-bfc4-dc9c2c4e84e0")
+        .unwrap();
+    assert_eq!(other["config"]["access"]["apiKey"], "sk-user-opencode");
+}
+
+#[test]
+fn direct_write_creates_the_store_rule_when_missing() {
+    let (dir, _dir_g) = tmp_with_store();
+    ZCode.apply(&dir.join("config.json"), &ctx()).unwrap();
+
+    let store = read_store(&dir);
+    let rules = store["config"]["providerConfigRules"]["providerRules"]
+        .as_array()
+        .unwrap();
+    let rule = rules
+        .iter()
+        .find(|r| r["providerId"] == "nestra-zai")
+        .expect("rule created");
+    assert_eq!(rule["config"]["access"]["apiKey"], "sk-test");
+    assert_eq!(rule["config"]["api"]["type"], "anthropic-messages");
+    assert_eq!(rule["config"]["api"]["baseUrl"], "https://api.z.ai/api/anthropic");
+}
+
+#[test]
+fn store_model_rule_carries_the_advertised_context_window() {
+    let (dir, _dir_g) = tmp_with_store();
+    let mut c = ctx();
+    let mut m = HashMap::new();
+    m.insert(
+        "GLM-5.3".into(),
+        ModelAbilities {
+            reasoning: None,
+            tool_call: None,
+            attachment: None,
+            temperature: None,
+            api: None,
+            cost: None,
+            limit: Some(ModelLimit { context: 1_000_000, output: 128_000, input: None }),
+            modalities: None,
+        },
+    );
+    c.model_abilities = m;
+    ZCode.apply(&dir.join("config.json"), &c).unwrap();
+
+    let store = read_store(&dir);
+    let rules = store["config"]["providerConfigRules"]["modelConfigRules"]
+        ["providerModelRules"]
+        .as_array()
+        .unwrap();
+    let rule = rules
+        .iter()
+        .find(|r| r["providerId"] == "nestra-zai" && r["modelId"] == "GLM-5.3")
+        .expect("model rule");
+    assert_eq!(rule["config"]["properties"]["contextWindow"], 1_000_000);
+}
+
+#[test]
+fn store_is_not_created_when_absent() {
+    // ZCode imports config.json itself while the store is missing — creating
+    // it here would suppress that import.
+    let (dir, _dir_g) = tmp();
+    let cfg = dir.join("config.json");
+    fs::write(&cfg, FIXTURE).unwrap();
+    ZCode.apply(&cfg, &ctx()).unwrap();
+    assert!(!dir.join("provider_config.json").exists());
 }

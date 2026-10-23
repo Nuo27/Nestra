@@ -10,6 +10,14 @@
 //! both documented at zcode.z.ai/en/docs/configuration. Selecting the provider
 //! happens in ZCode's Model Providers UI — Nestra writes the entry, it does
 //! not touch ZCode's selection keys in `setting.json`.
+//!
+//! `config.json` is NOT the file the agent authenticates with: ZCode imports
+//! that map into its runtime store (`provider_config.json`) and only while
+//! that store is MISSING — afterwards it polls the store every second and
+//! sends the credential stored there. Nestra therefore mirrors its provider
+//! rule into the store on every write (see [`sync_runtime_store`]); a key
+//! that only lives in `config.json` never reaches a running ZCode and the
+//! gateway answers 401.
 
 use crate::agents::internal;
 use crate::config_writer::{
@@ -21,6 +29,15 @@ use std::path::Path;
 
 /// Prefix of the provider-map keys Nestra owns. Replaced wholesale on switch.
 const MANAGED_PREFIX: &str = "nestra-";
+
+/// ZCode's runtime provider store — `~/.zcode/v2/provider_config.json`.
+/// Holds the credential the agent actually sends (see module docs).
+const STORE_FILENAME: &str = "provider_config.json";
+
+/// Conservative limits advertised when the real model's abilities are unknown:
+/// a wrong low limit only clamps ZCode's context planning.
+const DEFAULT_CONTEXT: u64 = 200_000;
+const DEFAULT_OUTPUT: u64 = 128_000;
 
 pub struct ZCode;
 
@@ -80,16 +97,27 @@ impl ConfigAdapter for ZCode {
                 )
             }
         };
-        provider.insert(key, provider_entry(
+        let slots = model_slots(&ctx.models, &ctx.model_abilities);
+        provider.insert(key.clone(), provider_entry(
             &ctx.display_name,
             zcode_kind,
             &base,
             &ctx.api_key,
-            &ctx.models,
-            &ctx.model_abilities,
+            &slots,
         ));
 
         write(config_path, &root)?;
+        sync_runtime_store(
+            config_path,
+            &StoreRule {
+                provider_id: &key,
+                provider_name: &entry_name(&ctx.display_name),
+                api_type: store_api_type(zcode_kind),
+                base_url: &base,
+                api_key: &ctx.api_key,
+                models: &slots,
+            },
+        )?;
         Ok(backup_created)
     }
 
@@ -151,8 +179,10 @@ impl ConfigAdapter for ZCode {
         if let Some(a) = &alias.model_alias.abilities {
             abilities.insert(alias.model_alias.id.clone(), a.clone());
         }
+        let slots = model_slots(&models, &abilities);
+        let key = format!("{MANAGED_PREFIX}gateway");
         provider.insert(
-            format!("{MANAGED_PREFIX}gateway"),
+            key.clone(),
             provider_entry(
                 "Nestra Gateway",
                 // The gateway's inbound wire for zcode is always Anthropic
@@ -161,14 +191,224 @@ impl ConfigAdapter for ZCode {
                 "anthropic",
                 &alias.gateway_base_url,
                 &alias.sentinel_key,
-                &models,
-                &abilities,
+                &slots,
             ),
         );
 
         write(config_path, &root)?;
+        sync_runtime_store(
+            config_path,
+            &StoreRule {
+                provider_id: &key,
+                provider_name: &entry_name("Nestra Gateway"),
+                api_type: "anthropic-messages",
+                base_url: &alias.gateway_base_url,
+                api_key: &alias.sentinel_key,
+                models: &slots,
+            },
+        )?;
         Ok(backup_created)
     }
+}
+
+/// One model slot: the id ZCode knows plus the limits advertised to it.
+struct ModelSlot {
+    id: String,
+    context: u64,
+    output: u64,
+}
+
+/// Model slots + their advertised limits, shared by the `config.json` entry
+/// and the runtime-store rule so both advertise the same window.
+fn model_slots(
+    models: &ModelsConfig,
+    abilities: &std::collections::HashMap<String, crate::model_abilities::ModelAbilities>,
+) -> Vec<ModelSlot> {
+    models
+        .ids()
+        .into_iter()
+        .map(|id| {
+            let limit = abilities.get(&id).and_then(|a| a.limit.as_ref());
+            ModelSlot {
+                id,
+                context: limit.map(|l| l.context).unwrap_or(DEFAULT_CONTEXT),
+                output: limit.map(|l| l.output).unwrap_or(DEFAULT_OUTPUT),
+            }
+        })
+        .collect()
+}
+
+/// The provider name ZCode shows — identical in `config.json` and the store.
+fn entry_name(display_name: &str) -> String {
+    format!("{display_name} (via Nestra)")
+}
+
+/// ZCode's runtime API type for a `config.json` provider kind.
+fn store_api_type(zcode_kind: &str) -> &'static str {
+    if zcode_kind == "anthropic" {
+        "anthropic-messages"
+    } else {
+        "openai-chat-completions"
+    }
+}
+
+/// One Nestra-managed provider rule for ZCode's runtime store.
+struct StoreRule<'a> {
+    /// Rule id — the same key the provider gets in `config.json`.
+    provider_id: &'a str,
+    /// Display name shown in ZCode's provider list.
+    provider_name: &'a str,
+    /// `anthropic-messages` | `openai-chat-completions`.
+    api_type: &'a str,
+    /// Base URL (ZCode appends its own version tail).
+    base_url: &'a str,
+    /// The credential the agent sends: the gateway's loopback token in Routed
+    /// mode, the real provider key in Direct mode.
+    api_key: &'a str,
+    /// Model slots advertised to the agent.
+    models: &'a [ModelSlot],
+}
+
+/// Mirror one Nestra-managed provider into ZCode's runtime store
+/// (`provider_config.json`).
+///
+/// ZCode imports the `provider` map of `config.json` ONLY while the store
+/// file is missing; afterwards the store is the credential source and is
+/// polled every second. So the rule is CREATED when missing (otherwise the
+/// provider never shows up in a ZCode that already ran) and its key + endpoint
+/// are refreshed when present (otherwise a rotated loopback token keeps
+/// failing with a 401). Every other provider in the store is left untouched.
+fn sync_runtime_store(config_path: &Path, rule: &StoreRule) -> AppResult<()> {
+    let store_path = config_path
+        .parent()
+        .ok_or_else(|| AppError::Internal("zcode config path has no parent".into()))?
+        .join(STORE_FILENAME);
+    if !store_path.exists() {
+        // ZCode creates the store on first start and imports `config.json`
+        // while it is missing — creating it here would suppress that import.
+        return Ok(());
+    }
+    let mut root = match read_json_object(&store_path) {
+        Ok(root) => root,
+        Err(e) => {
+            // ZCode owns this file; a broken store is its problem to recover
+            // (it rewrites the file from the builtin providers). Warn and
+            // keep the switch working.
+            tracing::warn!(path = %store_path.display(), error = %e, "zcode provider store unreadable — credential not mirrored");
+            return Ok(());
+        }
+    };
+
+    let ids: Vec<String> = rule.models.iter().map(|m| m.id.clone()).collect();
+    {
+        let config = member_obj(&mut root, "config");
+        let rules = member_obj(config, "providerConfigRules");
+        let provider_rules = member_arr(rules, "providerRules");
+        let entry = match provider_rules
+            .iter()
+            .position(|r| r.get("providerId").and_then(|v| v.as_str()) == Some(rule.provider_id))
+        {
+            Some(i) => &mut provider_rules[i],
+            None => {
+                provider_rules.push(serde_json::json!({}));
+                provider_rules.last_mut().expect("just pushed")
+            }
+        };
+        let entry = as_obj_mut(entry);
+        entry.insert("providerId".into(), serde_json::json!(rule.provider_id));
+        entry.insert("providerName".into(), serde_json::json!(rule.provider_name));
+        entry.insert("enabled".into(), serde_json::json!(true));
+        let cfg = entry
+            .entry("config".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        let cfg = as_obj_mut(cfg);
+        cfg.insert("group".into(), serde_json::json!("standard-personal"));
+        let access = cfg
+            .entry("access".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        let access = as_obj_mut(access);
+        access.insert("type".into(), serde_json::json!("api-key"));
+        access.insert("apiKey".into(), serde_json::json!(rule.api_key));
+        let api = cfg
+            .entry("api".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        let api = as_obj_mut(api);
+        api.insert("type".into(), serde_json::json!(rule.api_type));
+        api.insert("baseUrl".into(), serde_json::json!(rule.base_url));
+        cfg.insert("personalModelIds".into(), serde_json::json!(ids));
+        cfg.insert("modelOrder".into(), serde_json::json!(ids));
+    }
+    {
+        // Per-model context window — ZCode plans its context against this.
+        let config = member_obj(&mut root, "config");
+        let rules = member_obj(config, "providerConfigRules");
+        let model_rules = member_obj(rules, "modelConfigRules");
+        let entries = member_arr(model_rules, "providerModelRules");
+        for slot in rule.models {
+            let idx = entries.iter().position(|r| {
+                r.get("providerId").and_then(|v| v.as_str()) == Some(rule.provider_id)
+                    && r.get("modelId").and_then(|v| v.as_str()) == Some(slot.id.as_str())
+            });
+            let entry = match idx {
+                Some(i) => &mut entries[i],
+                None => {
+                    entries.push(serde_json::json!({
+                        "modelId": slot.id,
+                        "providerId": rule.provider_id,
+                    }));
+                    entries.last_mut().expect("just pushed")
+                }
+            };
+            let entry = as_obj_mut(entry);
+            let props = entry
+                .entry("config".to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            let props = as_obj_mut(props);
+            let properties = props
+                .entry("properties".to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            let properties = as_obj_mut(properties);
+            properties.insert("contextWindow".into(), serde_json::json!(slot.context));
+        }
+    }
+
+    let bytes = serde_json::to_vec_pretty(&root)?;
+    atomic_write(&store_path, &bytes)
+}
+
+/// Object member of `root` at `key`, created when missing.
+fn member_obj<'a>(
+    root: &'a mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> &'a mut serde_json::Map<String, serde_json::Value> {
+    let slot = root
+        .entry(key.to_string())
+        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+    as_obj_mut(slot)
+}
+
+/// Array member of `root` at `key`, created when missing.
+fn member_arr<'a>(
+    root: &'a mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> &'a mut Vec<serde_json::Value> {
+    let slot = root
+        .entry(key.to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if !slot.is_array() {
+        *slot = serde_json::Value::Array(Vec::new());
+    }
+    slot.as_array_mut().expect("array")
+}
+
+/// View `value` as an object, replacing a non-object payload.
+fn as_obj_mut(
+    value: &mut serde_json::Value,
+) -> &mut serde_json::Map<String, serde_json::Value> {
+    if !value.is_object() {
+        *value = serde_json::Value::Object(Default::default());
+    }
+    value.as_object_mut().expect("object")
 }
 
 /// Drop every `nestra-*` key from the provider map (a switch replaces the
@@ -177,34 +417,27 @@ fn remove_managed(provider: &mut serde_json::Map<String, serde_json::Value>) {
     provider.retain(|k, _| !k.starts_with(MANAGED_PREFIX));
 }
 
-/// Build one ZCode provider entry. `models` become the entry's models map with
-/// context/output limits from models.dev when known (conservative 200k/128k
-/// fallback — a wrong low limit only clamps ZCode's context planning, an
-/// inflated one would break requests).
+/// Build one ZCode provider entry. `slots` become the entry's models map with
+/// the context/output limits advertised to the agent (see [`model_slots`]).
 fn provider_entry(
     display_name: &str,
     kind: &str,
     base_url: &str,
     api_key: &str,
-    models: &ModelsConfig,
-    abilities: &std::collections::HashMap<String, crate::model_abilities::ModelAbilities>,
+    slots: &[ModelSlot],
 ) -> serde_json::Value {
     let mut models_map = serde_json::Map::new();
-    for id in models.ids() {
-        let (context, output) = match abilities.get(&id).and_then(|a| a.limit.as_ref()) {
-            Some(l) => (l.context, l.output),
-            None => (200_000, 128_000),
-        };
+    for slot in slots {
         models_map.insert(
-            id,
+            slot.id.clone(),
             serde_json::json!({
-                "limit": { "context": context, "output": output },
+                "limit": { "context": slot.context, "output": slot.output },
                 "modalities": { "input": ["text"], "output": ["text"] },
             }),
         );
     }
     serde_json::json!({
-        "name": format!("{display_name} (via Nestra)"),
+        "name": entry_name(display_name),
         "kind": kind,
         "options": { "baseURL": base_url, "apiKey": api_key },
         "enabled": true,

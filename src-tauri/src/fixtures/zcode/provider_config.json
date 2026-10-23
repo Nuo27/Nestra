@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "config": {
+    "providerConfigRules": {
+      "providerRules": [
+        {
+          "providerId": "nestra-gateway",
+          "providerName": "Nestra Gateway (via Nestra)",
+          "enabled": true,
+          "config": {
+            "group": "standard-personal",
+            "access": {
+              "type": "api-key",
+              "apiKey": "stale-token"
+            },
+            "api": {
+              "type": "anthropic-messages",
+              "baseUrl": "http://127.0.0.1:18777/zcode-desktop"
+            },
+            "personalModelIds": [
+              "nestra"
+            ],
+            "modelOrder": [
+              "nestra"
+            ]
+          }
+        },
+        {
+          "providerId": "c02191d1-3450-40f8-bfc4-dc9c2c4e84e0",
+          "providerName": "opencode go",
+          "config": {
+            "group": "standard-personal",
+            "access": {
+              "type": "api-key",
+              "apiKey": "sk-user-opencode"
+            },
+            "api": {
+              "type": "openai-chat-completions",
+              "baseUrl": "https://opencode.ai/zen/go/v1"
+            },
+            "personalModelIds": [
+              "deepseek-v4-flash"
+            ],
+            "modelOrder": [
+              "deepseek-v4-flash"
+            ]
+          }
+        }
+      ],
+      "modelConfigRules": {
+        "providerModelRules": [
+          {
+            "modelId": "nestra",
+            "providerId": "nestra-gateway",
+            "config": {
+              "properties": {
+                "contextWindow": 200000
+              }
+            }
+          }
+        ],
+        "manualProviderModelRules": []
+      }
+    }
+  }
+}
