@@ -345,8 +345,7 @@ fn store_model_rule_carries_the_advertised_context_window() {
     ZCode.apply(&dir.join("config.json"), &c).unwrap();
 
     let store = read_store(&dir);
-    let rules = store["config"]["providerConfigRules"]["modelConfigRules"]
-        ["providerModelRules"]
+    let rules = store["config"]["modelConfigRules"]["providerModelRules"]
         .as_array()
         .unwrap();
     let rule = rules
@@ -354,6 +353,60 @@ fn store_model_rule_carries_the_advertised_context_window() {
         .find(|r| r["providerId"] == "nestra-zai" && r["modelId"] == "GLM-5.3")
         .expect("model rule");
     assert_eq!(rule["config"]["properties"]["contextWindow"], 1_000_000);
+}
+
+#[test]
+fn store_write_migrates_legacy_nested_model_rules() {
+    // Current ZCode parses `providerConfigRules` strictly — the legacy
+    // nested `modelConfigRules` voids the whole personal provider config.
+    // A sync must move it to `config.modelConfigRules` (keeping foreign
+    // rules) and remove the nested key.
+    let (dir, _dir_g) = tmp();
+    fs::write(dir.join("config.json"), FIXTURE).unwrap();
+    fs::write(
+        dir.join("provider_config.json"),
+        r#"{
+          "schemaVersion": 1,
+          "config": {
+            "providerConfigRules": {
+              "providerRules": [],
+              "modelConfigRules": {
+                "providerModelRules": [
+                  {
+                    "modelId": "deepseek-v4-flash",
+                    "providerId": "c02191d1-3450-40f8-bfc4-dc9c2c4e84e0",
+                    "config": { "properties": { "contextWindow": 1000000 } }
+                  }
+                ],
+                "manualProviderModelRules": []
+              }
+            }
+          }
+        }"#,
+    )
+    .unwrap();
+
+    ZCode.apply(&dir.join("config.json"), &ctx()).unwrap();
+
+    let store = read_store(&dir);
+    let provider_rules = store["config"]["providerConfigRules"].as_object().unwrap();
+    assert!(
+        !provider_rules.contains_key("modelConfigRules"),
+        "legacy nested key must be removed"
+    );
+    let model_rules = store["config"]["modelConfigRules"].as_object().unwrap();
+    assert!(model_rules["manualProviderModelRules"].is_array());
+    let rules = model_rules["providerModelRules"].as_array().unwrap();
+    assert!(
+        rules.iter().any(|r| r["modelId"] == "deepseek-v4-flash"),
+        "foreign legacy rule migrated"
+    );
+    assert!(
+        rules
+            .iter()
+            .any(|r| r["providerId"] == "nestra-zai" && r["modelId"] == "GLM-5.3"),
+        "own rule written at the config-level location"
+    );
 }
 
 #[test]

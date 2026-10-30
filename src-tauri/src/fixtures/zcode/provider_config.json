@@ -46,21 +46,21 @@
             ]
           }
         }
-      ],
-      "modelConfigRules": {
-        "providerModelRules": [
-          {
-            "modelId": "nestra",
-            "providerId": "nestra-gateway",
-            "config": {
-              "properties": {
-                "contextWindow": 200000
-              }
+      ]
+    },
+    "modelConfigRules": {
+      "providerModelRules": [
+        {
+          "modelId": "nestra",
+          "providerId": "nestra-gateway",
+          "config": {
+            "properties": {
+              "contextWindow": 200000
             }
           }
-        ],
-        "manualProviderModelRules": []
-      }
+        }
+      ],
+      "manualProviderModelRules": []
     }
   }
 }

@@ -339,10 +339,40 @@ fn sync_runtime_store(config_path: &Path, rule: &StoreRule) -> AppResult<()> {
         cfg.insert("modelOrder".into(), serde_json::json!(ids));
     }
     {
+        // Current ZCode parses the personal config strictly: model rules
+        // live at `config.modelConfigRules` (BOTH arrays required) and any
+        // other key inside `providerConfigRules` voids the WHOLE personal
+        // provider config. Migrate a legacy nested copy away so an older
+        // Nestra write cannot poison the file.
+        let config = member_obj(&mut root, "config");
+        let provider_rules = member_obj(config, "providerConfigRules");
+        if let Some(serde_json::Value::Object(legacy)) = provider_rules.remove("modelConfigRules") {
+            let model_rules = member_obj(config, "modelConfigRules");
+            for key in ["providerModelRules", "manualProviderModelRules"] {
+                let src = legacy
+                    .get(key)
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let dst = member_arr(model_rules, key);
+                for entry in src {
+                    let dup = dst.iter().any(|r| {
+                        r.get("providerId") == entry.get("providerId")
+                            && r.get("modelId") == entry.get("modelId")
+                    });
+                    if !dup {
+                        dst.push(entry);
+                    }
+                }
+            }
+        }
+    }
+    {
         // Per-model context window — ZCode plans its context against this.
         let config = member_obj(&mut root, "config");
-        let rules = member_obj(config, "providerConfigRules");
-        let model_rules = member_obj(rules, "modelConfigRules");
+        let model_rules = member_obj(config, "modelConfigRules");
+        // The schema requires the manual array even when empty.
+        member_arr(model_rules, "manualProviderModelRules");
         let entries = member_arr(model_rules, "providerModelRules");
         for slot in rule.models {
             let idx = entries.iter().position(|r| {
